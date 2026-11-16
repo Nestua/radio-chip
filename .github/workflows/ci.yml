@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verilator >= 5.050
+        # Ubuntu 24.04 ships 5.020; build the pinned release so CI matches the floor in CLAUDE.md.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git help2man perl python3 make autoconf g++ flex bison ccache \
+            libfl2 libfl-dev zlib1g zlib1g-dev
+          git clone --depth 1 --branch v5.050 https://github.com/verilator/verilator.git /tmp/verilator
+          cd /tmp/verilator && autoconf && ./configure && make -j"$(nproc)" && sudo make install
+          verilator --version
+
+      - name: Pre-PR gate (same script as local)
+        run: scripts/check.sh

@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+# Members are listed explicitly (not `crates/*`) so scratch dirs under crates/ never break the build.
+members = [
+    "crates/radio-phy",
+    "crates/radio-tools",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.89"
+version = "0.0.1"
+license = "Apache-2.0"
+authors = ["Nestua radio contributors"]
+publish = false
+
+[workspace.dependencies]
+# Add shared dependencies here and inherit them with `foo.workspace = true`.
+# Every new dependency needs a one-line justification in its PR (see CLAUDE.md).
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
