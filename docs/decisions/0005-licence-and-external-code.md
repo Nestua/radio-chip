@@ -7,7 +7,8 @@ Status: accepted (licence choice provisional) · 2026-11-16
 - The repository is licensed under **Apache-2.0** for now: permissive, with an explicit patent grant
   from contributors (the same choice as aleph's hardware). CERN-OHL v2 (permissive or weakly
   reciprocal) is the alternative for the hardware parts; the final choice is made with a lawyer
-  before the repository is made public.
+  early in R0 (the repository is public from day one, so a change of licence must happen before
+  outside contributions arrive).
 - **No GPL/AGPL code enters the repository.** openwifi (AGPLv3), gr-ieee802-11 (GPLv3), Linux
   wireless drivers and similar projects may be read for understanding and run as black boxes to
   produce reference vectors. Their code is never copied, translated or paraphrased line by line.

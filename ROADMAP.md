@@ -28,4 +28,4 @@ an investor or a grant reviewer. Durations are estimates; stages overlap.
 
 R0–R1 €20–50k, R2 €10–30k, R3 €40–90k, R4 €100–250k, R5 test chips €20–200k. Serial masks and the
 full RF SoC need external funding (€1M+); we go for it after R3 and a working R5 test chip.
-Strategy, patents and funding are discussed in the team strategy doc (internal).
+Strategy, patents and funding are summarised in ADRs 0001, 0002 and 0005.
