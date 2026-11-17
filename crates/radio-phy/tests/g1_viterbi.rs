@@ -17,7 +17,7 @@ use radio_phy::channel::Rng;
 use radio_phy::convolutional::{encode, CodeRate, ConvolutionalEncoder};
 use radio_phy::ppdu::{data_bits, Rate};
 use radio_phy::scrambler::Scrambler;
-use radio_phy::viterbi::{decode, depuncture, Termination};
+use radio_phy::viterbi::{decode, decode_windowed, depuncture, metric_spread, Termination};
 
 const COMMPY: &str = include_str!("fixtures/viterbi_ber_commpy.txt");
 const FRAMES: &str = include_str!("fixtures/ppdu_decode_openofdm.txt");
@@ -319,4 +319,53 @@ fn ties_resolve_as_specified() {
             assert_eq!(got, vec![0u8; 36], "{rate:?} {term:?}");
         }
     }
+}
+
+#[test]
+fn windowed_traceback_equals_full_when_the_window_covers_the_block() {
+    let mut r = Rng::new(24);
+    for rate in [CodeRate::R1_2, CodeRate::R2_3, CodeRate::R3_4] {
+        for _ in 0..50 {
+            let mut bits: Vec<u8> = (0..294).map(|_| (r.next_u64() & 1) as u8).collect();
+            bits.extend([0; 6]);
+            let rx: Vec<i32> = encode(&bits, rate)
+                .unwrap()
+                .iter()
+                .map(|&c| {
+                    ((if c == 0 { 1.0 } else { -1.0 } + 0.8 * r.gaussian()) * 8.0).round() as i32
+                })
+                .collect();
+            for term in [
+                Termination::Free,
+                Termination::ZeroAfter(300),
+                Termination::ZeroAfter(250),
+            ] {
+                let full = decode(&rx, rate, term).unwrap();
+                assert_eq!(decode_windowed(&rx, rate, term, 300).unwrap(), full);
+                assert_eq!(decode_windowed(&rx, rate, term, 10_000).unwrap(), full);
+                // A short window is a different (sub-optimal) decoder, but noise-free it is exact.
+            }
+            let clean = soft(&encode(&bits, rate).unwrap(), 7);
+            assert_eq!(
+                decode_windowed(&clean, rate, Termination::ZeroAfter(300), 24).unwrap(),
+                bits
+            );
+        }
+    }
+}
+
+#[test]
+fn metric_spread_respects_its_bound() {
+    // Bound: 24·max|soft| (docs/gates/viterbi.md). Saturated 4-bit inputs, worst noise.
+    let mut r = Rng::new(25);
+    let mut worst = 0;
+    for rate in [CodeRate::R1_2, CodeRate::R2_3, CodeRate::R3_4] {
+        for _ in 0..200 {
+            let rx: Vec<i32> = (0..600).map(|_| (r.next_u64() % 15) as i32 - 7).collect();
+            let spread = metric_spread(&rx, rate).unwrap();
+            assert!(spread <= 24 * 7, "{rate:?}: spread {spread}");
+            worst = worst.max(spread);
+        }
+    }
+    println!("worst metric spread with |soft| ≤ 7: {worst} (bound 168)");
 }

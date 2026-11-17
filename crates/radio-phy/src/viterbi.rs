@@ -83,13 +83,54 @@ fn branch_output(state: usize, bit: usize) -> (i64, i64) {
     (parity(G0), parity(G1))
 }
 
-/// Decodes a transmitted soft stream at `rate`: depunctures, then runs the Viterbi algorithm.
-/// Returns one bit per rate-1/2 pair.
+/// Decodes a transmitted soft stream at `rate`: depunctures, then runs the Viterbi algorithm
+/// with a whole-block traceback (maximum likelihood). Returns one bit per rate-1/2 pair.
 pub fn decode(
     soft: &[i32],
     rate: CodeRate,
     termination: Termination,
 ) -> Result<Vec<u8>, ViterbiError> {
+    let trellis = forward(soft, rate, termination)?;
+    Ok(trellis.traceback(termination, None))
+}
+
+/// The hardware-style variant: bit i is decided `depth` steps later by tracing back from the
+/// best state at step i + depth (ties: lowest state). Bits within `depth` of the termination
+/// point are flushed from there, as in [`decode`]. With `depth` ≥ the block length this equals
+/// [`decode`]. Its loss against [`decode`] is a G2 figure (`docs/gates/viterbi.md`).
+pub fn decode_windowed(
+    soft: &[i32],
+    rate: CodeRate,
+    termination: Termination,
+    depth: usize,
+) -> Result<Vec<u8>, ViterbiError> {
+    let trellis = forward(soft, rate, termination)?;
+    Ok(trellis.traceback(termination, Some(depth.max(1))))
+}
+
+/// Largest spread (best − worst reachable path metric) seen over the block: what a fixed-width
+/// metric register must hold (G2). Bounded by 24·max|soft| (any state is reachable from any
+/// other in K − 1 = 6 steps, each changing a metric by at most 2·max|soft|).
+pub fn metric_spread(soft: &[i32], rate: CodeRate) -> Result<i64, ViterbiError> {
+    Ok(forward(soft, rate, Termination::Free)?.max_spread)
+}
+
+struct Trellis {
+    len: usize,
+    /// survivor[t][s]: dropped (oldest) bit of the predecessor chosen for state s at step t.
+    survivor: Vec<[u8; STATES]>,
+    /// best[t]: the best state after t + 1 steps (ties: lowest index).
+    best: Vec<usize>,
+    max_spread: i64,
+}
+
+const UNREACHABLE: i64 = i64::MIN / 4;
+
+fn forward(
+    soft: &[i32],
+    rate: CodeRate,
+    termination: Termination,
+) -> Result<Trellis, ViterbiError> {
     let full = depuncture(soft, rate)?;
     if !full.len().is_multiple_of(2) {
         return Err(ViterbiError::OddLength(full.len()));
@@ -110,15 +151,15 @@ pub fn decode(
         }
     }
 
-    const UNREACHABLE: i64 = i64::MIN / 4;
     let mut metric = [UNREACHABLE; STATES];
     metric[0] = 0;
-    // survivor[t][s]: the dropped (oldest) bit of the predecessor chosen for state s at step t.
     let mut survivor = vec![[0u8; STATES]; len];
-    // State 0 at the termination point: keep a snapshot so the forced traceback can start there.
+    let mut best = vec![0usize; len];
+    let mut max_spread = 0;
     for (t, pair) in full.chunks(2).enumerate() {
         let (sa, sb) = (i64::from(pair[0]), i64::from(pair[1]));
         let mut next = [UNREACHABLE; STATES];
+        let (mut best_s, mut best_m, mut lo) = (0usize, i64::MIN, i64::MAX);
         for (s, slot) in next.iter_mut().enumerate() {
             let u = s >> 5;
             // Predecessors: (s << 1) & 63 with the dropped bit 0 or 1.
@@ -136,27 +177,65 @@ pub fn decode(
             } else {
                 *slot = m0;
             }
+            // Best state (ties: lowest index) and the lowest metric, in the same pass.
+            if *slot > best_m {
+                best_m = *slot;
+                best_s = s;
+            }
+            lo = lo.min(*slot);
         }
         metric = next;
+        best[t] = best_s;
+        if t >= STATES.trailing_zeros() as usize {
+            // Every state is reachable after K − 1 steps; before that the spread is not defined.
+            max_spread = max_spread.max(best_m - lo);
+        }
     }
+    Ok(Trellis {
+        len,
+        survivor,
+        best,
+        max_spread,
+    })
+}
 
-    let best_end = (0..STATES).fold(0, |best, s| if metric[s] > metric[best] { s } else { best });
-    let mut bits = vec![0u8; len];
-    let trace = |bits: &mut [u8], from_step: usize, to_step: usize, mut state: usize| {
-        for t in (to_step..from_step).rev() {
-            bits[t] = (state >> 5) as u8;
-            state = ((state << 1) & (STATES - 1)) | usize::from(survivor[t][state]);
+impl Trellis {
+    /// Follows survivors back from `state` after `from` steps down to step `to`, writing the
+    /// bits of steps to..from into `bits` when given; returns the state after `to` steps.
+    fn walk(&self, mut bits: Option<&mut [u8]>, from: usize, to: usize, mut state: usize) -> usize {
+        for t in (to..from).rev() {
+            if let Some(b) = bits.as_deref_mut() {
+                b[t] = (state >> 5) as u8;
+            }
+            state = ((state << 1) & (STATES - 1)) | usize::from(self.survivor[t][state]);
         }
         state
-    };
-    match termination {
-        Termination::Free => {
-            trace(&mut bits, len, 0, best_end);
-        }
-        Termination::ZeroAfter(at) => {
-            trace(&mut bits, len, at, best_end);
-            trace(&mut bits, at, 0, 0);
-        }
     }
-    Ok(bits)
+
+    fn traceback(&self, termination: Termination, depth: Option<usize>) -> Vec<u8> {
+        let len = self.len;
+        let mut bits = vec![0u8; len];
+        if len == 0 {
+            return bits;
+        }
+        let best_end = self.best[len - 1];
+        let (anchor, anchor_state) = match termination {
+            Termination::Free => (len, best_end),
+            Termination::ZeroAfter(at) => (at, 0),
+        };
+        // Pad bits after the anchor follow the best end state.
+        self.walk(Some(&mut bits), len, anchor, best_end);
+        // The last `depth` bits before the anchor (all of them for a full traceback) are
+        // flushed from the anchor state.
+        let flush_from = depth.map_or(0, |d| anchor.saturating_sub(d));
+        self.walk(Some(&mut bits), anchor, flush_from, anchor_state);
+        if let Some(d) = depth {
+            // Earlier bits: decided d steps later from the best state at that step.
+            for (i, bit) in bits.iter_mut().enumerate().take(flush_from) {
+                let state = self.walk(None, i + d, i + 1, self.best[i + d - 1]);
+                *bit = (state >> 5) as u8;
+            }
+        }
+        bits
+    }
 }
