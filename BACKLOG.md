@@ -12,7 +12,7 @@ written from memory for 802.11-2020; confirm each one against the edition we use
 |---|---|---|---|---|
 | R0-01 | Scrambler, S(x) = x^7+x^4+1 (§17.3.5.5) | 127-bit sequence printed in §17.3.5.5 | G1, G3 | done — `docs/gates/scrambler.md` |
 | R0-02 | Convolutional encoder K=7, (133, 171)₈, puncturing for rates 2/3, 3/4 (§17.3.5.6) | CommPy black box + UBC worked example on Fig. 17-8; the standard's annex example still to add | G1 | done — `docs/gates/convolutional_encoder.md` (patterns pending the standard text) |
-| R0-03 | Interleaver, two permutations per symbol (§17.3.5.7) | Worked frame example | G1 | todo |
+| R0-03 | Interleaver, two permutations per symbol (§17.3.5.7) | OpenOFDM black box (all 8 rates) + §17.3.5.7 design properties; annex example still to add | G1 | done — `docs/gates/interleaver.md` |
 | R0-04 | Subcarrier mapping BPSK…64-QAM, Gray, normalisation (§17.3.5.8) | Worked frame example | G1 | todo |
 | R0-05 | OFDM modulation: 64-point IFFT, pilots and polarity, cyclic prefix (§17.3.5.10) | Worked frame example (time-domain samples) | G1, G2 | todo |
 | R0-06 | PPDU builder: preamble (STF/LTF), SIGNAL, DATA, tail and pad bits | The whole worked example end to end — the R0 exit gate, transmit half | G1 | todo |
