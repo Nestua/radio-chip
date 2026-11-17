@@ -4,7 +4,7 @@ Goal: an open European 802.11-compatible radio chip. Stages R0–R4 give Nestua 
 link in about two years; R5–R6 lead to the open chip. Each stage ends at a gate that can be shown to
 an investor or a grant reviewer. Durations are estimates; stages overlap.
 
-**Current stage: R0 — golden model.** First block (scrambler) has passed G1 and G3.
+**Current stage: R0 — golden model.** Scrambler has passed G1 and G3; convolutional encoder G1.
 
 | Stage | What | Exit gate | Estimate |
 |---|---|---|---|
