@@ -7,6 +7,7 @@
 //! Bits are carried as `u8` holding 0 or 1, in transmission order.
 
 pub mod convolutional;
+pub mod fixed;
 pub mod interleaver;
 pub mod mapper;
 pub mod modulation;

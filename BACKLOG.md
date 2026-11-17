@@ -20,7 +20,7 @@ written from memory for 802.11-2020; confirm each one against the edition we use
 | R0-08 | Receiver front: packet detect, coarse/fine CFO, symbol timing (STF/LTF) | Detection/false-alarm rates vs SNR in simulation; gr-ieee802-11 black-box decode of our frames | G1, G2 | todo |
 | R0-09 | Channel estimation and equalisation | BER vs SNR against theory and against the float model | G1, G2 | todo |
 | R0-10 | Viterbi decoder (soft decision) | BER curves vs published K=7 performance; decodes R0-06 frames | G1, G2 | todo |
-| R0-11 | Fixed-point framework: Q-format types, rounding/saturation modes, word-length sweep tool | Unit properties; G2 reports of R0-05/08/09/10 use it | G1 | todo |
+| R0-11 | Fixed-point framework: Q-format types, rounding/saturation modes, word-length sweep tool | fxpmath black box (2160 cases), 6.02·W+1.76 dB sine SQNR, exact-integer oracle; G2 reports of R0-05/08/09/10 use it | G1 | done — `docs/gates/fixed_point.md` |
 | R0-12 | LDPC encoder/decoder for 802.11n codes, normalised min-sum (reuse the aleph relay-BP experience) | Code definitions from the standard; BER vs published curves | G1, G2 | todo |
 | R0-13 | IQ capture tooling for R1: record/replay SDR files, checksum, metadata | Round-trip property; replay of a known capture | G1 | todo |
 
