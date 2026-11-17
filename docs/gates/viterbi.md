@@ -110,6 +110,11 @@ Reference (2^-12 soft, full traceback) reaches BER 1e-4 at 3.45 / 3.91 / 4.42 dB
 
 Decision by the G0 rule: **SOFT_BITS = 4, SOFT_CLIP = 1.5, TRACEBACK_DEPTH = 64**
 (≈ 9·K; rate 3/4 needs it — 48 is enough at 1/2 only), together 0.109 dB worst ≤ 0.2 dB.
+**Approved by the founder on 2026-11-17.** Alternative considered and declined: 5 bit / clip 2.0
+(≈ 0.03 dB with window 64, and much flatter against the clip level — 0.007…0.048 dB over clip
+1.5…2.5 versus 0.057…0.223 dB at 4 bits — at +25 % soft storage and a 10-bit metric). Context:
+3-bit soft at 0.22–0.25 dB matches the classic Heller & Jacobs (1971) figure for 8-level
+quantisation, an outside sanity check of the sweep.
 Path metrics: spread ≤ 24·7 = 168 (observed ≤ 118 at 4 bits) → **METRIC_BITS = 9** for modulo
 comparison (2^9 = 512 > 336). Noise-of-the-estimate: the 6-bit rows scatter by ±0.005 dB
 around zero, so differences above ~0.02 dB are real.
@@ -122,7 +127,9 @@ spread overstated — all caught.
 ## Open questions
 1. The soft scaling contract (SOFT_CLIP = 1.5 × signal amplitude) assumes CSI-normalised soft
    values; R0-09's demapper must deliver that, and in fading the per-subcarrier weighting
-   (|H|²) changes the optimum — re-run this sweep through the full receiver in R0-09.
+   (|H|²) changes the optimum — re-run this sweep through the full receiver in R0-09. At 4 bits
+   the loss is sensitive to that scaling (0.06 → 0.22 dB from clip 1.5 to 2.5): if R0-09 shows
+   a real receiver cannot hold the scale, revisit 5 bits (the declined alternative above).
 2. Loss measured at BER 1e-4 on AWGN; 802.11's sensitivity point is PER 10 % at 1000 octets
    (BER ≈ 1e-5). Re-check at 1e-5 when the full receiver exists.
 3. RTL (R2): register-exchange vs traceback memory is an area choice; either must reproduce
