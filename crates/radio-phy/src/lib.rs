@@ -8,4 +8,6 @@
 
 pub mod convolutional;
 pub mod interleaver;
+pub mod mapper;
+pub mod modulation;
 pub mod scrambler;
