@@ -4,7 +4,7 @@ Goal: an open European 802.11-compatible radio chip. Stages R0–R4 give Nestua 
 link in about two years; R5–R6 lead to the open chip. Each stage ends at a gate that can be shown to
 an investor or a grant reviewer. Durations are estimates; stages overlap.
 
-**Current stage: R0 — golden model.** Scrambler has passed G1 and G3; convolutional encoder, interleaver, mapper, fixed-point framework G1; OFDM modulator G1+G2.
+**Current stage: R0 — golden model.** The transmit chain is complete in the golden model (R0-01…R0-06, R0-11): an independent receiver (OpenOFDM) decodes our frames at all eight rates. The exit gate's transmit half still needs the standard's own worked example; the receive half (R0-07…R0-10) is next.
 
 | Stage | What | Exit gate | Estimate |
 |---|---|---|---|
