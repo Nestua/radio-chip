@@ -91,5 +91,6 @@ bit-exactly"); the decode-back half waits for R0-07…R0-10.
    Keep in mind: the free public draft IEEE 802.11-99/107 (April 1999) is **not usable as a
    reference** — it predates the final 802.11a text (different short training sequence, LENGTH
    before RATE in SIGNAL). Only the published annex counts.
-2. A receiver that handles short pad correctly (our own Viterbi, R0-10) should decode the
-   exempt frame; add it as a cross-check then.
+2. ~~Decode the exempt frame with our own Viterbi~~ — done in R0-10 (`g1_viterbi`): it decodes
+   with the termination after the tail, and forcing state 0 at the frame end reproduces
+   OpenOFDM's 0x28 exactly.

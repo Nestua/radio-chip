@@ -21,7 +21,7 @@ written from memory for 802.11-2020; confirm each one against the edition we use
 | R0-07c | Drone air-to-ground channel: two-ray ground reflection, elevation-dependent K, path loss for the link budget | Published air-to-ground measurement models (e.g. NASA/Matolak, 3GPP TR 36.777) | G1 | todo |
 | R0-08 | Receiver front: packet detect, coarse/fine CFO, symbol timing (STF/LTF) | Detection/false-alarm rates vs SNR in simulation; gr-ieee802-11 black-box decode of our frames | G1, G2 | todo |
 | R0-09 | Channel estimation and equalisation | BER vs SNR against theory and against the float model | G1, G2 | todo |
-| R0-10 | Viterbi decoder (soft decision) | BER curves vs published K=7 performance; decodes R0-06 frames | G1, G2 | todo |
+| R0-10 | Viterbi decoder (soft decision), depuncturing, termination from LENGTH | Brute-force ML on 12-bit blocks; published d_free 10/6/5; CommPy black-box BER; decodes all R0-06 frames incl. the one OpenOFDM missed | G1, G2 | doing — G1 done (`docs/gates/viterbi.md`), G2 next |
 | R0-11 | Fixed-point framework: Q-format types, rounding/saturation modes, word-length sweep tool | fxpmath black box (2160 cases), 6.02·W+1.76 dB sine SQNR, exact-integer oracle; G2 reports of R0-05/08/09/10 use it | G1 | done — `docs/gates/fixed_point.md` |
 | R0-12 | LDPC encoder/decoder for 802.11n codes, normalised min-sum (reuse the aleph relay-BP experience) | Code definitions from the standard; BER vs published curves | G1, G2 | todo |
 | R0-13 | IQ capture tooling for R1: record/replay SDR files, checksum, metadata | Round-trip property; replay of a known capture | G1 | todo |
