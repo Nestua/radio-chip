@@ -46,8 +46,14 @@ OpenOFDM's receiver depunctures by inserting erasures at exactly our stolen posi
 the PSDU octet-exact at 9, 18, 36, 48 and 54 Mb/s (`docs/gates/ppdu.md`). The patterns are no
 longer resting on memory alone.
 
+## 2026-11-17 · G1 · the standard's worked example
+Command: `cargo test -p radio-phy --test g1_annex_i1 -- --ignored` (needs the local fixture; see
+`docs/gates/ppdu.md`, entry "the standard's worked example").
+Reference: IEEE 802.11-2024 Annex I.1, Tables I-8 (SIGNAL, rate 1/2) and I-16 (DATA, rate 3/4).
+Result: all 48 SIGNAL and all 1152 DATA coded bits match — the 3/4 puncturing pattern now rests
+on the standard itself. Clause numbers (§17.3.5.6, Figure 17-9) unchanged in the 2024 text.
+Mutation: 3/4 pattern 111001 → 110110 fails I-16 and the whole-frame samples.
+
 ## Open questions
-1. Confirm the clause numbers and check against the encoded DATA bits of the standard's annex
-   example once the text is at hand.
-2. G3 (RTL) belongs to R2. Puncturing makes the output rate uneven, so the RTL needs a
+1. G3 (RTL) belongs to R2. Puncturing makes the output rate uneven, so the RTL needs a
    valid/ready output or a documented fixed duty cycle.

@@ -63,15 +63,33 @@ Mutation check (each restored with `cp`):
 | RATE bits mirrored (the real bug) | passes | fails |
 | DATA polarity starts at p_0 | passes | fails |
 
+## 2026-11-17 · G1 · the standard's worked example
+Command: `cargo test -p radio-phy --test g1_annex_i1 -- --ignored`
+Reference: IEEE Std 802.11-2024 Annex I.1 "Example 1—BCC encoding" (36 Mb/s, 100-octet PSDU,
+"Ode to Joy"), from the user's personal copy via IEEE GET (ieeexplore 10979691). The PDF and the
+extracted numbers stay in gitignored `target/ext/` (founder's decision 2026-11-17: commit the test
+and the extractor, not the numbers). Extraction: `python3 -I tools/ref/annex_i1_extract.py
+<pdf> target/ext/annex_i1.fixture` (`pdftotext -layout`, poppler). Table I-1 cross-checked
+against the PSDU the test takes from I-13: 100/100 octets.
+Result: 4/4 tests pass.
+- SIGNAL: I-7 bits, I-8 coded, I-9 interleaved — bit-exact; I-10/I-11 within ±0.0005.
+- DATA: I-13 (clear), I-14 (scrambling sequence = our seed 0x5D), I-15 (scrambled), I-16 (coded,
+  rate 3/4), I-17/I-18 (permutations), I-19 (interleaved) — bit-exact; I-20 within ±0.0005.
+- Whole PPDU, I-22…I-30, samples 0…880 (STF, LTF, SIGNAL, 6 DATA symbols): the annex applies the
+  informative ½-weight window and overlaps one sample at each field boundary, so the test
+  compares ½·(x[b] + x[b−64]) at b = 0, 160, 320, 400, …, 880 and plain samples elsewhere.
+  Worst |ours − annex|: **0.00050 at W = 24** (the print rounding itself) and **0.00132 at the
+  transmit W = 13**, over all 881 samples.
+Mutation check (each restored with `cp`): 3/4 puncturing pattern changed → data and frame tests
+fail; PILOT_BASE reordered → SIGNAL, DATA and frame fail; STF bin −24 sign flipped → frame fails
+at sample 0; SIGNAL parity inverted → SIGNAL and frame fail.
+This closes the transmit half of the R0 exit gate ("encodes the standard's worked example frame
+bit-exactly"); the decode-back half waits for R0-07…R0-10.
+
 ## Open questions
-1. The standard's annex worked example (SIGNAL and DATA bits and samples for its 100-octet
-   message) once the text is at hand — the R0 exit gate names it explicitly. Source: IEEE GET,
-   802.11-2024 (ieeexplore document 10979691; free, needs a personal IEEE account; the PDF is
-   licensed for personal use, so it stays in gitignored `target/ext/` — whether its numbers may
-   be committed as fixtures is a licence question for the founder). 2026-11-17: the free public
-   draft of that example, IEEE 802.11-99/107 (April 1999, ieee802.org 1999 archive), was
-   checked and is **not usable as a reference**: it predates the final 802.11a text — its short
-   training sequence differs from the published one (ours matches the published one, see
-   evidence 1) and its SIGNAL field puts LENGTH before RATE. Only the published annex counts.
+1. Annex worked example: done (entry above, commit the test + extractor, numbers stay local).
+   Keep in mind: the free public draft IEEE 802.11-99/107 (April 1999) is **not usable as a
+   reference** — it predates the final 802.11a text (different short training sequence, LENGTH
+   before RATE in SIGNAL). Only the published annex counts.
 2. A receiver that handles short pad correctly (our own Viterbi, R0-10) should decode the
    exempt frame; add it as a cross-check then.

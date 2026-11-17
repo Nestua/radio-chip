@@ -38,8 +38,14 @@ Harness notes: decode.py imports numpy, wltrace and CommPy for code the deinterl
 use; the harness registers empty modules for them. Docker Desktop cannot mount the agent's
 temporary folder, so the OpenOFDM checkout lives in the ignored `target/ext/`.
 
+## 2026-11-17 · G1 · the standard's worked example
+Command: `cargo test -p radio-phy --test g1_annex_i1 -- --ignored` (needs the local fixture; see
+`docs/gates/ppdu.md`, entry "the standard's worked example").
+Reference: IEEE 802.11-2024 Annex I.1, Tables I-9 (SIGNAL, BPSK), I-17 and I-18 (both
+permutations, 16-QAM, all 192 k) and I-19 (first DATA symbol).
+Result: our `interleaved_index` equals I-18∘I-17 for every k; I-9 and I-19 match bit for bit.
+Clause §17.3.5.7 unchanged in the 2024 text.
+
 ## Open questions
-1. Check against the interleaved DATA bits of the standard's annex example once the standard is
-   at hand (also confirms the clause number).
-2. HT (802.11n) uses 13 columns and, for several streams, frequency rotation; OpenOFDM covers
+1. HT (802.11n) uses 13 columns and, for several streams, frequency rotation; OpenOFDM covers
    single-stream HT too and can extend this fixture when the HT profile starts.

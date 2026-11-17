@@ -65,9 +65,15 @@ Mutation check (each restored with `cp`):
 The pilot base values are pinned only by the OpenOFDM verdict (β on the recorded symbols) plus
 the bit-exact regression; any datapath change requires regenerating that fixture.
 
+## 2026-11-17 · G1 · the standard's worked example
+Command: `cargo test -p radio-phy --test g1_annex_i1 -- --ignored` (needs the local fixture; see
+`docs/gates/ppdu.md`, entry "the standard's worked example").
+Reference: IEEE 802.11-2024 Annex I.1, Tables I-11 and I-20 (pilots with p_0 and p_1),
+I-24…I-30 (time samples of SIGNAL and the six DATA symbols, inside the whole-frame check).
+Result: see the PPDU journal — worst sample error 0.0005 at W = 24 (print rounding) and 0.0013 at
+the transmit W = 13. Mutation: PILOT_BASE [1,1,1,−1] → [1,1,−1,1] fails I-11, I-20 and the samples.
+
 ## Open questions
-1. The standard's annex example (time-domain samples of SIGNAL and DATA) once the text is at
-   hand — the strongest check for the whole chain.
-2. Stage scaling schedule for the RTL (fewer ½ stages, narrower word) — decide with the RTL in R2
+1. Stage scaling schedule for the RTL (fewer ½ stages, narrower word) — decide with the RTL in R2
    with this G2 tool.
 3. Output gain toward the DAC (AD9361 is 12-bit) belongs to the transmit front end, not here.
