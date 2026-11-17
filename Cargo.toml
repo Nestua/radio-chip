@@ -26,6 +26,10 @@ missing_docs = "warn"
 unwrap_used = "deny"
 expect_used = "deny"
 
+# Gates run Monte-Carlo simulations (channel, Viterbi BER); unoptimised they take minutes.
+[profile.test]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = "thin"

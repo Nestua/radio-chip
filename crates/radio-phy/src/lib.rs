@@ -15,3 +15,4 @@ pub mod modulation;
 pub mod ofdm;
 pub mod ppdu;
 pub mod scrambler;
+pub mod viterbi;

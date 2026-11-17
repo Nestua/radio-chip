@@ -1,0 +1,11 @@
+# Soft-decision Viterbi BER, 802.11 K=7 (133,171)_8, CommPy black box.
+# Tool: scikit-commpy 0.8.0, numpy 2.5.5, python 3.14.10
+# Command: python -I tools/ref/viterbi_commpy.py run/combine, 60 chunks, docker python:3.14-slim on x86-64
+# 1000 blocks x 1002 bits + 6 tail, unquantized metric, tb_depth 120
+# <rate> <Eb/N0 dB> <blocks> <bits per block> <mean BER> <standard error> <bit errors>
+1/2 1.5 1000 1002 1.520459e-02 4.713716e-04 15235
+1/2 2.5 1000 1002 1.619760e-03 1.263131e-04 1623
+2/3 2.5 1000 1002 7.052894e-03 3.650981e-04 7067
+2/3 3.5 1000 1002 3.203593e-04 5.774043e-05 321
+3/4 3.0 1000 1002 6.593812e-03 3.584454e-04 6607
+3/4 4.0 1000 1002 3.932136e-04 6.971502e-05 394
