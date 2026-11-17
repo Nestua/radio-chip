@@ -60,6 +60,7 @@ Read before substantial work:
 ```
 crates/radio-phy/     golden PHY model (the spec); tests/g1_* are the G1 gates
 crates/radio-tools/   rvec: golden model → hw/vectors/*.txt
+tools/ref/            scripts that run external tools as black boxes → tests/fixtures (ADR 0005)
 hw/rtl/               synthesisable SystemVerilog, ASIC-portable
 hw/tb/                Verilator testbenches (C++), one per block
 hw/vectors/           generated, committed vectors (never edit by hand)
