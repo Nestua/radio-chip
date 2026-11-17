@@ -11,7 +11,7 @@ an investor or a grant reviewer. Durations are estimates; stages overlap.
 | **R0** Golden model | Rust PHY/MAC model in fixed point, channel simulator, 802.11a-level transmit and receive chain | The model encodes the standard's worked example frame bit-exactly and decodes it back through a simulated channel | 0–3 months |
 | **R1** Over the air on SDR | The same model running in real time on a PC with an SDR; first field measurements | A link over the air; range measured and logged | 3–6 months |
 | **R2** RTL blocks | FFT, synchronisation, equaliser, convolutional/LDPC codecs, TDMA scheduler in RTL; ASIC probes in parallel | Every block passes G3 (and G4 where required) | 6–12 months |
-| **R3** FPGA link | Zynq + AD9361, two nodes, Linux netdev; WebRTC and MAVLink unchanged on top | Video from the drone over 10 km | 9–15 months |
+| **R3** FPGA link | Zynq + AD9361, two nodes, Linux netdev; WebRTC and MAVLink unchanged on top; reference oscillator TCXO ≤ ±2 ppm (R0-08 G0) | Video from the drone over 10 km | 9–15 months |
 | **R4** Serial module | Own board for the drone, CE/RED | CE/RED passed, module in series production | 12–24 months |
 | **R5** Baseband ASIC | Digital chip: baseband + MAC + RISC-V, external RF transceiver; MPW on the IHP open PDK, then GF 22FDX | First silicon works with the external RF | 2–4 years |
 | **R6** Full SoC | Own RF on the die: Wi-Fi 6/6E, HaLow, TDMA | Serial open chip | 4+ years |
