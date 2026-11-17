@@ -139,3 +139,5 @@ Formal (SymbiYosys) and the ASIC flow (OpenROAD) are added when a stage needs th
 - Floating point creeping into the model of a fixed-point block. The model must round like the RTL.
 - Editing `hw/vectors/` by hand to make a gate pass.
 - Copying code from an external project "just for one function". Read, close it, re-implement.
+- Restoring a mutated file with `mv backup file`: the old mtime makes cargo skip the rebuild and
+  rerun the mutated binary. Restore with `cp` (or `touch` the file) before trusting the result.
