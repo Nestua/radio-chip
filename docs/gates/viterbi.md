@@ -26,6 +26,20 @@ Mirror of `convolutional.rs` (R0-02).
   the tail); pad bits after it follow the best end state (they are discarded anyway).
   `Termination::Free` traces back from the best end state.
 
+## 2026-11-17 · G0 · G2 budget
+- **What is chosen**: the soft-input width b and clip level C (soft value = round(y/Δ) saturated
+  to ±(2^(b−1) − 1), Δ = C/(2^(b−1) − 1), y the matched-filter output with signal amplitude 1),
+  the traceback window D of the hardware variant (`decode_windowed`), and the path-metric width.
+- **Budget**: Eb/N0 loss at BER 1e-4 on BPSK/AWGN, against full traceback on 2^-12 soft values,
+  at every rate: soft quantisation ≤ 0.15 dB, traceback window ≤ 0.05 dB (≤ 0.2 dB together).
+  Rule: the smallest b (then D) that meets it at the worst rate.
+- **Method**: `g2 viterbi [blocks]`; every configuration decodes the *same* noisy blocks, so the
+  differences are paired. BER 1e-4 crossing by log-linear interpolation on a 0.5 dB grid.
+- **Metric width**: spread ≤ 24·(2^(b−1) − 1) (proved in `metric_spread`'s doc); a modulo
+  metric register needs 2^w > 2·spread. The sweep also reports the largest spread observed.
+- The clip level is relative to the signal amplitude, so it assumes the demapper (R0-09) hands
+  over soft values already normalised by the channel gain; R0-09 owns that scaling.
+
 ## 2026-11-17 · G1 · first commit
 Command: `cargo test -p radio-phy --test g1_viterbi -- --nocapture` (3.6 s; `[profile.test]`
 now builds at opt-level 2 — the Monte-Carlo gates took ~40 s unoptimised)

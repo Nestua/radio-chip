@@ -82,6 +82,8 @@ enum Config {
     Soft { bits: u32, clip: f64 },
     /// Reference soft values, traceback window `depth`.
     Window { depth: usize },
+    /// Quantised soft values and a traceback window together: the hardware decoder.
+    Both { bits: u32, clip: f64, depth: usize },
 }
 
 impl Config {
@@ -90,6 +92,7 @@ impl Config {
             Config::Reference => "reference".into(),
             Config::Soft { bits, clip } => format!("soft {bits} bit, clip {clip:.1}"),
             Config::Window { depth } => format!("window {depth}"),
+            Config::Both { bits, clip, depth } => format!("{bits} bit/{clip:.1} + window {depth}"),
         }
     }
 }
@@ -139,6 +142,14 @@ fn viterbi_point(
                     decode(&q, rate, term)
                 }
                 Config::Window { depth } => decode_windowed(&fine, rate, term, depth),
+                Config::Both {
+                    bits: b,
+                    clip,
+                    depth,
+                } => {
+                    let q: Vec<i32> = y.iter().map(|&v| soft_quantise(v, b, clip)).collect();
+                    decode_windowed(&q, rate, term, depth)
+                }
             };
             if let Ok(got) = got {
                 errors[k] += got[..VIT_BLOCK]
@@ -174,6 +185,12 @@ fn viterbi(blocks: u64) -> Result<(), String> {
     for depth in [24, 32, 48, 64, 96] {
         configs.push(Config::Window { depth });
     }
+    // The choice (docs/gates/viterbi.md): both losses together, not just each alone.
+    configs.push(Config::Both {
+        bits: 4,
+        clip: 1.5,
+        depth: 64,
+    });
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
     println!(
         "# G2 sweep: Viterbi, {blocks} blocks x {VIT_BLOCK} bits per point, BPSK/AWGN, \
