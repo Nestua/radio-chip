@@ -34,8 +34,14 @@ Mutation check (each restored afterwards):
 | BPSK polarity flipped | 1 test fails |
 | 64-QAM energy 42 → 40 | 1 test fails |
 
+## 2026-11-17 · G1 · the standard's worked example
+Command: `cargo test -p radio-phy --test g1_annex_i1 -- --ignored` (needs the local fixture; see
+`docs/gates/ppdu.md`, entry "the standard's worked example").
+Reference: IEEE 802.11-2024 Annex I.1, Tables I-10/I-11 (SIGNAL, BPSK) and I-20 (first DATA
+symbol, 16-QAM, normalised, pilots inserted).
+Result: every subcarrier within the annex's print rounding (±0.0005) with K_MOD = 1/√10; pilot
+slots empty in I-10 as printed. Clause §17.3.5.8 unchanged in the 2024 text.
+
 ## Open questions
-1. Check against the mapped DATA symbols of the standard's annex example once the standard is at
-   hand (it prints normalised values, which also pins K_MOD in context).
-2. Fixed-point format of the normalised points (word length, rounding of 1/√10 and 1/√42) is a
+1. Fixed-point format of the normalised points (word length, rounding of 1/√10 and 1/√42) is a
    G2 question for R0-05/R0-11.
