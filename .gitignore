@@ -5,3 +5,6 @@
 .DS_Store
 # Field captures are large; they live outside git (see docs/testing.md, G6).
 /captures/
+
+# Personal Claude Code settings
+.claude/settings.local.json

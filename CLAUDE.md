@@ -107,6 +107,8 @@ MAC model and the Linux driver arrive with the stages that need them (see `ROADM
 
 - Branch per task. Commit messages: `[R0-02] convolutional encoder: G1 against the standard's worked example`.
 - One block per PR where possible. `scripts/check.sh` must be green before a PR.
+- Claude merges its own PR (squash, delete branch) once CI is green and a basic review of the diff
+  finds nothing. PRs that touch a risk point from non-negotiable 9 wait for the founder's approval.
 - CLAUDE.md changes go in their own PR (`[meta] ...`), with an ADR when they change a rule.
 
 ## Session discipline
