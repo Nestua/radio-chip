@@ -65,6 +65,13 @@ Mutation check (each restored with `cp`):
 
 ## Open questions
 1. The standard's annex worked example (SIGNAL and DATA bits and samples for its 100-octet
-   message) once the text is at hand — the R0 exit gate names it explicitly.
+   message) once the text is at hand — the R0 exit gate names it explicitly. Source: IEEE GET,
+   802.11-2024 (ieeexplore document 10979691; free, needs a personal IEEE account; the PDF is
+   licensed for personal use, so it stays in gitignored `target/ext/` — whether its numbers may
+   be committed as fixtures is a licence question for the founder). 2026-11-17: the free public
+   draft of that example, IEEE 802.11-99/107 (April 1999, ieee802.org 1999 archive), was
+   checked and is **not usable as a reference**: it predates the final 802.11a text — its short
+   training sequence differs from the published one (ours matches the published one, see
+   evidence 1) and its SIGNAL field puts LENGTH before RATE. Only the published annex counts.
 2. A receiver that handles short pad correctly (our own Viterbi, R0-10) should decode the
    exempt frame; add it as a cross-check then.
