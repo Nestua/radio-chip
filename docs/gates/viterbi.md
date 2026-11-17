@@ -85,7 +85,45 @@ Mutation check (each restored with `cp` + `touch`):
 | Depuncturing inverted | 8 tests |
 | Predecessor wiring wrong | 7 tests |
 
+## 2026-11-17 · G2 · first commit
+Command: `cargo run -q --release -p radio-tools --bin g2 -- viterbi 30000` (30 000 blocks ×
+1002 bits = 3·10⁷ bits per point, 3 rates × 5 Eb/N0 × 27 configurations, same noise for all;
+~15 min on the build server's 32 threads, docker `rust:1-slim`, rustc 1.100.0). Full output:
+`docs/gates/reports/g2_viterbi.txt`. Two runs gave identical rows (deterministic seeds); a first
+3000-block run was too thin near 1e-4 (losses wandered by ±0.1 dB, some negative) and only
+served to pick the grid.
+Reference (2^-12 soft, full traceback) reaches BER 1e-4 at 3.45 / 3.91 / 4.42 dB for rates
+1/2, 2/3, 3/4. Loss in dB at BER 1e-4 (best clip per width shown; full grid in the report):
+
+| Configuration | 1/2 | 2/3 | 3/4 | worst |
+|---|---|---|---|---|
+| 3 bit, clip 1.0 | 0.248 | 0.222 | 0.229 | 0.248 ✗ |
+| **4 bit, clip 1.5** | 0.057 | 0.080 | 0.088 | **0.088** |
+| 4 bit, clip 1.0 | 0.148 | 0.093 | 0.062 | 0.148 |
+| 5 bit, clip 2.0 | 0.022 | 0.015 | 0.007 | 0.022 |
+| 6 bit, clip 2.0 | 0.006 | 0.003 | −0.004 | 0.006 |
+| window 32 | 0.080 | 0.357 | 0.573 | 0.573 ✗ |
+| window 48 | 0.003 | 0.064 | 0.141 | 0.141 ✗ |
+| **window 64** | 0.000 | 0.007 | 0.024 | **0.024** |
+| window 96 | 0.000 | 0.000 | 0.000 | 0.000 |
+| **4 bit / 1.5 + window 64** | 0.057 | 0.086 | 0.109 | **0.109** |
+
+Decision by the G0 rule: **SOFT_BITS = 4, SOFT_CLIP = 1.5, TRACEBACK_DEPTH = 64**
+(≈ 9·K; rate 3/4 needs it — 48 is enough at 1/2 only), together 0.109 dB worst ≤ 0.2 dB.
+Path metrics: spread ≤ 24·7 = 168 (observed ≤ 118 at 4 bits) → **METRIC_BITS = 9** for modulo
+comparison (2^9 = 512 > 336). Noise-of-the-estimate: the 6-bit rows scatter by ±0.005 dB
+around zero, so differences above ~0.02 dB are real.
+New G1 checks for the model variants: `decode_windowed` equals `decode` when the window covers
+the block; each windowed decision equals a free-ended full Viterbi over the first i + D steps
+(the definition); the metric spread respects its bound. Mutations: window decision one step
+early (caught only by the prefix-definition test — added for that reason), flush too short,
+spread overstated — all caught.
+
 ## Open questions
-1. G2: soft-value width (3–6 bits) and scaling from the demapper, path-metric width — next PR.
-2. Hardware traceback: a sliding window (depth ~5–8 K, longer for 3/4) will differ from this
-   full-traceback model at low SNR; model it as its own variant with a G2 loss before the RTL.
+1. The soft scaling contract (SOFT_CLIP = 1.5 × signal amplitude) assumes CSI-normalised soft
+   values; R0-09's demapper must deliver that, and in fading the per-subcarrier weighting
+   (|H|²) changes the optimum — re-run this sweep through the full receiver in R0-09.
+2. Loss measured at BER 1e-4 on AWGN; 802.11's sensitivity point is PER 10 % at 1000 octets
+   (BER ≈ 1e-5). Re-check at 1e-5 when the full receiver exists.
+3. RTL (R2): register-exchange vs traceback memory is an area choice; either must reproduce
+   `decode_windowed` bit-exactly at D = 64.

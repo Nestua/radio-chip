@@ -17,7 +17,9 @@ use radio_phy::channel::Rng;
 use radio_phy::convolutional::{encode, CodeRate, ConvolutionalEncoder};
 use radio_phy::ppdu::{data_bits, Rate};
 use radio_phy::scrambler::Scrambler;
-use radio_phy::viterbi::{decode, decode_windowed, depuncture, metric_spread, Termination};
+use radio_phy::viterbi::{
+    decode, decode_windowed, depuncture, metric_spread, Termination, METRIC_BITS, SOFT_MAX,
+};
 
 const COMMPY: &str = include_str!("fixtures/viterbi_ber_commpy.txt");
 const FRAMES: &str = include_str!("fixtures/ppdu_decode_openofdm.txt");
@@ -356,7 +358,10 @@ fn windowed_traceback_equals_full_when_the_window_covers_the_block() {
 
 #[test]
 fn metric_spread_respects_its_bound() {
-    // Bound: 24·max|soft| (docs/gates/viterbi.md). Saturated 4-bit inputs, worst noise.
+    // Bound: 24·max|soft| (docs/gates/viterbi.md); the chosen metric register must hold twice
+    // that for modulo comparisons.
+    assert!((1i64 << METRIC_BITS) > 2 * 24 * i64::from(SOFT_MAX));
+    // Saturated 4-bit inputs, worst noise.
     let mut r = Rng::new(25);
     let mut worst = 0;
     for rate in [CodeRate::R1_2, CodeRate::R2_3, CodeRate::R3_4] {
@@ -368,4 +373,28 @@ fn metric_spread_respects_its_bound() {
         }
     }
     println!("worst metric spread with |soft| ≤ 7: {worst} (bound 168)");
+}
+
+#[test]
+fn windowed_decision_is_full_viterbi_on_the_prefix() {
+    // Definition of the window: bit i is what a free-ended Viterbi over the first i + D steps
+    // decides for step i. Checked on noisy input, where depth matters.
+    let mut r = Rng::new(26);
+    let depth = 16;
+    for rate in [CodeRate::R1_2, CodeRate::R3_4] {
+        let mut bits: Vec<u8> = (0..114).map(|_| (r.next_u64() & 1) as u8).collect();
+        bits.extend([0; 6]);
+        let rx: Vec<i32> = encode(&bits, rate)
+            .unwrap()
+            .iter()
+            .map(|&c| ((if c == 0 { 1.0 } else { -1.0 } + 0.9 * r.gaussian()) * 8.0).round() as i32)
+            .collect();
+        let half = depuncture(&rx, rate).unwrap();
+        let got = decode_windowed(&rx, rate, Termination::ZeroAfter(120), depth).unwrap();
+        for i in 0..120 - depth {
+            let prefix =
+                decode(&half[..2 * (i + depth)], CodeRate::R1_2, Termination::Free).unwrap();
+            assert_eq!(got[i], prefix[i], "{rate:?} bit {i}");
+        }
+    }
 }
