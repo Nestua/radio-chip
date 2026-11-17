@@ -11,4 +11,5 @@ pub mod fixed;
 pub mod interleaver;
 pub mod mapper;
 pub mod modulation;
+pub mod ofdm;
 pub mod scrambler;

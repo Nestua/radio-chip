@@ -12,6 +12,10 @@ publish.workspace = true
 name = "rvec"
 path = "src/main.rs"
 
+[[bin]]
+name = "g2"
+path = "src/bin/g2.rs"
+
 [dependencies]
 radio-phy = { path = "../radio-phy" }
 

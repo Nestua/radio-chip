@@ -74,6 +74,12 @@ pub enum Overflow {
 }
 
 impl QFormat {
+    /// The narrowest valid format, Q(1, 0): a placeholder for unreachable fallbacks.
+    pub const MIN_SIGNED: QFormat = QFormat {
+        word_bits: 1,
+        frac_bits: 0,
+    };
+
     /// A signed format with `word_bits` bits in total, `frac_bits` of them fractional.
     pub fn new(word_bits: u32, frac_bits: u32) -> Result<Self, FixedError> {
         if word_bits == 0 || word_bits > MAX_WORD_BITS || frac_bits > MAX_FRAC_BITS {
