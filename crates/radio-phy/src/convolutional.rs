@@ -79,8 +79,8 @@ impl ConvolutionalEncoder {
     /// Encodes `bits` at rate 1/2; the output is A0 B0 A1 B1 …
     pub fn encode(&mut self, bits: &[u8]) -> Vec<u8> {
         bits.iter()
-            .flat_map(|&b| {
-                let (a, b) = self.encode_bit(b);
+            .flat_map(|&bit| {
+                let (a, b) = self.encode_bit(bit);
                 [a, b]
             })
             .collect()
