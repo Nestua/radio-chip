@@ -40,9 +40,14 @@ Mutation check (each restored afterwards):
 The pattern mutations are caught only because CommPy was given the same patterns; that part of G1
 is consistency, not independence, until open question 1 is closed.
 
+## 2026-11-17 · G1 · puncturing confirmed by a receiver
+OpenOFDM's receiver depunctures by inserting erasures at exactly our stolen positions (3/4:
+111001, 2/3: 1110, read from its `viterbi_decode`), and its full decode of our frames returns
+the PSDU octet-exact at 9, 18, 36, 48 and 54 Mb/s (`docs/gates/ppdu.md`). The patterns are no
+longer resting on memory alone.
+
 ## Open questions
-1. Confirm the puncturing patterns (Figure 17-9) and the clause numbers against the standard,
-   then against the encoded DATA bits of the worked example in the annex. That annex check also
-   closes the bit-order question with the standard's own numbers.
+1. Confirm the clause numbers and check against the encoded DATA bits of the standard's annex
+   example once the text is at hand.
 2. G3 (RTL) belongs to R2. Puncturing makes the output rate uneven, so the RTL needs a
    valid/ready output or a documented fixed duty cycle.

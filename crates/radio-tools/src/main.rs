@@ -4,8 +4,9 @@
 //!
 //! Usage: `cargo run -q -p radio-tools --bin rvec -- <block>` writes the vectors to stdout.
 //!
-//! `ofdm-symbols` is not an RTL vector file: it feeds the OpenOFDM receiver harness
-//! (`tools/ref/ofdm_rx_openofdm.py`) and is written to the ignored `target/ext/`.
+//! `ofdm-symbols` and `ppdu-frames` are not RTL vector files: they feed the OpenOFDM receiver
+//! harnesses (`tools/ref/ofdm_rx_openofdm.py`, `tools/ref/ppdu_decode_openofdm.py`) and are
+//! written to the ignored `target/ext/`.
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -13,6 +14,7 @@ use std::process::ExitCode;
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, IfftConfig};
+use radio_phy::ppdu::{build_ppdu, frame_hash, Rate};
 use radio_phy::scrambler::Scrambler;
 
 /// Deterministic xorshift32 so vectors are reproducible without a `rand` dependency.
@@ -99,6 +101,41 @@ fn ofdm_symbols(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// Whole PPDUs for the OpenOFDM decoder harness: three frames per rate with random PSDUs
+/// (1 octet, tens of octets, hundreds of octets) and random scrambler seeds. One line per frame:
+/// `<Mb/s> <seed hex> <psdu hex> <frac bits> <frame hash hex> <samples re,im ...>`.
+fn ppdu_frames(out: &mut impl Write) -> io::Result<()> {
+    let cfg = IfftConfig::tx_default();
+    writeln!(
+        out,
+        "# rvec ppdu-frames — input to tools/ref/ppdu_decode_openofdm.py, tx_default IFFT"
+    )?;
+    let mut rng = XorShift32(0x0FD_0006);
+    let mut word = || (0..32).fold(0u32, |acc, _| (acc << 1) | u32::from(rng.next_bit()));
+    for rate in Rate::ALL {
+        for size in [
+            1usize,
+            20 + (word() % 60) as usize,
+            200 + (word() % 300) as usize,
+        ] {
+            let seed = (word() % 127 + 1) as u8;
+            let psdu: Vec<u8> = (0..size).map(|_| word() as u8).collect();
+            let frame = build_ppdu(&psdu, rate, seed, &cfg).map_err(io::Error::other)?;
+            let hex: String = psdu.iter().map(|b| format!("{b:02x}")).collect();
+            let smp: Vec<String> = frame.iter().map(|s| format!("{},{}", s.re, s.im)).collect();
+            writeln!(
+                out,
+                "{} {seed:02x} {hex} {} {:016x} {}",
+                rate.mbps(),
+                cfg.data.frac_bits(),
+                frame_hash(&frame),
+                smp.join(" ")
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let stdout = io::stdout();
@@ -106,8 +143,9 @@ fn main() -> ExitCode {
     let result = match block.as_str() {
         "scrambler" => scrambler_vectors(&mut out),
         "ofdm-symbols" => ofdm_symbols(&mut out),
+        "ppdu-frames" => ppdu_frames(&mut out),
         _ => {
-            eprintln!("usage: rvec <block>\nblocks: scrambler, ofdm-symbols");
+            eprintln!("usage: rvec <block>\nblocks: scrambler, ofdm-symbols, ppdu-frames");
             return ExitCode::from(2);
         }
     };

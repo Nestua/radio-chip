@@ -11,11 +11,11 @@ written from memory for 802.11-2020; confirm each one against the edition we use
 | ID | Block | Reference for G1 | Gates | Status |
 |---|---|---|---|---|
 | R0-01 | Scrambler, S(x) = x^7+x^4+1 (§17.3.5.5) | 127-bit sequence printed in §17.3.5.5 | G1, G3 | done — `docs/gates/scrambler.md` |
-| R0-02 | Convolutional encoder K=7, (133, 171)₈, puncturing for rates 2/3, 3/4 (§17.3.5.6) | CommPy black box + UBC worked example on Fig. 17-8; the standard's annex example still to add | G1 | done — `docs/gates/convolutional_encoder.md` (patterns pending the standard text) |
+| R0-02 | Convolutional encoder K=7, (133, 171)₈, puncturing for rates 2/3, 3/4 (§17.3.5.6) | CommPy black box + UBC worked example on Fig. 17-8; the standard's annex example still to add | G1 | done — `docs/gates/convolutional_encoder.md` (patterns confirmed by OpenOFDM's receiver, R0-06) |
 | R0-03 | Interleaver, two permutations per symbol (§17.3.5.7) | OpenOFDM black box (all 8 rates) + §17.3.5.7 design properties; annex example still to add | G1 | done — `docs/gates/interleaver.md` |
 | R0-04 | Subcarrier mapping BPSK…64-QAM, Gray, normalisation (§17.3.5.8) | OpenOFDM black box on every point + Gray/energy properties; annex example still to add | G1 | done — `docs/gates/mapper.md` (unnormalised grid; K_MOD in fixed point with R0-05/R0-11) |
-| R0-05 | OFDM modulation: 64-point IFFT, pilots and polarity, cyclic prefix (§17.3.5.10) | OpenOFDM tables + OpenOFDM receiver decoding our symbols + textbook DFT; annex samples still to add | G1, G2 | done — `docs/gates/ofdm.md` (W = 13, pending founder approval) |
-| R0-06 | PPDU builder: preamble (STF/LTF), SIGNAL, DATA, tail and pad bits | The whole worked example end to end — the R0 exit gate, transmit half | G1 | todo |
+| R0-05 | OFDM modulation: 64-point IFFT, pilots and polarity, cyclic prefix (§17.3.5.10) | OpenOFDM tables + OpenOFDM receiver decoding our symbols + textbook DFT; annex samples still to add | G1, G2 | done — `docs/gates/ofdm.md` (W = 13, approved by the founder) |
+| R0-06 | PPDU builder: preamble (STF/LTF), SIGNAL, DATA, tail and pad bits | OpenOFDM decodes our frames at all 8 rates; preamble matches annex-format samples; the annex worked example still to add | G1 | done — `docs/gates/ppdu.md` |
 | R0-07 | Channel simulator: AWGN, CFO, phase noise, multipath (TGn models), Doppler for drone speeds | Analytical BER curves for AWGN; published channel model definitions | G1 | todo |
 | R0-08 | Receiver front: packet detect, coarse/fine CFO, symbol timing (STF/LTF) | Detection/false-alarm rates vs SNR in simulation; gr-ieee802-11 black-box decode of our frames | G1, G2 | todo |
 | R0-09 | Channel estimation and equalisation | BER vs SNR against theory and against the float model | G1, G2 | todo |

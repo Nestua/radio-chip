@@ -12,4 +12,5 @@ pub mod interleaver;
 pub mod mapper;
 pub mod modulation;
 pub mod ofdm;
+pub mod ppdu;
 pub mod scrambler;
