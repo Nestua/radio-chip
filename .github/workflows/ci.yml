@@ -5,26 +5,43 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # Floor from CLAUDE.md. Ubuntu 24.04 ships 5.020, so we build the pinned release once and cache it.
+  VERILATOR_VERSION: v5.050
+  # Fixed absolute prefix: Verilator bakes it into the install, so restore must land in the same place.
+  VERILATOR_ROOT_DIR: /home/runner/.local/verilator
+
 jobs:
   gates:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Rust toolchain (from rust-toolchain.toml)
         run: rustup show
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verilator >= 5.050
-        # Ubuntu 24.04 ships 5.020; build the pinned release so CI matches the floor in CLAUDE.md.
+      - name: Verilator cache
+        id: verilator-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.VERILATOR_ROOT_DIR }}
+          key: verilator-${{ env.VERILATOR_VERSION }}-${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04
+
+      - name: Build Verilator (cache miss only)
+        if: steps.verilator-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y git help2man perl python3 make autoconf g++ flex bison ccache \
-            libfl2 libfl-dev zlib1g zlib1g-dev
-          git clone --depth 1 --branch v5.050 https://github.com/verilator/verilator.git /tmp/verilator
-          cd /tmp/verilator && autoconf && ./configure && make -j"$(nproc)" && sudo make install
-          verilator --version
+          sudo apt-get install -y help2man autoconf flex bison libfl-dev zlib1g-dev
+          git clone --depth 1 --branch "$VERILATOR_VERSION" https://github.com/verilator/verilator.git /tmp/verilator
+          cd /tmp/verilator && autoconf && ./configure --prefix="$VERILATOR_ROOT_DIR"
+          make -j"$(nproc)" && make install
+
+      - name: Put Verilator on PATH
+        run: |
+          echo "$VERILATOR_ROOT_DIR/bin" >> "$GITHUB_PATH"
+          "$VERILATOR_ROOT_DIR/bin/verilator" --version
 
       - name: Pre-PR gate (same script as local)
         run: scripts/check.sh
