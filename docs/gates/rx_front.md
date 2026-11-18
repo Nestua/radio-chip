@@ -271,7 +271,8 @@ own |C| is an equivalent mutation (|C| unchanged), so the lag was mutated instea
    for acquisitions, but in hardware the LTF stage then runs continuously) and biases both CFO
    estimators toward the spur (≈ −0.5 kHz at −10 dB INR; 7 kHz RMS at +3 dB, 10 dB SNR). Candidates: switch to
    exact-tap B while A is saturated, or a spur notch. Decide with R3 hardware spur data.
-5. **AGC interface**: on a gain step the DC estimate should be rescaled by the same step (the
+5. **AGC interface** (+ R0-08b G2: idle noise must stay ≥ ≈ 1 LSB rms, −65 dBFS, or the ADC
+   makes it sparse and the detector false-alarms): on a gain step the DC estimate should be rescaled by the same step (the
    AGC knows it) and detection blanked while gain settles; today the LTF stage absorbs the
    transient detections. Defined with the AGC (R1/R3).
 6. **TDMA mode** (slot-gated, relaxed false-alarm budget): exact-tap B is 0.83 vs 0.23 at 0 dB
@@ -405,3 +406,160 @@ running maximum over the stored positions instead of dropping them (simplest kep
     (review item 5), integer NCO phase, CORDIC for both angles, the 128-tap search correlator
     (open question 7), the non-coherent/coherent confirmation (2·w 64-tap correlations at the
     decision, multi-cycle), weight 0.771 as a shift sum; G2 budget as in the G0 entry.
+
+## 2026-11-18 · G0 · R0-08b part 2: fixed-point datapath and G2 method
+The fixed-point model `RxFrontFixed` (`crates/radio-phy/src/rx_front_fixed.rs`) repeats
+`RxFront` step by step in integer arithmetic; every width below is a parameter of
+`FixedRxConfig`, chosen by the G2 sweep and then frozen as the default.
+
+### Datapath (all integer; rounding stated per step)
+- **In**: 12-bit two's-complement I/Q from the ADC (AD9361, R3), `(i16, i16)`. The ADC is common
+  to both models: the float reference runs on the same integers as `f64`, so G2 measures the
+  receiver's arithmetic, not the ADC.
+- **DC blocker**: accumulator M = m·2^F (F fractional bits); error e = x·2^F − M (exact);
+  M += e >> k (arithmetic shift, floor), k the gear shift; y = e·2^−F rounded (G2: half to
+  even, not half up — finding 1 below), 13 bits.
+- **Detector A**: y reduced to D bits (round, saturate); C, P₁, P₂ exact running integer sums
+  (no recompute: integers do not drift); fire when den·|C|² ≥ num·P₁·P₂ with num/den = 85/256
+  ≥ 0.575² (θ_eff = 0.5762, so the false-alarm rate cannot rise from the threshold itself).
+  (G2 changed this: D = 13, exact comparison, num/den = 21668/2^16 — see the G2 entry.)
+- **Angles**: CORDIC vectoring (N iterations, angles in units of 2π/2^A, input block-normalised
+  to W_c bits by a leading-zero shift). Used for the provisional latch, final coarse and fine.
+- **NCO**: P-bit phase accumulator; lag 16 makes the step the latched angle shifted right by 4;
+  e^(jφ) from a quarter-wave LUT (L address bits, Q-bit amplitude); z = y·e^(jφ) rounded to Z
+  bits.
+- **Search correlator**: 128 taps [L L]* quantised to T bits (scaled to the LTF's peak);
+  output c rounded to K bits before |c|²; energy sum, running maximum, latest-start rule as in
+  the float model (the 7/8 factor as a shift: e ≥ e_max − e_max/8).
+- **Confirmation**: the history (y) rotated by the final coarse angle through the same NCO/LUT
+  design; 2·w correlations of 64 taps; both rules as integer comparisons with the quantised
+  template's own energy in the normalisation.
+- **CFO**: in phase units per sample, 2π/2^P. ω_c = angle_c·2^(P−A)/16, ω_f = angle_f·2^(P−A)/64
+  resolved modulo 2^P/64 into ±2^P/128 around ω_c; combined ω_c + d·(1/2 + 1/4 + 1/64)
+  (0.765625 for 0.771: the variance penalty of the weight error is < 0.1 %; G2: one rounded
+  product (49·d + 32) >> 6, since three floored shifts bias by −1.5 LSB).
+
+### G2 budget (from the G0 entry) and method
+Pd within Monte-Carlo noise of the float model; false alarms: zero in 6·10⁷ noise samples at
+several input levels, plus a 10⁹-sample tail for the chosen widths; CFO RMS ≤ +10 % of the
+float model's; timing (fft_start) identical in ≥ 99.9 % of frames both acquire. Frames: the
+R0-08a scenes scaled so the packet's RMS sits at −15 dBFS (AGC settled; PAPR headroom ≈ 15 dB),
+AWGN 4/10/25 dB and TGn D 9 dB, CFO ±235 kHz, fractional delay. Each width is swept with the
+others generous, the smallest meeting the budget taken, then the joint set verified by the gate
+`tests/g2_rx_front.rs`. The sweep goes into `docs/gates/reports/rx_front_g2.txt`.
+
+## 2026-11-18 · G2 · R0-08b part 2: fixed-point receiver front
+Model: `RxFrontFixed` in `crates/radio-phy/src/rx_front_fixed.rs` (control flow of `RxFront`,
+integer arithmetic). Gate: `tests/g2_rx_front.rs` (7 tests, ~6 s). Sweep: `rxfront g2 300`,
+`g2joint 3000`, `tailfx 200` → `docs/gates/reports/rx_front_g2.txt`. Command:
+`cargo test --release -p radio-phy --test g2_rx_front -- --nocapture` (rustc 1.98.1, base
+8e4a71c). Test-first: the gate was written against the planned API (failed to compile); the
+onset/high-SNR test was written for the review's finding and failed (743 vs 0 events) before
+the fix.
+
+### Chosen formats (`FixedRxConfig::default()`)
+| Stage | Format | Smallest passing alone (sweep) |
+|---|---|---|
+| ADC in | 12 bits | — |
+| DC blocker | accumulator F = 10 fractional bits; output y 13 bits, convergent rounding | F ≥ 8 (below: dead zone ⇒ residual DC ⇒ 10⁵–10⁶ false alarms) |
+| Detector A | full 13-bit y (D = 13), exact sums, exact comparison 2^16·\|C\|² ≥ 21668·P₁P₂ (θ_eff 0.575002) | D 8–12 false-alarm; D 6–7 pass only because the five sampled levels miss their sparse level (finding 2) |
+| CORDIC | N = 16 micro-rotations, input normalised to W_c − 3 magnitude bits so x/y fit W_c = 18-bit registers (modelled as wrapping), angles A = 16 bits | N ≥ 10, W_c ≥ 14, A ≥ 12 |
+| NCO | phase P = 22 bits (CFO step 4.8 Hz at 20 MHz), quarter-wave table L = 9 address bits, Q = 11-bit amplitude | P 22 is the floor tried, L ≥ 7, Q ≥ 6 |
+| Search correlator | z Z = 12 bits, taps T = 8 bits, output K = 20 bits before \|c\|² | Z ≥ 10, T ≥ 6, K ≥ 15 |
+| Coarse/fine CFO | E = 12-bit inputs to the lag-16/lag-64 sums | E ≥ 9 (+6 % at 25 dB); 11: +1.6 %, 12: +0.7 % |
+| Combination | (49·d + 32) >> 6 = 0.765625·d, rounded | — |
+The joint set sits above the one-at-a-time minima on the angle path (A/N/W_c) and the
+correlator path (Z/Q/K): every perturbation flips the same rare near-ties of the energy window,
+so their effects add. On 12 000 paired frames (`g2joint`): the chosen set disagrees on the FFT
+start in 5 (0.042 %; budget 0.1 %; Poisson 95 % upper bound ≈ 10.5, 0.088 %), all ±1 sample,
+in AWGN 25 dB and TGn D; a lower joint set (A14 N14 W_c15 Z10 Q9 K17) in 12 (0.100 %, fails);
+a generous set (all widths +2…+6) in 0 — precision, not an irreducible floor.
+
+### Findings
+1. **Rounding must be unbiased.** Narrowing with half-up (or floor) adds up to ½ LSB of DC; on a
+   quiet input that DC correlates perfectly at lag 16. All narrowing is convergent (half to
+   even, R0-11's `requantize`).
+2. **The detector must see the full 13 bits.** Narrowing to D < 13 makes the idle noise sparse
+   at some input level — D = 8 at −45 dBFS (1562 false alarms in 3·10⁶), D = 10 at −55, D = 12
+   at −65 — and the normalised correlation of sparse sequences has a heavy tail.
+3. **AGC floor requirement (R1/R3)**: below ≈ 1 LSB rms (−75 dBFS, σ ≈ 0.36 LSB) the ADC itself
+   makes the noise sparse and *both* models false-alarm (float 1205, fixed 919 in 3·10⁶). The
+   AGC must keep idle noise at or above ≈ −65 dBFS. Added to open question 5.
+4. The DC accumulator needs F > 7 (the steady-state shift): with F ≤ 7 the floored e >> 7
+   freezes errors below 2^(7−F) LSB.
+
+### Pre-PR review (fresh agent, code only), 2026-11-18
+Confirmed control-flow parity line by line, the integer identities (7/8 keep, both
+confirmation rules as 2x ≥ E_L·rx), signs, wraps, no runtime float on the data path. Findings:
+1. **Must-fix — detector normalisation**: a common shift sized on max(P₁, P₂) (block floating
+   point, 10 bits) zeroed the smaller sum at a power onset and fired unconditionally: 743
+   events vs 0 (float) within 64 samples of 200 −65 → −15 dBFS onsets; `detected_at` off in all
+   frames at 40/50 dB. Fixed: exact comparison in i128 (|C|, P₁, P₂ < 2^32). An RTL may
+   normalise each term separately only with the model. Gate: onsets 0 vs 0; same detection as
+   float in 197/200 (40 dB) and 199/200 (50 dB).
+   On the way: with θ² = 85/256 (θ_eff 0.5762) the detection came one sample late in 15 % of
+   40 dB frames (steep ramp); now 21668/2^16 (θ_eff 0.575002).
+2. CORDIC x/y need headroom for √2 × gain 1.65: normalised to W_c − 3 bits (was W_c − 2,
+   which overflows an 18-bit register at full-scale diagonals); the register is modelled
+   wrapping, so the old margin now fails the CORDIC test (mutation).
+3. The gate netted float-only against fixed-only frames; now per-frame disagreements (both
+   ways) ≤ 1 % + 3σ, in the gate and in `rxfront g2`.
+4. Docs said half-up; the first joint-set and float spur numbers were not in the report — now
+   `g2joint` runs the lower set and the gate measures float and fixed on the same spur frames.
+5. `RxConfig::detector/threshold` are ignored by the fixed model (documented);
+   `FixedRxConfig::is_valid` guards widths (the receiver does nothing on an invalid set).
+   Nits taken: CORDIC bound called "derived (loose)", tables computed once per receiver,
+   combination rounded; NCO top-L-bit truncation (−π/2^L constant phase) left as is.
+
+### Evidence (budget from the G0 entries)
+1. **Paired frames** (gate, 1500 frames: AWGN 4/10/25 dB, TGn D 9 dB, −15 dBFS, CFO ±235 kHz):
+   Pd 398/400/400/295 both models, 0 frames disagreeing on detection or acquisition; FFT start
+   identical 1499/1499; CFO RMS fixed vs float 2936/2923, 1349/1346, 228/228, 1819/1813 Hz
+   (≤ +0.5 %; budget +10 %). `g2joint` 12 000 frames: 0 detection/acquisition disagreements,
+   CFO −0.1…+0.3 %, FFT start 5 disagreements.
+2. **False alarms**: gate 6·10⁷ noise samples at −15/−30/−45/−55/−65 dBFS: 0; `tailfx 200`:
+   10⁹ samples over the same five levels: 0 (budget 5·10⁻⁸ per sample).
+3. **Robustness through the ADC** (gate): no acquisition under DC 10 dB, CW +3 dB, ±30 dB AGC
+   steps (the `rxfront robust` seeds); spur at the noise level, 4 dB: fixed 390/400, float
+   390/400 on the same frames; stream opening on DC: residual DC at the noise level by sample
+   128, no acquisition; power onsets and 40/50 dB detections as float (review item 1).
+4. **Primitives against references we did not write**: CORDIC vs `f64::atan2` on 20 000 inputs
+   (magnitudes 1…2⁴⁰, all quadrants, axes): worst 3.8·10⁻⁴ rad, derived (loose) bound
+   2.4·10⁻³; NCO table vs `f64::sin_cos` over 2¹⁶ phases: worst 1.27·10⁻² (bound 1.30·10⁻²).
+
+Mutation check (each restored with `cp` + `touch`):
+| Mutation | Fails |
+|---|---|
+| NCO step sign | frames, robustness, onsets/high SNR |
+| coarse CFO sign | frames |
+| CORDIC rotation direction | CORDIC, frames, robustness |
+| CORDIC normalised to W_c − 2 (old margin) | CORDIC, frames |
+| NCO quadrant fold | NCO, frames, robustness |
+| common normalising shift in the detector (pre-review) | onsets/high SNR |
+| threshold 85/256 | onsets/high SNR |
+| threshold 70/256 | false alarms |
+| DC accumulator F = 6 | false alarms |
+| detector input narrowed to 10 bits | false alarms |
+| non-coherent rule at 1.0 | frames, robustness |
+| coherence rule off | robustness (±30 dB steps) |
+| weight 1/2 | frames (CFO RMS) |
+| fine not resolved against coarse | frames |
+| sign-only taps | frames, robustness |
+| confirmation without the coarse rotation | frames, robustness |
+| earliest start instead of latest | frames, robustness |
+| keep 1/2 instead of 7/8 | frames, robustness |
+| no gear shift in the DC blocker | DC start-up (added for it; first survived) |
+| latch lag 0 | frames |
+Survivor: weight 48/64 instead of 49/64 — equivalent within the budget by design (+0.3 % var).
+(The rows above the review were run before its fixes; the review's rows and the weight rows
+after them, on the final model.)
+
+### Open questions
+11. **G3 (RTL)**: `hw/rtl/rx_front.sv` against vectors from `rvec` (the fixed model's
+    acquisitions and, for the arithmetic blocks, the CORDIC/NCO/correlator outputs). The
+    decision-time sums (96 + 88 products, 2·w 64-tap correlations, rotation of 128 + w history
+    samples) are multi-cycle in hardware or running accumulators with delay lines — integer
+    sums are exact, so both are bit-exact with the model. The detector's exact comparison
+    needs 33-bit squares/products (or per-term normalisation, modelled first).
+12. The 128-tap complex correlator (12 × 8-bit products) is the largest block; 4-bit taps cost
+    6/1200 timing disagreements alone — revisit with an area estimate.

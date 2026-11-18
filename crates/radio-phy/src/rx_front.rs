@@ -142,7 +142,7 @@ impl RxConfig {
 /// The final coarse window ends this far before the first-path LTF symbol T1: products
 /// k ∈ [T1 − 64 − L, T1 − 64), so k + 16 stays 16 samples clear of GI2 (delay spread) and the
 /// window starts 32 samples into the STF (AGC settling).
-const COARSE_END_BEFORE_T1: usize = 64;
+pub(crate) const COARSE_END_BEFORE_T1: usize = 64;
 
 /// Result of acquiring one PPDU.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -300,14 +300,14 @@ pub fn backoff_samples(cfg: &RxConfig) -> usize {
 /// Reading an index older than that returns a newer entry, so every reader keeps within the
 /// capacity by construction (each user states the span it needs).
 #[derive(Debug, Clone)]
-struct Ring<T: Copy> {
+pub(crate) struct Ring<T: Copy> {
     buf: Vec<T>,
     mask: usize,
 }
 
 impl<T: Copy> Ring<T> {
     /// A ring of at least `span` entries (rounded up to a power of two, as an RTL memory).
-    fn new(span: usize, fill: T) -> Self {
+    pub(crate) fn new(span: usize, fill: T) -> Self {
         let cap = span.max(1).next_power_of_two();
         Self {
             buf: vec![fill; cap],
@@ -315,12 +315,12 @@ impl<T: Copy> Ring<T> {
         }
     }
 
-    fn put(&mut self, n: usize, v: T) {
+    pub(crate) fn put(&mut self, n: usize, v: T) {
         let i = n & self.mask;
         self.buf[i] = v;
     }
 
-    fn get(&self, n: usize) -> T {
+    pub(crate) fn get(&self, n: usize) -> T {
         self.buf[n & self.mask]
     }
 }
@@ -567,7 +567,7 @@ pub const HISTORY: usize = 512;
 /// detector window is still mostly STF), so without the lag the latch would include GI2.
 pub const LATCH_LAG: usize = 24;
 /// Template length of the LTF search correlator: both long symbols, T1 T2.
-const PAIR_LEN: usize = 2 * LTF_SYMBOL_LEN;
+pub(crate) const PAIR_LEN: usize = 2 * LTF_SYMBOL_LEN;
 
 /// The LTF search in progress.
 #[derive(Debug, Clone, Copy)]

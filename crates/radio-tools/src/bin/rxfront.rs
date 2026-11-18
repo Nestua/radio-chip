@@ -12,6 +12,12 @@
 //!   (`tools/ref/rx_front_openofdm.py`); `tests/g1_rx_front_openofdm.rs` rebuilds them from the
 //!   same recipe and checks the hash.
 //!
+//! - `g2 <frames per case>`: G2 of the fixed-point model (R0-08b): one-at-a-time word-length
+//!   sweep against the float model on paired ADC frames, with detector false alarms on noise.
+//! - `g2joint <frames per case>`: the chosen widths and a generous set on many paired frames,
+//!   listing every FFT-start disagreement.
+//! - `tailfx <million>`: false alarms of the fixed detector on noise at five input levels.
+//!
 //! The output goes into the gate journal / `docs/gates/reports/`; it is not a generated file.
 
 use std::f64::consts::PI;
@@ -26,6 +32,9 @@ use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{
     acquire, acquisitions, backoff_samples, detect, detections, detector_metric, front, Detector,
     RxConfig,
+};
+use radio_phy::rx_front_fixed::{
+    acquire_fixed, detections_fixed, to_adc, FixedRxConfig, ADC_FULL_SCALE,
 };
 
 type C = (f64, f64);
@@ -406,6 +415,309 @@ fn frames(per_snr: usize) {
     );
 }
 
+/// One paired G2 frame: ADC samples, STF start, true CFO and the float model's outcome.
+struct G2Frame {
+    case: usize,
+    adc: Vec<(i16, i16)>,
+    stf: usize,
+    cfo: f64,
+    det: bool,
+    acq: Option<(usize, f64)>,
+}
+
+/// A fixed-model outcome: frame index, detected in time, (FFT start, CFO Hz) if acquired.
+type G2Row = (usize, bool, Option<(usize, f64)>);
+
+/// The G2 cases: name, SNR, TGn D or AWGN.
+const G2_CASES: [(&str, f64, bool); 4] = [
+    ("AWGN 4 dB", 4.0, false),
+    ("AWGN 10 dB", 10.0, false),
+    ("AWGN 25 dB", 25.0, false),
+    ("TGn D 9 dB", 9.0, true),
+];
+
+fn g2_frames(per_case: usize) -> Vec<G2Frame> {
+    let f = preamble();
+    let cfg = RxConfig::new(FS);
+    let d_taps = tgn_taps(TgnModel::D, false);
+    let per_thread = per_case.div_ceil(threads());
+    par(|t| {
+        let mut rng = Rng::new(0x9200_0000 + t as u64);
+        let mut out = Vec::new();
+        for (case, &(_, snr, tgn)) in G2_CASES.iter().enumerate() {
+            for _ in 0..per_thread {
+                let lead = 200 + (rng.uniform() * 300.0) as usize;
+                let cfo = (rng.uniform() * 2.0 - 1.0) * 235e3;
+                let mut x = vec![(0.0, 0.0); lead];
+                x.extend_from_slice(&f);
+                x.extend(vec![(0.0, 0.0); 400]);
+                let x = if tgn {
+                    Multipath::new(d_taps.clone(), Doppler::Static, 1, FS, &mut rng).apply(&x)
+                } else {
+                    fractional_delay(&x, rng.uniform())
+                };
+                let x = frequency_offset(&x, cfo, FS, 2.0 * PI * rng.uniform());
+                let p = mean_power(&f);
+                let x = awgn(&x, snr, p, &mut rng);
+                let rms = (p * (1.0 + 10f64.powf(-snr / 10.0))).sqrt();
+                let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-15.0 / 20.0) / rms;
+                let adc = to_adc(&x, gain);
+                let xf: Vec<C> = adc
+                    .iter()
+                    .map(|&(a, b)| (f64::from(a), f64::from(b)))
+                    .collect();
+                let det = detections(&xf, &cfg)
+                    .iter()
+                    .any(|&d| d >= lead && d < lead + 80);
+                let acq = acquire(&xf, 0, &cfg).map(|a| (a.fft_start, a.cfo_hz));
+                out.push(G2Frame {
+                    case,
+                    adc,
+                    stf: lead,
+                    cfo,
+                    det,
+                    acq,
+                });
+            }
+        }
+        out
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Budget check of one configuration on the paired frames: per case Pd and acquisition
+/// differences, CFO RMS ratio; overall timing mismatches. Returns (pass, summary).
+fn g2_eval(frames: &[G2Frame], fx: &FixedRxConfig) -> (bool, String) {
+    let cfg = RxConfig::new(FS);
+    let chunk = frames.len().div_ceil(threads());
+    let rows: Vec<G2Row> = par(|t| {
+        frames
+            .iter()
+            .enumerate()
+            .skip(t * chunk)
+            .take(chunk)
+            .map(|(i, fr)| {
+                let det = detections_fixed(&fr.adc, &cfg, fx)
+                    .iter()
+                    .any(|&d| d >= fr.stf && d < fr.stf + 80);
+                let acq = acquire_fixed(&fr.adc, &cfg, fx).map(|a| (a.fft_start, a.cfo_hz(fx, FS)));
+                (i, det, acq)
+            })
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut pass = true;
+    let mut parts = Vec::new();
+    let (mut both_all, mut mism_all) = (0usize, 0usize);
+    for case in 0..G2_CASES.len() {
+        let (mut dpf, mut dpx, mut ddis, mut of, mut ox, mut both, mut mism) =
+            (0i64, 0i64, 0i64, 0i64, 0i64, 0, 0);
+        let (mut ef, mut ex) = (0.0, 0.0);
+        let mut n = 0;
+        for &(i, det, acq) in &rows {
+            let fr = &frames[i];
+            if fr.case != case {
+                continue;
+            }
+            n += 1;
+            dpf += i64::from(fr.det);
+            ddis += i64::from(fr.det != det);
+            dpx += i64::from(det);
+            match (fr.acq, acq) {
+                (Some(a), Some(b)) => {
+                    both += 1;
+                    if a.0 != b.0 {
+                        mism += 1;
+                    }
+                    ef += (a.1 - fr.cfo).powi(2);
+                    ex += (b.1 - fr.cfo).powi(2);
+                }
+                (Some(_), None) => of += 1,
+                (None, Some(_)) => ox += 1,
+                (None, None) => {}
+            }
+        }
+        let tol = n as f64 * 0.01 + 3.0 * (n as f64 * 0.01).sqrt();
+        let ratio = (ex / ef.max(1e-30)).sqrt();
+        pass &= (ddis as f64) <= tol && ((of + ox) as f64) <= tol && ratio <= 1.10;
+        both_all += both;
+        mism_all += mism;
+        parts.push(format!(
+            "Pd{:+} (≠{ddis}) acq≠{} cfo{:+.1}%",
+            dpx - dpf,
+            of + ox,
+            (ratio - 1.0) * 100.0
+        ));
+    }
+    pass &= mism_all * 1000 <= both_all;
+    (
+        pass,
+        format!("timing≠ {mism_all}/{both_all} | {}", parts.join(" | ")),
+    )
+}
+
+/// False alarms of the fixed detector on `million` M noise samples per level.
+fn g2_noise(fx: &FixedRxConfig, million: usize) -> usize {
+    let cfg = RxConfig::new(FS);
+    let levels = [-15.0, -30.0, -45.0, -55.0, -65.0];
+    let per_thread = (million * levels.len()).div_ceil(threads());
+    par(|t| {
+        let mut rng = Rng::new(0x9300_0000 + t as u64);
+        let mut n = 0;
+        for k in 0..per_thread {
+            let level: f64 = levels[(t * per_thread + k) % levels.len()];
+            let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(level / 20.0);
+            n += detections_fixed(&to_adc(&noise(1_000_000, &mut rng), gain), &cfg, fx).len();
+        }
+        n
+    })
+    .iter()
+    .sum()
+}
+
+/// `g2 <frames per case>`: one-at-a-time word-length sweep of the fixed-point receiver front
+/// against the float model on paired frames (all other widths at their defaults).
+fn g2(per_case: usize) {
+    let frames = g2_frames(per_case);
+    let base = FixedRxConfig::default();
+    println!(
+        "# rxfront g2: fixed-point receiver front vs float on {} paired frames",
+        frames.len()
+    );
+    println!(
+        "# ({per_case} per case: {}), packet at -15 dBFS, CFO ±235 kHz",
+        G2_CASES.map(|c| c.0).join(", ")
+    );
+    println!(
+        "# budget: frames where detection or acquisition disagree ≤ 1 % + 3σ per case, CFO RMS"
+    );
+    println!(
+        "# ≤ +10 % per case, FFT start identical in ≥ 99.9 % overall; FA = detector events on"
+    );
+    println!(
+        "# 5 × 3 M noise samples at -15/-30/-45/-55/-65 dBFS (detector widths only; must be 0)"
+    );
+    let (ok, s) = g2_eval(&frames, &base);
+    println!(
+        "\n## defaults {base:?}\n  {} {s}",
+        if ok { "PASS" } else { "FAIL" }
+    );
+    type Set = fn(&mut FixedRxConfig, u32);
+    let sweeps: [(&str, std::ops::RangeInclusive<u32>, Set, bool); 12] = [
+        ("dc_frac F", 2..=12, |f, v| f.dc_frac = v, true),
+        ("det_bits D", 6..=13, |f, v| f.det_bits = v, true),
+        ("cordic_iters N", 6..=16, |f, v| f.cordic_iters = v, false),
+        ("cordic_bits W_c", 8..=20, |f, v| f.cordic_bits = v, false),
+        (
+            "angle_bits A (N = min(16, A))",
+            8..=16,
+            |f, v| {
+                f.angle_bits = v;
+                f.cordic_iters = v.min(16)
+            },
+            false,
+        ),
+        (
+            "nco_phase_bits P",
+            22..=28,
+            |f, v| f.nco_phase_bits = v,
+            false,
+        ),
+        ("nco_lut_bits L", 4..=12, |f, v| f.nco_lut_bits = v, false),
+        ("nco_amp_bits Q", 4..=14, |f, v| f.nco_amp_bits = v, false),
+        ("z_bits Z", 3..=12, |f, v| f.z_bits = v, false),
+        ("tap_bits T", 1..=8, |f, v| f.tap_bits = v, false),
+        ("corr_bits K", 6..=18, |f, v| f.corr_bits = v, false),
+        ("est_bits E", 6..=13, |f, v| f.est_bits = v, false),
+    ];
+    for (name, range, set, noise_check) in sweeps {
+        println!("\n## {name}");
+        for v in range {
+            let mut fx = base;
+            set(&mut fx, v);
+            let (ok, s) = g2_eval(&frames, &fx);
+            let fa = noise_check.then(|| g2_noise(&fx, 3));
+            let ok = ok && fa.is_none_or(|n| n == 0);
+            let fa = fa.map_or(String::new(), |n| format!(" | FA {n}"));
+            println!("  {v:>2} {} {s}{fa}", if ok { "PASS" } else { "FAIL" });
+        }
+    }
+}
+
+/// `tailfx <million>`: detection events of the fixed detector (defaults) on noise, per level.
+fn tailfx(million: usize) {
+    let fx = FixedRxConfig::default();
+    let n = g2_noise(&fx, million);
+    println!("# rxfront tailfx: fixed detector (defaults), {million} M noise samples at each of -15/-30/-45/-55/-65 dBFS: {n} events");
+}
+
+/// `g2joint <frames per case>`: the chosen widths and a generous set on many paired frames,
+/// with every FFT-start disagreement listed (fixed − float, in samples).
+fn g2joint(per_case: usize) {
+    let frames = g2_frames(per_case);
+    let cfg = RxConfig::new(FS);
+    let generous = FixedRxConfig {
+        dc_frac: 14,
+        cordic_iters: 18,
+        cordic_bits: 24,
+        angle_bits: 18,
+        nco_phase_bits: 28,
+        nco_lut_bits: 14,
+        nco_amp_bits: 16,
+        z_bits: 13,
+        tap_bits: 10,
+        corr_bits: 24,
+        est_bits: 13,
+        ..FixedRxConfig::default()
+    };
+    println!(
+        "# rxfront g2joint: {} paired frames ({per_case} per case)",
+        frames.len()
+    );
+    let c = FixedRxConfig::default();
+    let first = FixedRxConfig {
+        angle_bits: 14,
+        cordic_iters: 14,
+        cordic_bits: 15,
+        z_bits: 10,
+        nco_amp_bits: 9,
+        corr_bits: 17,
+        ..c
+    };
+    let variants = [
+        ("chosen", c),
+        ("generous", generous),
+        ("first joint set (A14 N14 W_c15 Z10 Q9 K17)", first),
+    ];
+    for (name, fx) in variants {
+        let (ok, s) = g2_eval(&frames, &fx);
+        let chunk = frames.len().div_ceil(threads());
+        let offs: Vec<(usize, i64)> = par(|t| {
+            frames
+                .iter()
+                .skip(t * chunk)
+                .take(chunk)
+                .filter_map(|fr| {
+                    let a = fr.acq?;
+                    let b = acquire_fixed(&fr.adc, &cfg, &fx)?;
+                    (a.0 != b.fft_start).then_some((fr.case, b.fft_start as i64 - a.0 as i64))
+                })
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
+        println!(
+            "## {name}: {} {s}\n   disagreements (case, fixed − float): {offs:?}",
+            if ok { "PASS" } else { "FAIL" }
+        );
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
@@ -415,8 +727,11 @@ fn main() -> ExitCode {
         "pd" => pd(n.unwrap_or(2000)),
         "robust" => robust(n.unwrap_or(4)),
         "frames" => frames(n.unwrap_or(200)),
+        "g2" => g2(n.unwrap_or(300)),
+        "tailfx" => tailfx(n.unwrap_or(100)),
+        "g2joint" => g2joint(n.unwrap_or(3000)),
         _ => {
-            eprintln!("usage: rxfront tail|pd|robust|frames [n]");
+            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx [n]");
             return ExitCode::from(2);
         }
     }
