@@ -269,6 +269,23 @@ pub fn ltf_taps(fx: &FixedRxConfig) -> [IQ; LTF_SYMBOL_LEN] {
     out
 }
 
+/// The LTF search correlator: c = Σ_{k<128} z(k)·conj(tap(k mod 64)) over a window of 128
+/// Z-bit samples (oldest first, T1 T2), narrowed to K bits (half to even, saturating).
+/// |c| ≤ 128·2^(Z−1)·2^(T−1)·2, so the full sum is a (Z + T + 8)-bit value whose top K bits are
+/// kept. `None` when `fx` is not valid.
+pub fn ltf_corr(window: &[IQ; PAIR_LEN], fx: &FixedRxConfig) -> Option<IQ> {
+    fx.is_valid()
+        .then(|| ltf_corr_with(window, fx, &ltf_taps(fx)))
+}
+
+fn ltf_corr_with(window: &[IQ; PAIR_LEN], fx: &FixedRxConfig, taps: &[IQ; LTF_SYMBOL_LEN]) -> IQ {
+    let c = window.iter().enumerate().fold((0, 0), |a, (k, z)| {
+        iadd(a, imul(*z, iconj(taps[k % LTF_SYMBOL_LEN])))
+    });
+    let full = fx.z_bits + fx.tap_bits + 8;
+    narrow_iq(c, full, fx.corr_bits)
+}
+
 /// Scales float samples by `gain` into the 12-bit ADC: round, saturate.
 pub fn to_adc(x: &[(f64, f64)], gain: f64) -> Vec<(i16, i16)> {
     let q = |v: f64| {
@@ -470,6 +487,19 @@ pub struct RxFrontFixed {
     cordic: Vec<i64>,
     nco: Vec<IQ>,
     search: Option<Search>,
+    trace: SampleTrace,
+}
+
+/// The intermediate values of one sample of [`RxFrontFixed`] (what the RTL gates compare).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SampleTrace {
+    /// DC blocker output, [`Y_BITS`] bits.
+    pub y: IQ,
+    /// NCO-rotated sample entering the LTF correlator, Z bits.
+    pub z: IQ,
+    /// LTF search correlator output (K bits) of the window ending at this sample; `None` before
+    /// the first full window.
+    pub corr: Option<IQ>,
 }
 
 impl RxFrontFixed {
@@ -498,6 +528,7 @@ impl RxFrontFixed {
             cordic: cordic_table(&fx),
             nco: nco_table(&fx),
             search: None,
+            trace: SampleTrace::default(),
         }
     }
 
@@ -522,6 +553,18 @@ impl RxFrontFixed {
 
     /// Processes the next ADC sample; returns the acquisition decided at it, if any.
     pub fn push(&mut self, x: (i16, i16)) -> Option<FixedAcquisition> {
+        self.trace = SampleTrace::default();
+        self.step_sample(x)
+    }
+
+    /// [`RxFrontFixed::push`], also returning the intermediate values of this sample (the
+    /// internal signals the RTL gates compare, `rvec`).
+    pub fn push_traced(&mut self, x: (i16, i16)) -> (Option<FixedAcquisition>, SampleTrace) {
+        let acq = self.push(x);
+        (acq, self.trace)
+    }
+
+    fn step_sample(&mut self, x: (i16, i16)) -> Option<FixedAcquisition> {
         let fx = self.fx;
         if !fx.is_valid() {
             return None;
@@ -566,21 +609,20 @@ impl RxFrontFixed {
         // 2. NCO: z = y·e^(jφ), rounded to Z bits.
         let rot = rotate_with(self.phase, &fx, &self.nco);
         let prod = imul(yv, rot);
-        self.z
-            .put(n, narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits));
+        let zv = narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits);
+        self.z.put(n, zv);
+        self.trace = SampleTrace {
+            y: yv,
+            z: zv,
+            corr: None,
+        };
         self.phase = (self.phase + self.step).rem_euclid(1i64 << fx.nco_phase_bits);
 
         // 3. LTF search.
         let i = n.checked_sub(PAIR_LEN - 1)?;
-        let c = (0..PAIR_LEN).fold((0, 0), |a, k| {
-            iadd(
-                a,
-                imul(self.z.get(i + k), iconj(self.taps[k % LTF_SYMBOL_LEN])),
-            )
-        });
-        // |c| ≤ 128·2^(Z−1)·2^(T−1)·2: Z + T + 8 bits; keep the top K.
-        let full = fx.z_bits + fx.tap_bits + 8;
-        let cq = narrow_iq(c, full, fx.corr_bits);
+        let window: [IQ; PAIR_LEN] = std::array::from_fn(|k| self.z.get(i + k));
+        let cq = ltf_corr_with(&window, &fx, &self.taps);
+        self.trace.corr = Some(cq);
         self.pair.put(i, iabs2(cq));
         if self.w == 0 {
             return None;
@@ -710,4 +752,29 @@ pub fn acquisitions_fixed(
 ) -> Vec<FixedAcquisition> {
     let mut rx = RxFrontFixed::new(cfg.clone(), *fx);
     x.iter().filter_map(|&s| rx.push(s)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The RTL correlator folds tap pairs (k, 64 − k): it relies on the quantised taps keeping
+    /// the LTF's Hermitian symmetry t(64 − k) = conj(t(k)) with t(0), t(32) real (the LTF is
+    /// real in frequency, IEEE 802.11-2020 §17.3.3).
+    #[test]
+    fn ltf_taps_are_hermitian() {
+        // Multi-bit taps only: sign-only taps (T = 1) map 0 to +1 and are not symmetric.
+        for tap_bits in 2..=16 {
+            let fx = FixedRxConfig {
+                tap_bits,
+                ..FixedRxConfig::default()
+            };
+            let t = ltf_taps(&fx);
+            assert_eq!(t[0].1, 0, "T {tap_bits}");
+            assert_eq!(t[32].1, 0, "T {tap_bits}");
+            for k in 1..LTF_SYMBOL_LEN {
+                assert_eq!(t[LTF_SYMBOL_LEN - k], iconj(t[k]), "T {tap_bits} k {k}");
+            }
+        }
+    }
 }

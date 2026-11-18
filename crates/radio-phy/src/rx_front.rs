@@ -567,7 +567,7 @@ pub const HISTORY: usize = 512;
 /// detector window is still mostly STF), so without the lag the latch would include GI2.
 pub const LATCH_LAG: usize = 24;
 /// Template length of the LTF search correlator: both long symbols, T1 T2.
-pub(crate) const PAIR_LEN: usize = 2 * LTF_SYMBOL_LEN;
+pub const PAIR_LEN: usize = 2 * LTF_SYMBOL_LEN;
 
 /// The LTF search in progress.
 #[derive(Debug, Clone, Copy)]
