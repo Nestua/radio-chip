@@ -101,7 +101,7 @@ Pd/Pfa unchanged within Monte-Carlo noise, CFO RMS within +10 % of float, timing
   must not acquire; mutations flipping a conjugate or a lag sign.
   The standard's CCA figure is a requirement checked by these runs, not a reference.
 - Channels: AWGN, TGn B/D/E (E's 730 ns is inside the 800 ns guard; only F exceeds it) and an
-  air-to-ground Rician case (two-ray, K from R0-07c) for the drone link.
+  air-to-ground Rician case (two-ray, K from R0-07d) for the drone link.
 
 ### Open questions
 1. TDMA preamble: slot gating is assumed; a longer preamble (doubled STF) is a protocol choice
