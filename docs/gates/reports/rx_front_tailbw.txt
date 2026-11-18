@@ -1,0 +1,8 @@
+# rxfront tailbw: RxFrontFixed on noise at −30 dBFS behind a 65-tap low-pass filter,
+# 400 M samples per case. Budget: 5e-8 detector events per sample (1 per second).
+# passband        detector events   per sample   acquisitions
+white                           0        0.0e0              0
+±9.0 MHz                        0        0.0e0              0
+±8.3 MHz                        4       1.0e-8              0
+±7.5 MHz                       22       5.5e-8              0
+±6.0 MHz                      624       1.6e-6              0

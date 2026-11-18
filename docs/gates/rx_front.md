@@ -1088,3 +1088,75 @@ Three mutations survived the first vector set and each led to a change:
   priority) moves it out; that is step 3's change and step 3's gate.
 - With events at least `DET_RUN` = 4 samples apart, the FIFO holds two results only at D = 5;
   D ≤ 4 never has more than one.
+## 2026-11-19 · measurements · the phase review's findings rerun (AGC transient, band-limited noise, input level)
+
+An independent review of everything through R0-08b (`docs/reviews/2026-11-19-r0-phase-review.md`)
+made three claims about the receiver front that can be measured. Each was rerun with a committed
+tool. No model behaviour changed; the decisions are in ADR 0007 (proposed).
+
+**New in the model:** `channel::agc_transient` (gain, phase and DC per state while the gain
+control settles; the ADC clips). Gate: `g1_channel_impairments::agc_transient_states`, against
+its definition and against `gain_step` and `add_tone`, which it generalises.
+
+**1. AGC transient inside the STF** — `rxfront agc 500`, `reports/rx_front_agc.txt`. Fixed
+receiver, 20 dB SNR, packet settled at −15 dBFS.
+- A gain step at STF sample 48 or later damages the coarse estimate (7–55 kHz RMS) and, through
+  the 0.771/0.229 combination, the output (2–13 kHz). No step: 395 Hz.
+- The fine estimate alone stays at 450–530 Hz. Its ambiguity was resolved correctly in all
+  15 000 frames.
+- A step at sample 16 or 32 costs nothing: the coarse window starts at 32, as designed.
+- Phase jumps within ±90° at a −20 dB step: 324 of 500 frames acquired (the confirmation
+  rotates the LTF by the damaged coarse estimate).
+- A step at sample 144, in the last STF period: 282 of 500 with the exact timing and fine
+  errors of 4.7 kHz. This case is 16 samples before GI2 and is the AGC's to avoid.
+- The existing gate `gain_step_robustness` steps at sample 24, before the window, with no
+  clipping and no phase jump: it could not see any of this.
+
+**2. Band-limited noise** — `rxfront tailbw 400`, `reports/rx_front_tailbw.txt`. Fixed receiver,
+4·10⁸ samples per passband, noise at −30 dBFS behind a 65-tap low-pass filter.
+- White and ±9 MHz: 0 events. ±8.3 MHz: 1.0·10⁻⁸ per sample. ±7.5 MHz: 5.5·10⁻⁸, the budget.
+  ±6 MHz: 1.6·10⁻⁶.
+- 0 acquisitions in all 2·10⁹ samples.
+- So "0 false alarms in 10⁹" (part 2, G2) is a white-noise statement about detector events.
+  What holds behind a channel filter is the absence of false acquisitions; the detector-event
+  rate, and with it the search duty cycle, depends on the filter. R0-08c measures with this.
+
+**3. Input level** — `rxfront level 400`, `reports/rx_front_level.txt`. Float and fixed on the
+same ADC samples.
+- −3 to −30 dBFS: fixed CFO RMS within 6 % of float at 4, 10 and 25 dB SNR.
+- −45 dBFS: +2 %, +3 %, +62 %. −55 dBFS: +17 %, +33 %, 2.6×. −60 dBFS: up to 5.4×.
+- Acquisition and timing: 400 of 400 in every cell.
+- The G2 claim "CFO ≤ +0.5 %" was measured at −15 dBFS and holds from −3 to −30 dBFS. That
+  range is the requirement on the AGC's target.
+
+**4. Timing probe** — Vivado 2024.2, out of context, xck26-sfvc784-2LV-c (KV260), one clock at
+6.25 ns (160 MHz), synthesis to routing with default settings, main at 464d270 (`det_a` …
+`ltf_corr` at 30c1751, the same sources). The script is on the build server
+(`/data/radio-chip/syn/probe/ooc.tcl`), not yet in the repo: `hw/fpga/` arrives with R2.
+
+| Block | WNS | LUTs | Registers | DSPs |
+|---|---|---|---|---|
+| `dc_block` | +3.41 ns | 189 | 83 | 0 |
+| `nco` | +2.58 ns | 96 | 52 | 4 |
+| `cordic` | +3.72 ns | 1212 | 779 | 0 |
+| `rx_latch` (with its CORDIC and delay line) | +0.84 ns | 1758 | 1111 | 0 |
+| `det_a` | −0.64 ns (53 endpoints) | 642 | 300 | 30 |
+| `ltf_corr` | −1.89 ns (729 endpoints) | 1932 | 3320 | 124 |
+
+- `det_a` fails in stage 3, as the review predicted: P1·P2 into the 15-bit constant multiply,
+  6.85 ns through three DSP stages and ten carry blocks. One more register there closes it and
+  moves fire/event from 4 to 5 edges; `rx_latch` and the `clear` alignment take their
+  latencies from that. Not done here: R0-08c retunes this block, and the compare is a
+  candidate for a narrower form in the model first (ADR 0007).
+- `ltf_corr` is the known −1.9 ns (part 3a): its adder tree is not pipelined.
+- `rx_latch`'s worst path is the latch sum into the CORDIC's normalisation (14 levels).
+- The 73 × 64-bit delay line maps to distributed RAM (33 LUTs), no block RAM.
+- This is the first timing evidence for these blocks; "not expected to be critical" in part 3c
+  holds for the CORDIC and the NCO.
+
+**Open questions**
+17. Which CFO the acquisition hands on (ADR 0007, decision 1).
+18. The coarse window under an AGC that steps after sample 32: needs the AGC's behaviour
+    (AD9361 fast attack first) and probably a signal from the AGC.
+19. The hand-off of samples to the rest of the receiver and the latency budget to SIGNAL and
+    to the ACK (ADR 0007, decision 2).

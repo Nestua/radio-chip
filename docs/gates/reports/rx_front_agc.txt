@@ -1,0 +1,35 @@
+# rxfront agc: RxFrontFixed, 500 frames per case, SNR 20 dB, settled at −15 dBFS,
+# CFO uniform in ±235 kHz. Steps are offsets from the STF's first sample; the gain before a
+# step is that many dB above the settled gain. RMS errors in Hz over the acquired frames;
+# slips = fine estimate off by more than fs/256 (its lag-64 ambiguity resolved wrongly).
+# case                                          acquired  timing   combined     coarse       fine  slips
+no gain change                                        500     500        395        818        444      0
+−20 dB at 48 (clips before), jump ±0°                 500     500       3245      13790        476      0
+−6 dB at 48, jump ±0°                                 500     500        430       1198        440      0
+−20, −10 dB at 32, 64, DC −30 dBFS, jump ±0°          500     500        799       3019        474      0
+−20, −10 dB at 48, 96, DC −30 dBFS, jump ±0°          500     500       5005      21222        525      0
+−2 dB trim at 100, jump ±0°                           500     500        399        868        443      0
+−20 dB at 48 (clips before), jump ±10°                500     500       3983      16862        462      0
+−6 dB at 48, jump ±10°                                500     500       1348       5691        454      0
+−20, −10 dB at 32, 64, DC −30 dBFS, jump ±10°         500     500       1156       4706        496      0
+−20, −10 dB at 48, 96, DC −30 dBFS, jump ±10°         500     500       5352      22748        498      0
+−2 dB trim at 100, jump ±10°                          500     500        805       3023        471      0
+−20 dB at 48 (clips before), jump ±30°                500     500       8757      37308        457      0
+−6 dB at 48, jump ±30°                                500     500       3831      16322        450      0
+−20, −10 dB at 32, 64, DC −30 dBFS, jump ±30°         500     500       2669      11213        533      0
+−20, −10 dB at 48, 96, DC −30 dBFS, jump ±30°         500     500       8470      36201        525      0
+−2 dB trim at 100, jump ±30°                          500     500       2132       9082        481      0
+−20 dB at 48 (clips before), jump ±90°                324     289      12950      55159        770      0
+−6 dB at 48, jump ±90°                                500     500      11104      47281        478      0
+−20, −10 dB at 32, 64, DC −30 dBFS, jump ±90°         500     490       6728      28566        624      0
+−20, −10 dB at 48, 96, DC −30 dBFS, jump ±90°         324     319      12877      54893        976      0
+−2 dB trim at 100, jump ±90°                          500     500       5644      23994        469      0
+−20 dB at 16, jump ±30°                               500     500        398        911        459      0
+−20 dB at 32, jump ±30°                               500     500        450       1062        486      0
+−20 dB at 48, jump ±30°                               500     500       8307      35309        475      0
+−20 dB at 64, jump ±30°                               500     500       5412      22992        485      0
+−20 dB at 80, jump ±30°                               500     500       3147      13269        468      0
+−20 dB at 96, jump ±30°                               500     500       2316       9653        476      0
+−20 dB at 112, jump ±30°                              500     500       1892       7862        487      0
+−20 dB at 128, jump ±30°                              500     500       1719       7238        477      0
+−20 dB at 144, jump ±30°                              500     282       4251      10412       4713      0

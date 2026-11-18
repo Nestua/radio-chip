@@ -161,3 +161,17 @@ Mutation check (each restored with `cp` + `touch`):
 5. TGn models cover delays up to 1050 ns (F) — beyond the 800 ns guard interval at 20 MHz; the
    long-range profile at 5/10 MHz has 1.6/3.2 µs guards. R0-09 should test E/F at 20 MHz as the
    ISI case.
+
+## 2026-11-19 · G1 · `agc_transient`: gain, phase and DC states while the gain control settles
+
+- **What:** sample n takes the first state with n < `until` (gain in dB, a carrier phase, a DC
+  offset added after the gain); samples after the last state are unchanged. Used by
+  `rxfront agc` (`docs/gates/rx_front.md`, 2026-11-19).
+- **Reference:** its definition written out sample by sample, and the two older functions it
+  generalises: one state without phase or DC equals `gain_step` on the scaled signal, and a
+  DC-only state equals `add_tone` at 0 Hz. Test `g1_channel_impairments::agc_transient_states`.
+- **Mutations** (each fails the test): the rotation's sign; a state ending one sample late; the
+  DC not added to the imaginary part.
+- **Not modelled:** the settling time of a gain step (steps are instantaneous), a filter's
+  transient after the step, and what a particular AGC does. The AD9361's fast-attack behaviour
+  is to be taken from captures in R1.
