@@ -128,16 +128,16 @@ impl RxConfig {
         self.run = run;
         self
     }
-
-    /// Where the coarse window ends relative to the detection: products k ∈ [d + lead − L,
-    /// d + lead). Chosen so the window sits inside the STF for the detector's usual latency.
-    fn coarse_lead(&self) -> usize {
-        match self.detector {
-            Detector::Autocorrelation => 56,
-            Detector::MatchedFilter | Detector::MatchedExact => 56,
-        }
-    }
 }
+
+/// The provisional coarse window ends this far after the detection: products
+/// k ∈ [d + 56 − L, d + 56). It only has to be good enough for the LTF search; where a
+/// detection fires early (a tone keeps detector A firing) it may sit on noise or the spur.
+const PROVISIONAL_LEAD: usize = 56;
+/// The final coarse window ends this far before the first-path LTF symbol T1: products
+/// k ∈ [T1 − 64 − L, T1 − 64), so k + 16 stays 16 samples clear of GI2 (delay spread) and the
+/// window starts 32 samples into the STF (AGC settling).
+const COARSE_END_BEFORE_T1: usize = 64;
 
 /// Result of acquiring one PPDU.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -440,9 +440,9 @@ fn acquire_at(y: &[Sample], d: usize, cfg: &RxConfig) -> Option<Acquisition> {
     let b = backoff_samples(cfg);
     let w = GI_LEN.checked_sub(b).filter(|w| *w > 0)?;
 
-    // Coarse CFO, lag 16, over the STF before the detection's expected end.
-    let k0 = (d + cfg.coarse_lead()).checked_sub(COARSE_LEN)?;
-    let coarse = cfo_from_correlation(
+    // Provisional coarse CFO, lag 16, anchored on the detection: only for the LTF search.
+    let k0 = (d + PROVISIONAL_LEAD).checked_sub(COARSE_LEN)?;
+    let provisional = cfo_from_correlation(
         lag_correlation(y, k0, COARSE_LEN, STF_PERIOD),
         STF_PERIOD,
         fs,
@@ -454,7 +454,7 @@ fn acquire_at(y: &[Sample], d: usize, cfg: &RxConfig) -> Option<Acquisition> {
     if hi > y.len() {
         return None;
     }
-    let step = -2.0 * PI * coarse / fs;
+    let step = -2.0 * PI * provisional / fs;
     let z: Vec<Sample> = (lo..hi)
         .map(|n| {
             let (sin, cos) = (step * n as f64).sin_cos();
@@ -463,8 +463,9 @@ fn acquire_at(y: &[Sample], d: usize, cfg: &RxConfig) -> Option<Acquisition> {
         .collect();
     let at = |n: usize| z[n - lo];
 
-    // Coherent cross-correlation with both long symbols (T1 T2, 128 samples): a position 64
-    // early keeps only a quarter of the peak. Energy over a GI − B window.
+    // Coherent cross-correlation with both long symbols (T1 T2, 128 samples): 64 late (T2 +
+    // SIGNAL) keeps 0.23 of the peak, 64 early (GI2 is half a symbol) 0.59 — hence the
+    // edge-peak rule below. Energy over a GI − B window.
     let ltf = long_training_symbol();
     let ltf_energy: f64 = ltf.iter().map(|s| abs2(*s)).sum();
     let s0 = d + SEARCH_OFFSET;
@@ -508,15 +509,26 @@ fn acquire_at(y: &[Sample], d: usize, cfg: &RxConfig) -> Option<Acquisition> {
     let c = (fine_start..fine_start + FINE_LEN).fold((0.0, 0.0), |a, n| {
         add(a, mul(at(n), conj(at(n + LTF_SYMBOL_LEN))))
     });
-    let residual = cfo_from_correlation(c, LTF_SYMBOL_LEN, fs);
+    // Fine alone: the provisional coarse plus the LTF residual (unambiguous while the
+    // provisional error is below fs/128).
+    let fine = provisional + cfo_from_correlation(c, LTF_SYMBOL_LEN, fs);
+
+    // Final coarse CFO over the STF located from the timing, so a mis-anchored detection does
+    // not leak into the estimate; then the inverse-variance combination.
+    let kc = sym.checked_sub(COARSE_END_BEFORE_T1 + COARSE_LEN)?;
+    let coarse = cfo_from_correlation(
+        lag_correlation(y, kc, COARSE_LEN, STF_PERIOD),
+        STF_PERIOD,
+        fs,
+    );
 
     Some(Acquisition {
         detected_at: d,
         ltf_start: sym - GI2_LEN,
         fft_start: sym.checked_sub(b)?,
-        cfo_hz: coarse + FINE_WEIGHT * residual,
+        cfo_hz: coarse + FINE_WEIGHT * (fine - coarse),
         coarse_cfo_hz: coarse,
-        fine_cfo_hz: coarse + residual,
+        fine_cfo_hz: fine,
         ltf_metric,
     })
 }

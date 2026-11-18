@@ -306,7 +306,8 @@ fn robust(million: usize) {
     // Packets under the impairment: 10 dB SNR frames (noise power 1), CFO ±235 kHz.
     let f = preamble();
     let frames = 100 * threads();
-    println!("\n# acquisition rate of 10 dB frames under the impairment ({frames} frames)");
+    println!("\n# acquisition rate of 10 dB frames under the impairment ({frames} frames):");
+    println!("# FFT start within ±2 samples and CFO within 2 % of the subcarrier spacing");
     for (ci, (name, imp)) in cases.iter().enumerate() {
         let mut row = Vec::new();
         for detector in DETECTORS {
@@ -326,7 +327,10 @@ fn robust(million: usize) {
                     let x = awgn(&x, 10.0, 10.0, &mut rng);
                     let x = imp(&x);
                     if let Some(a) = acquire(&x, 0, &cfg) {
-                        if (a.fft_start as f64 - (lead + T1) as f64 + 4.0).abs() <= 2.0 {
+                        // Timing within ±2 samples and CFO within 2 % of the subcarrier spacing.
+                        if (a.fft_start as f64 - (lead + T1) as f64 + 4.0).abs() <= 2.0
+                            && (a.cfo_hz - cfo).abs() <= 0.02 * FS / 64.0
+                        {
                             ok += 1;
                         }
                     }

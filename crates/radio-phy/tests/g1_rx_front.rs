@@ -330,8 +330,15 @@ fn combined_cfo_std(snr: f64, fs: f64) -> f64 {
     let v =
         |d: f64, l: f64| (d * snr + l / 2.0) / (l * l * snr * snr) * (fs / (2.0 * PI * d)).powi(2);
     let (vc, vf) = (v(16.0, COARSE_LEN as f64), v(64.0, FINE_LEN as f64));
-    // The receiver combines with the fixed high-SNR weight w, not the optimum at this SNR.
-    let w: f64 = FINE_WEIGHT;
+    // The optimum weight at the high-SNR limit, derived here (not the library constant): var of
+    // a lag-D estimate ∝ D/(L²·SNR)/D², so w = v_c(∞)/(v_c(∞) + v_f(∞)).
+    let vinf = |d: f64, l: f64| 1.0 / (l * l * d);
+    let (ic, i_f) = (vinf(16.0, COARSE_LEN as f64), vinf(64.0, FINE_LEN as f64));
+    let w = ic / (ic + i_f);
+    assert!(
+        (w - FINE_WEIGHT).abs() < 1e-12,
+        "library weight {FINE_WEIGHT} vs {w}"
+    );
     ((1.0 - w).powi(2) * vc + w * w * vf).sqrt()
 }
 
@@ -380,7 +387,7 @@ fn acquires_timing_and_cfo_in_awgn() {
                 "biased: {m}"
             );
             let ratio = var.sqrt() / theory;
-            assert!((0.85..1.2).contains(&ratio), "rms/theory {ratio:.3}");
+            assert!((0.92..1.08).contains(&ratio), "rms/theory {ratio:.3}");
         }
     }
 }
@@ -607,6 +614,7 @@ fn cw_tone_robustness() {
     // 64 samples early. 10 dB SNR, so the spur is 7 dB below the signal. 1.25 MHz lies on the
     // STF's subcarrier grid (period 16), the hardest place for it.
     let mut placed = 0;
+    let mut cfo_err = Vec::new();
     for _ in 0..200 {
         let lead = 300 + (rng.uniform() * 200.0) as usize;
         let cfo = (rng.uniform() * 2.0 - 1.0) * 235e3;
@@ -618,10 +626,18 @@ fn cw_tone_robustness() {
             FS,
             2.0 * PI * rng.uniform(),
         );
-        if acquire(&x, 0, &cfg).is_some_and(|a| a.fft_start == lead + T1 - 4) {
-            placed += 1;
+        if let Some(a) = acquire(&x, 0, &cfg) {
+            cfo_err.push(a.cfo_hz - cfo);
+            if a.fft_start == lead + T1 - 4 {
+                placed += 1;
+            }
         }
     }
+    // The spur also enters both CFO windows (7 dB under the signal) and pulls the lag
+    // correlations toward its own frequency: an estimator limit, not a placement fault. It is
+    // measured, not gated, here (journal open question 4; `rxfront robust` tabulates it).
+    let rms = (cfo_err.iter().map(|e| e * e).sum::<f64>() / cfo_err.len() as f64).sqrt();
+    println!("+3 dB spur at 1.25 MHz: {placed}/200 placed, CFO rms {rms:.0} Hz");
     assert!(placed >= 190, "{placed}/200 placed under a +3 dB spur");
 }
 

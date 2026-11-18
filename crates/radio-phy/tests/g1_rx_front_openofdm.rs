@@ -7,7 +7,9 @@
 //! SIGNAL field and the PSDU. This test rebuilds the same frames (same recipe, checked by the
 //! FNV hash the generator printed), runs our front end + the shared 6 Mb/s decoder on exactly
 //! the same int16 samples, and requires, per SNR: SIGNAL and PSDU recovered at least as often
-//! as OpenOFDM, and a CFO error no larger. OpenOFDM's absolute power trigger gets noise only
+//! as OpenOFDM (SIGNAL needs good parity on both sides), and a CFO error no larger — a low
+//! bar, since OpenOFDM's fine estimate is disabled in that commit (coarse only), and the RMS is
+//! over the frames each receiver located. OpenOFDM's absolute power trigger gets noise only
 //! over the frame, a genie gate in its favour — and the same input goes to ours.
 
 #![allow(clippy::unwrap_used)]
@@ -161,7 +163,7 @@ fn front_end_is_no_worse_than_openofdm() {
         let n = t.frames as f64;
         println!(
             "{snr} dB: SIGNAL ours {:.3} OpenOFDM {:.3} | PSDU ours {:.3} OpenOFDM {:.3} | \
-             CFO rms ours {:.0} Hz ({} frames), OpenOFDM {:.0} Hz ({} frames)",
+             CFO rms ours {:.0} Hz ({} frames), OpenOFDM coarse-only {:.0} Hz ({} frames)",
             o.signal as f64 / n,
             t.signal as f64 / n,
             o.psdu as f64 / n,

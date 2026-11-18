@@ -33,7 +33,7 @@ fn fft64(x: &[C]) -> Vec<C> {
 
 /// Decodes a 6 Mb/s PPDU from an acquired, CFO-corrected stream: least-squares channel from the
 /// two LTF symbols, common phase from the pilots, BPSK soft bits, deinterleaving, Viterbi.
-/// Returns (SIGNAL rate bits, LENGTH, PSDU). A stand-in for R0-09, test code only.
+/// Returns (SIGNAL rate bits, LENGTH, PSDU); `None` if SIGNAL fails parity. A stand-in for R0-09, test code only.
 pub fn decode_6mbps(y: &[C], fft_start: usize) -> Option<([u8; 4], usize, Vec<u8>)> {
     let ltf = long_training_sequence();
     let t1 = fft64(&y[fft_start..fft_start + 64]);
@@ -92,7 +92,11 @@ pub fn decode_6mbps(y: &[C], fft_start: usize) -> Option<([u8; 4], usize, Vec<u8
         .rev()
         .fold(0usize, |a, i| (a << 1) | sig[i] as usize);
     let parity = sig[..17].iter().fold(0u8, |a, b| a ^ b);
-    if parity != sig[17] || rate != Rate::R6.signal_rate_bits() {
+    // A SIGNAL with bad parity is no SIGNAL (OpenOFDM's verdict requires parity too).
+    if parity != sig[17] {
+        return None;
+    }
+    if rate != Rate::R6.signal_rate_bits() {
         return Some((rate, length, vec![]));
     }
     let n_sym = (16 + 8 * length + 6).div_ceil(24);
