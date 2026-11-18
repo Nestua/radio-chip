@@ -19,6 +19,9 @@
 // `clear` resets the counter after the counting of the sample in stage 4, and only on a cycle
 // that stage holds a valid sample (v3): the top level asserts it on the cycle sample n is in
 // stage 4 to express the model's count reset at apply_pending of sample n (step 1 first).
+//
+// c_valid/c_re/c_im expose C(n) of the sample in stage 2 (exact, C_W bits) for the provisional
+// latch (rx_latch): C is updated at the edge that registers v2, so c_valid = v2 holds it.
 
 `default_nettype none
 
@@ -31,6 +34,9 @@ module det_a
     input  wire logic signed [Y_BITS-1:0] in_re,
     input  wire logic signed [Y_BITS-1:0] in_im,
     input  wire logic                     clear,
+    output logic                          c_valid,
+    output logic signed [2*DET_BITS+5:0]  c_re,      // C_W = 2D + 6
+    output logic signed [2*DET_BITS+5:0]  c_im,
     output logic                          out_valid,
     output logic                          fire,
     output logic                          event_o
@@ -110,7 +116,6 @@ module det_a
     end
 
     // ---- stage 2: running sums
-    logic signed [C_W-1:0] c_re, c_im;
     logic [P_W-1:0]        p1, p2;
     logic                  full2, v2;
     always_ff @(posedge clk) begin
@@ -129,6 +134,7 @@ module det_a
         if (!rst_n) v2 <= 1'b0;
         else        v2 <= v1;
     end
+    assign c_valid = v2;
 
     // ---- stage 3: the two sides of the threshold
     logic [CMP_W-1:0] lhs3, rhs3;

@@ -22,10 +22,13 @@ module det_chain
         .clk, .rst_n, .in_valid, .in_re, .in_im,
         .out_valid(y_valid), .out_re(y_re), .out_im(y_im)
     );
+    /* verilator lint_off PINCONNECTEMPTY */
     det_a u_det (
         .clk, .rst_n, .in_valid(y_valid), .in_re(y_re), .in_im(y_im), .clear(1'b0),
+        .c_valid(), .c_re(), .c_im(),           // the latch's (gate: make -C hw latch)
         .out_valid(d_valid), .fire, .event_o
     );
+    /* verilator lint_on PINCONNECTEMPTY */
 endmodule
 
 `default_nettype wire

@@ -548,6 +548,8 @@ pub struct SampleTrace {
     /// LTF search correlator output (K bits) of the window ending at this sample; `None` before
     /// the first full window.
     pub corr: Option<IQ>,
+    /// Whether detector A's run counter produced an event at this sample (step 1).
+    pub event: bool,
 }
 
 impl RxFrontFixed {
@@ -664,6 +666,7 @@ impl RxFrontFixed {
             step: self.step,
             z: zv,
             corr: None,
+            event,
         };
         self.phase = (self.phase + self.step).rem_euclid(1i64 << fx.nco_phase_bits);
 

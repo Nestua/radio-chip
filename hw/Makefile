@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler round_sat ltf_corr cordic nco det
+VEC_BLOCKS := scrambler round_sat ltf_corr cordic nco det latch
 BLOCKS    := ram $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
 GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
@@ -28,6 +28,7 @@ TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
 TOP_nco       := nco
 TOP_det       := det_chain
+TOP_latch     := latch_chain
 SRC_ram       := rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv tb/ram_bank.sv
 SRC_scrambler := rtl/scrambler.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
@@ -35,6 +36,8 @@ SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
 SRC_cordic    := $(GEN_RTL) rtl/cordic.sv
 SRC_nco       := $(GEN_RTL) rtl/round_sat.sv rtl/nco.sv
 SRC_det       := $(GEN_RTL) rtl/round_sat.sv rtl/dc_block.sv rtl/det_a.sv tb/det_chain.sv
+SRC_latch     := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
+                 rtl/det_a.sv rtl/cordic.sv rtl/nco.sv rtl/rx_latch.sv tb/latch_chain.sv
 
 .PHONY: all lint vectors clean $(BLOCKS)
 
@@ -88,6 +91,21 @@ det: vectors/det.txt
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/det --top-module det_chain \
 		$(SRC_det) tb/tb_det.cpp -o sim_det
 	./obj_dir/det/sim_det vectors/det.txt
+
+# Three builds: D_SAMPLES = 3 at R = 8 clocks per sample (and R = 16, the 10 MHz mode), D_SAMPLES
+# = 4 at R = 6 (ADR 0006), and D_SAMPLES = 5 at R = 5, the only one with two latches in flight.
+latch: vectors/latch.txt
+	rm -rf obj_dir/latch && mkdir -p obj_dir/latch
+	$(VERILATOR) $(VFLAGS) -GD_SAMPLES=3 --Mdir obj_dir/latch/d3 --top-module latch_chain \
+		$(SRC_latch) tb/tb_latch.cpp -o sim_latch
+	$(VERILATOR) $(VFLAGS) -GD_SAMPLES=4 --Mdir obj_dir/latch/d4 --top-module latch_chain \
+		$(SRC_latch) tb/tb_latch.cpp -o sim_latch
+	$(VERILATOR) $(VFLAGS) -GD_SAMPLES=5 --Mdir obj_dir/latch/d5 --top-module latch_chain \
+		$(SRC_latch) tb/tb_latch.cpp -o sim_latch
+	./obj_dir/latch/d3/sim_latch vectors/latch.txt 8 3
+	./obj_dir/latch/d3/sim_latch vectors/latch.txt 16 3
+	./obj_dir/latch/d4/sim_latch vectors/latch.txt 6 4
+	./obj_dir/latch/d5/sim_latch vectors/latch.txt 5 5
 
 clean:
 	rm -rf obj_dir
