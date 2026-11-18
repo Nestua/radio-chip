@@ -1,0 +1,4 @@
+`verilator_config
+// The generated ROM package (rvec rx-front-rom) serves every receiver block; each block uses
+// only some of its formats. Unused parameters are expected there and nowhere else.
+lint_off -rule UNUSEDPARAM -file "*rtl/gen/*"

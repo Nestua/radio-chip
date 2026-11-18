@@ -233,6 +233,19 @@ pub fn nco_table(fx: &FixedRxConfig) -> Vec<IQ> {
         .collect()
 }
 
+/// The NCO mixer of the receiver's step 2: z = y·e^(jφ) for a [`Y_BITS`]-bit sample y and a
+/// P-bit phase φ, the product narrowed (half to even, saturating) to Z bits. `None` for an
+/// invalid configuration.
+pub fn nco_mix(y: IQ, phase: i64, fx: &FixedRxConfig) -> Option<IQ> {
+    fx.is_valid()
+        .then(|| nco_mix_with(y, phase, fx, &nco_table(fx)))
+}
+
+fn nco_mix_with(y: IQ, phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
+    let prod = imul(y, rotate_with(phase, fx, table));
+    narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits)
+}
+
 fn rotate_with(phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     let l = fx.nco_lut_bits;
     let p = fx.nco_phase_bits;
@@ -496,6 +509,11 @@ pub struct RxFrontFixed {
 pub struct SampleTrace {
     /// DC blocker output, [`Y_BITS`] bits.
     pub y: IQ,
+    /// NCO phase that rotated this sample, P bits (units 2π/2^P), in [0, 2^P).
+    pub phase: i64,
+    /// NCO step in effect at this sample (after this sample's latch, if any): the next
+    /// sample's phase is (phase + step) mod 2^P.
+    pub step: i64,
     /// NCO-rotated sample entering the LTF correlator, Z bits.
     pub z: IQ,
     /// LTF search correlator output (K bits) of the window ending at this sample; `None` before
@@ -609,12 +627,12 @@ impl RxFrontFixed {
         }
 
         // 2. NCO: z = y·e^(jφ), rounded to Z bits.
-        let rot = rotate_with(self.phase, &fx, &self.nco);
-        let prod = imul(yv, rot);
-        let zv = narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits);
+        let zv = nco_mix_with(yv, self.phase, &fx, &self.nco);
         self.z.put(n, zv);
         self.trace = SampleTrace {
             y: yv,
+            phase: self.phase,
+            step: self.step,
             z: zv,
             corr: None,
         };
@@ -700,8 +718,7 @@ impl RxFrontFixed {
         let rot: Vec<IQ> = (0..PAIR_LEN + w)
             .map(|m| {
                 let ph = (step as i128 * m as i128).rem_euclid(1i128 << fx.nco_phase_bits) as i64;
-                let p = imul(self.y.get(sym + m), rotate_with(ph, &fx, &self.nco));
-                narrow_iq(p, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits)
+                nco_mix_with(self.y.get(sym + m), ph, &fx, &self.nco)
             })
             .collect();
         let xc = |o: usize| {
