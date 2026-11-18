@@ -95,6 +95,11 @@ impl Rate {
         self.mbps() as usize * 4
     }
 
+    /// The rate whose SIGNAL RATE field is `bits` (R1 first), if any.
+    pub fn from_signal_bits(bits: [u8; 4]) -> Option<Rate> {
+        Rate::ALL.into_iter().find(|r| r.signal_rate_bits() == bits)
+    }
+
     /// The four RATE bits of the SIGNAL field in transmission order.
     pub fn signal_rate_bits(self) -> [u8; 4] {
         // R1…R4, R1 first. IEEE 802.11-2020 §17.3.4.2; confirmed by OpenOFDM's receiver table
