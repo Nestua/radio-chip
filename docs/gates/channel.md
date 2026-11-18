@@ -121,13 +121,40 @@ Mutation check (each restored with `cp` + `touch`):
 | LOS amplitude K/(K+1) instead of its root | Rician |
 | SFO sign flipped | resample |
 
+## 2026-11-18 · G0 + G1 · R0-07c front-end impairments
+What a zero-IF receiver adds before the digital front end, needed to test R0-08 (DC blocker,
+detector robustness, frozen CFO accumulators):
+- **CW tone** (`add_tone`): x[n] + √P·e^(j(2π·f·n/fs + φ0)), P the tone's mean power. At 0 Hz
+  it is a **DC offset** √P·e^(jφ0) (LO leakage, self-mixing); elsewhere a spur or interferer.
+- **AGC gain step** (`gain_step`): samples from index `at` on scaled by 10^(g/20), instantaneous
+  (the worst case for estimators that must be frozen across it). A DC offset that changes with
+  gain is composed from both.
+The air-to-ground channel moved to R0-07d.
+
+Command: `cargo test -p radio-phy --test g1_channel_impairments` (rustc 1.98.1, base d284b6b).
+References (formulas in the test): (1) the DFT of an on-bin tone — N·A·e^(jφ) in its bin, 0
+elsewhere, DFT computed directly O(N²), bins 0, 5 and 60 (negative frequency) of 64, error
+< 1e-9; (2) the finite geometric series for off-bin tones at +123 kHz and −2.35 MHz; (3) any tone
+has Schmidl–Cox metric exactly 1 at lag 16 and angle −2π·f·16/fs (4 frequencies incl. DC) — why
+R0-08 needs a DC blocker; (4) decibels: amplitude 10^(g/20) from sample `at`, power ratio g dB,
+earlier samples bit-identical, `at` = 0, 1, mid, last, len, beyond.
+Result: 5/5 pass; test-first (failed to compile against the missing functions).
+Mutation check (each restored with `cp` + `touch`):
+| Mutation | Fails |
+|---|---|
+| tone amplitude = P instead of √P | on-bin, off-bin, DC |
+| conjugate tone (e^(−jωn)) | 4 of 5 |
+| tone index off by one | on-bin, off-bin |
+| gain step one sample late | gain step |
+| gain in power dB (g/10) | gain step |
+
 ## Open questions
 1. RNG has no bit-level external reference (xoshiro256**'s reference outputs are not run here);
    its quality rests on the statistical checks and on every downstream curve matching theory.
    Acceptable for a simulator; revisit if a capture replay ever needs a shared stream.
 2. Phase noise is Wiener only. For R3 hardware (AD9361) a PLL-shaped profile (flat inside the
    loop bandwidth) is more realistic; add it when the receiver's CPE tracking is tuned.
-3. R0-07c: drone air-to-ground channel (two-ray ground reflection, elevation-dependent K, path
+3. R0-07d: drone air-to-ground channel (two-ray ground reflection, elevation-dependent K, path
    loss) on top of the R0-07b machinery.
 4. TGn models are SISO here; MIMO angles, the moving-vehicle spike of model F (§4.7.2) and the
    fluorescent-light modulation (§4.7.3) are not modelled.

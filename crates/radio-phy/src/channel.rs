@@ -1,4 +1,5 @@
-//! Channel simulator, part I: a seeded RNG, AWGN, carrier frequency offset and phase noise.
+//! Channel simulator: a seeded RNG, AWGN, CFO, phase noise, front-end impairments (DC, CW tone,
+//! gain step), fractional delay, SFO, fading and TGn multipath.
 //!
 //! Simulation only: this is the air between our transmitter and receiver models, never
 //! hardware, so it is plain `f64` and has no fixed-point counterpart. Samples are complex
@@ -199,6 +200,47 @@ pub fn phase_noise(
 ) -> Vec<Sample> {
     let phi = wiener_phase(x.len(), linewidth_hz, sample_rate_hz, rng);
     x.iter().zip(&phi).map(|(s, p)| rotate(*s, *p)).collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Front-end impairments (R0-07c): what a zero-IF receiver adds before the digital front end.
+// ---------------------------------------------------------------------------------------------
+
+/// Adds a continuous-wave tone of mean power `power` at `freq_hz`:
+/// x[n] + √power·e^(j(2π·f·n/fs + φ0)).
+///
+/// At 0 Hz this is a DC offset (LO leakage, self-mixing in a zero-IF receiver) of value
+/// √power·e^(jφ0); elsewhere a spur or a narrowband interferer.
+pub fn add_tone(
+    x: &[Sample],
+    power: f64,
+    freq_hz: f64,
+    sample_rate_hz: f64,
+    phase0: f64,
+) -> Vec<Sample> {
+    let amp = power.sqrt();
+    let step = 2.0 * PI * freq_hz / sample_rate_hz;
+    x.iter()
+        .enumerate()
+        .map(|(n, s)| {
+            let (sin, cos) = (phase0 + step * n as f64).sin_cos();
+            (s.0 + amp * cos, s.1 + amp * sin)
+        })
+        .collect()
+}
+
+/// An AGC gain change: samples from index `at` on are scaled by `gain_db` (amplitude
+/// 10^(g/20)); earlier samples are unchanged. `at ≥ len` leaves the signal as it is.
+///
+/// The step is instantaneous — the worst case for the estimators that must be frozen across
+/// it (`docs/gates/rx_front.md`). Compose with `add_tone` to model a DC offset that changes
+/// with gain.
+pub fn gain_step(x: &[Sample], at: usize, gain_db: f64) -> Vec<Sample> {
+    let g = 10f64.powf(gain_db / 20.0);
+    x.iter()
+        .enumerate()
+        .map(|(n, s)| if n < at { *s } else { (s.0 * g, s.1 * g) })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
