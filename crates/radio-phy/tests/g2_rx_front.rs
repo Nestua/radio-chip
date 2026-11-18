@@ -460,3 +460,44 @@ fn fixed_decision_latency_only_delays_the_result() {
     }
     assert!(acquired >= 80, "{acquired} acquisitions in 80 scenes");
 }
+
+#[test]
+fn fixed_failed_candidate_does_not_block_a_weaker_packet_after_it() {
+    // Open question 15 in the fixed model: a strong STF fragment and noise burst make a
+    // candidate that fails confirmation; the real packet, 10 dB weaker, follows and is acquired.
+    let mut rng = Rng::new(0x0d16);
+    let f = preamble();
+    let stf: Vec<C> = f[..160]
+        .iter()
+        .map(|&(a, b)| (a * 3.16, b * 3.16))
+        .collect();
+    let cfg = RxConfig::new(20e6);
+    let fx = FixedRxConfig::default();
+    let p = mean_power(&f);
+    let mut ok = 0;
+    for _ in 0..40 {
+        let lead = 200 + (rng.uniform() * 200.0) as usize;
+        let mut x = vec![(0.0, 0.0); lead];
+        x.extend_from_slice(&stf);
+        x.extend(awgn(&vec![(0.0, 0.0); 120], 0.0, 10.0 * p, &mut rng));
+        x.extend(vec![(0.0, 0.0); 20 + (rng.uniform() * 40.0) as usize]);
+        let start = x.len();
+        x.extend_from_slice(&f);
+        x.extend(vec![(0.0, 0.0); 400]);
+        let x = frequency_offset(&x, 50e3, 20e6, 2.0 * PI * rng.uniform());
+        let x = awgn(&x, 15.0, p, &mut rng);
+        // the packet at −25 dBFS, so the stronger burst stays inside the ADC range
+        let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-25.0 / 20.0) / p.sqrt();
+        let acq = acquisitions_fixed(&to_adc(&x, gain), &cfg, &fx);
+        if acq
+            .iter()
+            .any(|a| a.fft_start.abs_diff(start + T1 - 4) <= 1)
+        {
+            ok += 1;
+        }
+    }
+    assert!(
+        ok >= 38,
+        "{ok}/40 packets acquired after a failed candidate"
+    );
+}

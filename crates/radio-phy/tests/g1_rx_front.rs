@@ -1037,3 +1037,46 @@ fn front_end_and_viterbi_decode_frames_end_to_end() {
     println!("6 Mb/s, 100-octet PSDU, 8 dB AWGN, CFO ±235 kHz: {decoded}/{trials} decoded");
     assert!(decoded >= 98, "{decoded}/{trials}");
 }
+
+#[test]
+fn a_failed_candidate_does_not_block_a_weaker_packet_after_it() {
+    // Open question 15: a strong STF fragment opens a search, a strong noise burst after it
+    // makes the running maximum, which fails confirmation; the real packet follows, 10 dB
+    // weaker. The maximum restarts after the failed candidate, so the weaker true T1 (after
+    // the acceptance point) is acquired with the right grid.
+    let mut rng = Rng::new(0x0d15);
+    let f = preamble();
+    let stf: Vec<C> = f[..160]
+        .iter()
+        .map(|&(a, b)| (a * 3.16, b * 3.16))
+        .collect();
+    let cfg = RxConfig::new(FS);
+    let b = backoff_samples(&cfg);
+    let mut ok = 0;
+    for _ in 0..40 {
+        let lead = 200 + (rng.uniform() * 200.0) as usize;
+        let burst = 120;
+        let gap = 20 + (rng.uniform() * 40.0) as usize;
+        let mut x = vec![(0.0, 0.0); lead];
+        x.extend_from_slice(&stf);
+        let p = mean_power(&f);
+        x.extend(awgn(&vec![(0.0, 0.0); burst], 0.0, 10.0 * p, &mut rng));
+        x.extend(vec![(0.0, 0.0); gap]);
+        let start = x.len();
+        x.extend_from_slice(&f);
+        x.extend(vec![(0.0, 0.0); 400]);
+        let x = frequency_offset(&x, 50e3, FS, 2.0 * PI * rng.uniform());
+        let x = awgn(&x, 15.0, p, &mut rng);
+        let acq = acquisitions(&x, &cfg);
+        if acq
+            .iter()
+            .any(|a| a.fft_start.abs_diff(start + T1 - b) <= 1)
+        {
+            ok += 1;
+        }
+    }
+    assert!(
+        ok >= 38,
+        "{ok}/40 packets acquired after a failed candidate"
+    );
+}

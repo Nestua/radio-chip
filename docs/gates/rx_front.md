@@ -734,8 +734,28 @@ approval before merge.
 ### Open questions
 13. *Resolved, pending founder approval:* a decision latency of 64 samples, with the caveat
     above for searches opened within L after an acquisition.
-15. No gate covers the restart of the running maximum after a failed confirmation (the block
-    model retried from the next detection instead). Needed: a scene where a strong candidate
-    fails and a weaker true T1 follows within the window. Before part d.
+15. *Resolved 2026-11-18:* the restart of the running maximum now has a gate (entry below).
 16. The number of multipliers and the clock rate for `decide()` in part d: 5–6 complex
     multipliers at 160 MHz, or a faster clock.
+
+## 2026-11-18 · G1/G2 · R0-08b: gate for the restart after a failed candidate (open question 15)
+
+**Scene.** The setup is meant to produce a candidate that fails confirmation, followed by a
+weaker true T1 that comes after the acceptance point:
+- An STF fragment 10 dB above the packet opens a search.
+- A 120-sample noise burst at +10 dB then makes the running maximum, which fails confirmation.
+- 20–60 samples of silence follow, then the real packet: 15 dB SNR, 50 kHz CFO.
+
+**Gates:**
+- `g1_rx_front::a_failed_candidate_does_not_block_a_weaker_packet_after_it`: float model,
+  40 scenes, ≥ 38 must be acquired with the grid within ±1 sample.
+- `g2_rx_front::fixed_failed_candidate_does_not_block_a_weaker_packet_after_it`: fixed model,
+  packet at −25 dBFS so the burst stays inside the ADC range.
+- Both pass: 40/40 at commit base `67a2932`.
+
+**Mutation.** Removing the running maximum's restart after acceptance makes the failing burst
+stay the maximum, and 0/40 packets are acquired, in the float model and in the fixed model.
+
+**Still open:** a true T1 that is weaker than a failing candidate and lies within the 63 + w
+positions after it is still lost. This is unchanged from the streaming design (journal,
+R0-08b) and is not a gate.
