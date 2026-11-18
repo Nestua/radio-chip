@@ -279,10 +279,129 @@ own |C| is an equivalent mutation (|C| unchanged), so the lag was mutated instea
 7. **Fixed point (R0-08b)**: the 128-tap complex LTF correlator over a 240-position search is
    the largest block; sign- or 3-bit-quantised LTF taps and the combination weight as a shift
    sum (0.771 ≈ 0.75 + 1/64) go to G2.
-8. **Streaming timing (R0-08b, before fixed point)**: restate the block search with retries as
+8. ~~**Streaming timing**~~ — done in R0-08b part 1 (below). Was: restate the block search with retries as
    a causal rule (running maximum of the energy metric, accepted once 64 + (GI − B) positions
    pass without a larger one) and size the sample buffer from it; the final coarse estimate
    also needs the STF products kept until the timing is known (≈ 250 samples of buffering).
-9. **Causal DC start-up (R0-08b)**: the model's m[−1] averages the first 2^shift samples ahead;
+9. ~~**Causal DC start-up**~~ — done in R0-08b part 1 (gear-shifted μ). Was: the model's m[−1] averages the first 2^shift samples ahead;
    the RTL needs a causal equivalent (delayed enable or a gear-shifted μ) and the model must
    match it. Packets starting 10–130 samples into the stream still acquire 100/100 at 20 dB.
+
+## 2026-11-18 · G1 · R0-08b part 1: streaming receiver, causal DC blocker (open questions 8, 9)
+Model: `RxFront` and `DcBlocker` in `crates/radio-phy/src/rx_front.rs`; `acquire`/`acquisitions`
+run it sample by sample. Command: `cargo test --release -p radio-phy --test g1_rx_front
+--test g1_rx_front_openofdm` (rustc 1.98.1, base 3e65564); measurements `rxfront pd 4000`,
+`rxfront robust 10` (report updated; the R0-08a block-model figures are in its git history).
+Test-first: the new gates were written against the planned API; on a shim around the block
+model `dc_blocker_is_causal` and `streaming_decisions_are_causal_and_bounded` failed
+(future-sample start-up; decisions up to d + 404); the spur gate (below) failed on the first
+streaming draft (261/400).
+
+### What changed (fixed point and RTL follow this form)
+1. **DC blocker, causal (OQ 9)**: m[−1] = 0 and a gear-shifted pole μ_n = 2^(−min(7, ⌊log₂(n+1)⌋)):
+   a power-of-two running mean that is the steady-state 2^−7 pole from n = 127 (an 8-bit
+   saturating counter and a barrel shifter). A stream opening on DC loses it at n = 0 (μ₀ = 1).
+2. **Streaming timing (OQ 8)**, one sample in, at most one acquisition out, no sample processed
+   twice, one search at a time:
+   - The detector (same arithmetic, now a streaming state also behind `detect`) opens an LTF
+     search at its first event (positions from d + 24); every later event moves the window end
+     to event + 264; with no event for that long the search closes (power: the RTL gates the
+     128-tap correlator while idle).
+   - **Provisional CFO latched at every event** from the lag-16 sum over the 96 products whose
+     later sample is ≤ n − 24 (`LATCH_LAG`: the last event on a packet falls ≈ 10–25 samples
+     into GI2), driving an NCO on the stream the correlator sees. It replaces the old window
+     that reached 56 samples *after* the detection, and the retries: under a spur that keeps A
+     firing, the latch follows the STF once it arrives.
+   - Correlator |Σ z(i+k)·[L L]*(k)|² for i = n − 127, energy over GI − B positions, **running
+     maximum accepted once 64 + (GI − B) later positions inside the window are no larger** (the
+     old edge rule, stated causally); latest start ≥ 7/8 of the maximum. A candidate that fails
+     confirmation is dropped and the running maximum restarts at the next position.
+   - **Confirmation, two rules, on the history corrected by the final coarse CFO**: the
+     non-coherent energy Σ|xc(T1)|² + |xc(T2)|² (64-sample correlations) normalised ≥ 0.5,
+     tolerant of a CFO error (sinc²(64δ/fs) instead of sinc²(128δ/fs)); and the coherent
+     |xc(T1) + xc(T2)|² normalised ≥ 0.25 (`LTF_COHERENCE`; noise ≈ 0.09): the LTF repeats.
+   - Fine CFO from the lag-64 sum on the DC-blocked stream (independent of the NCO), resolved
+     against the final coarse estimate (±fs/128); final coarse as before, [T1 − 160, T1 − 64).
+     All read a 512-sample history: oldest sample T1 − 160, decision by T1 + 64 + 2(GI − B) +
+     127, i.e. ≤ 381 samples back.
+
+### Independent review (PHY architecture, risk point), 2026-11-18
+A fresh reviewer, given the diff, the old model and the standard but not our conclusions,
+verified every ring read against its capacity, the latency bound at 20/10/5 MHz, the index
+arithmetic against the block model, the gear shift and no livelock under spurs (400/400 at
++3…+10 dB). No must-fix. Findings and what was done:
+1. **Spur at the noise level at the 4 dB target: 256/400 placed vs the block model's 319/400**
+   (its retries gave several provisional estimates a chance). Diagnosis: the true T1 was found
+   but failed the coherent confirmation — a spur at the noise level biases even the final coarse
+   estimate by ≈ 50–60 kHz (open question 4), costing the 128-sample coherent correlation
+   ≈ 2 dB at a metric already ≈ SNR/(1+SNR+INR). Latch ending before GI2 + confirmation on the
+   final coarse: 294/400; **non-coherent confirmation: 390/400** (block model on the same gate
+   332/400). Gate `spur_at_the_noise_level_at_the_4_db_target` (≥ 360 = the 0.90 target).
+   The non-coherent rule alone then confirmed one DC transient after a −30 dB AGC step in
+   `rxfront robust` (normalised 0.62: a small correlation at every window position, coherent
+   0.007), hence the coherence rule, and that case is now gated (`gain_step_robustness`).
+2. The drop-and-restart comment claimed no T1 can be lost: wrong — a weaker true T1 within
+   63 + (GI − B) positions after a stronger failing candidate (a strong burst ending just before
+   a packet) is lost; the block model retried. Accepted and documented; not observed.
+3. Gate gaps: bound and causality now also at 10 and 5 MHz; the "+ (GI − B)" in the acceptance
+   rule survives mutation (kept: it is the old rule, and the latest start can move the grid
+   GI − B past the maximum); the DC gear schedule one sample early survives (G3 vectors pin it).
+4. `acquire(x, from)` filters on the opening detection: documented. Nits: the history guard is
+   kept (the HISTORY = 256 mutation shows it bites); latches during T1T2 happen only with a spur
+   stronger than the signal (none observed below it) — noted for open question 4.
+5. Hardware realism, for the fixed-point step: the model re-sums 96 products per latch and
+   96 + 88 + 2·w·64 at the decision; the RTL needs running accumulators (lag 16 delayed, lag 64)
+   or a stated multi-cycle decision; the float `rem_euclid` phase becomes a wrapping integer
+   phase with a LUT/CORDIC; the recompute-every-4096 exists only for float drift.
+
+### Evidence
+1. All R0-08a gates and the OpenOFDM comparison pass; printed figures equal the block model's
+   to within 0.1 Hz of CFO RMS (e.g. 1338.8 vs 1339, 408.0, 99.4 Hz; OpenOFDM set unchanged:
+   ours SIGNAL 0.995/1/1/1, PSDU 0.935/1/1/1 at 2/4/6/9 dB). +3 dB spur on the STF grid 200/200
+   placed, CFO RMS 7138 Hz (as before). End to end 100/100.
+2. New gates (6): causal DC prefix property; stream opening on DC 10 dB over noise: no
+   acquisition, residual DC < 0.05 over samples 128..384; packets 10–130 samples into the stream
+   50/50 each exact; decisions unchanged when the stream is cut after `decided_at` or its tail
+   replaced, `decided_at` ≤ T1 + 64 + 2(GI − B) + 127 (500 frames, 4–25 dB, 20/10/5 MHz); a
+   search without a packet closes in bounded time and stays open before; 20 back-to-back frames;
+   the spur at the noise level at 4 dB (390/400).
+3. `rxfront pd 4000`, detector A, acquisition rate streaming vs block: AWGN 0 dB 0.559 vs 0.513,
+   2 dB 0.992 vs 0.990, ≥ 4 dB 1.000 both; TGn B/D/E higher or equal at every SNR (B 2 dB 0.586
+   vs 0.570, D 4 dB 0.876 vs 0.865, E 0 dB 0.464 vs 0.434). Pd within ±0.0008 (DC start-up).
+   Exact-tap B also gains (AWGN 0 dB 0.938 vs 0.918).
+4. `rxfront robust 10`: **no false acquisition** in any case or detector; acquisition rates
+   under DC/CW/gain steps within ±0.006 of the block model.
+
+Mutation check on the final model (each restored with `cp` + `touch`):
+| Mutation | Fails |
+|---|---|
+| accept the running maximum at once | 14 tests |
+| latch the provisional CFO only at the first event | 12 tests |
+| NCO sign flipped | 11 tests |
+| window end not moved by later events | search-closes, spur 4 dB, CW |
+| search never closes (both close rules) | search-closes |
+| no gear shift (μ = 2^−7 from m = 0) | start-up, DC |
+| DC estimate frozen after start-up | start-up, DC |
+| fine not resolved against coarse | edges, ground truth, SFO, e2e |
+| earliest start instead of latest | 10 tests |
+| HISTORY 256 instead of 512 | 11 tests |
+| lag-correlation conjugate flipped | 11 tests |
+| detector lag 15 | 15 tests |
+| weight 0.5 | ground truth |
+| back-off ignored | 10 tests |
+| single-symbol search template | 12 tests |
+| detector threshold 0.45 | noise only, DC |
+| final coarse anchored on the opening detection | 8 tests |
+| confirmation without the coarse correction | 8 tests |
+| coherent-only confirmation | spur 4 dB |
+| non-coherent rule off | truncated STF, gain step, CW, spur 4 dB |
+| coherence rule off | gain step (±30 dB) |
+Survivors: `LATCH_LAG` 0 (measured 382 vs 390/400 on the spur gate, ~1σ: a real but small
+gain below the gate's resolution); acceptance without the "+ (GI − B)" (above); restarting the
+running maximum over the stored positions instead of dropping them (simplest kept, item 2).
+
+### Open questions
+10. **Fixed point (R0-08b part 2)**: running accumulators instead of re-sums at latch/decision
+    (review item 5), integer NCO phase, CORDIC for both angles, the 128-tap search correlator
+    (open question 7), the non-coherent/coherent confirmation (2·w 64-tap correlations at the
+    decision, multi-cycle), weight 0.771 as a shift sum; G2 budget as in the G0 entry.

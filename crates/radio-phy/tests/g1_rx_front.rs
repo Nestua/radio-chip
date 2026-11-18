@@ -1,4 +1,5 @@
-//! G1 gate for the receiver front, float reference (R0-08a): packet detection, CFO, timing.
+//! G1 gate for the receiver front, float reference (R0-08a, streaming since R0-08b): packet
+//! detection, CFO, timing.
 //!
 //! Design and requirements: `docs/gates/rx_front.md`. References we did not write:
 //! 1. Ground truth: our PPDUs (G1 against Annex I) through the channel simulator (G1 against
@@ -12,6 +13,9 @@
 //!
 //! The black-box comparison with an outside receiver lives in `g1_rx_front_openofdm.rs`.
 //!
+//! R0-08b adds the streaming properties: a causal DC blocker, decisions that depend only on
+//! samples already seen and come within a bounded delay of the LTF, a search that closes.
+//!
 //! Monte-Carlo checks use fixed seeds, so every run is identical.
 
 #![allow(clippy::unwrap_used)]
@@ -24,8 +28,8 @@ use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{
     acquire, acquisitions, autocorrelation_metric, backoff_samples, cfo_from_correlation, correct,
-    detect, detections, lag_correlation, long_training_symbol, short_training_period, Detector,
-    RxConfig, COARSE_LEN, FINE_LEN, FINE_WEIGHT,
+    dc_block, detect, detections, lag_correlation, long_training_symbol, short_training_period,
+    Detector, RxConfig, RxFront, COARSE_LEN, FINE_LEN, FINE_WEIGHT, GI_LEN, LTF_SYMBOL_LEN,
 };
 use std::f64::consts::PI;
 
@@ -660,6 +664,22 @@ fn gain_step_robustness() {
             "{detector:?}: false acquisition"
         );
     }
+    // ±30 dB steps every 10⁵ samples with DC at the noise level: after a step down the blocker
+    // still holds the 30 dB larger DC estimate, and the decaying transient keeps detector A
+    // firing for hundreds of samples. The recipe and seeds of `rxfront robust` (its case 27),
+    // where a non-coherent-only LTF confirmation once accepted such a transient (R0-08b).
+    for t in 0..10u64 {
+        let mut r = Rng::new(0xb0b0_0000 + 27 * 1000 + t);
+        let x = noise(1_000_000, &mut r);
+        let mut y = add_tone(&x, 1.0, 0.0, FS, 0.3);
+        for (i, k) in (100_000..x.len()).step_by(100_000).enumerate() {
+            y = gain_step(&y, k, if i % 2 == 0 { 30.0 } else { -30.0 });
+        }
+        assert!(
+            acquisitions(&y, &cfg).is_empty(),
+            "±30 dB steps, seed {t}: false acquisition"
+        );
+    }
     // A −10 dB step early in the STF (AGC settling on the packet): still acquired, CFO right.
     let f = preamble();
     for _ in 0..50 {
@@ -673,6 +693,200 @@ fn gain_step_robustness() {
             acq.cfo_hz
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Streaming (R0-08b): every decision is causal, made within a bounded delay of the LTF
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn dc_blocker_is_causal() {
+    // The output up to n may depend only on the input up to n: a stream cut anywhere gives the
+    // same prefix, including within the start-up and on a stream that starts on a DC offset.
+    let mut rng = Rng::new(0x08b1);
+    let x = add_tone(&noise(4000, &mut rng), 10.0, 0.0, FS, 0.7);
+    let full = dc_block(&x, 7);
+    for n in [1usize, 2, 3, 17, 64, 127, 128, 129, 300, 3999] {
+        assert_eq!(dc_block(&x[..n], 7), full[..n], "prefix {n}");
+    }
+}
+
+#[test]
+fn dc_blocker_start_up_settles_and_packets_near_the_stream_start_are_acquired() {
+    // A stream that opens on a DC offset 10 dB over the noise: the start-up must not trigger an
+    // acquisition, and once 2^7 samples have passed the residual DC must be small.
+    let mut rng = Rng::new(0x08b2);
+    let cfg = RxConfig::new(FS);
+    for _ in 0..50 {
+        let x = add_tone(
+            &noise(3000, &mut rng),
+            10.0,
+            0.0,
+            FS,
+            2.0 * PI * rng.uniform(),
+        );
+        assert!(acquisitions(&x, &cfg).is_empty(), "start-up acquired");
+        // Right after the start-up (samples 128..384) the residual DC must already be at the
+        // noise level: the mean of 256 unit-power noise samples has power 1/256; a blocker
+        // that starts at its steady-state pole from m = 0 still leaves ≈ 0.25 there.
+        let y = dc_block(&x, 7);
+        let m = y[128..384]
+            .iter()
+            .fold((0.0, 0.0), |a, s| (a.0 + s.0, a.1 + s.1));
+        assert!(abs2((m.0 / 256.0, m.1 / 256.0)) < 0.05, "residual DC {m:?}");
+    }
+    // Packets that start 10–130 samples into the stream (the blocker still converging; for the
+    // earliest the detector window is not even full) are acquired with exact timing.
+    let f = preamble();
+    for lead in [10usize, 40, 70, 100, 130] {
+        let mut ok = 0;
+        for _ in 0..50 {
+            let x = scene(&f, lead, 0, 0.0, 90e3, FS, 20.0, &mut rng);
+            if let Some(a) = acquire(&x, 0, &cfg) {
+                if a.fft_start == lead + T1 - 4 && (a.cfo_hz - 90e3).abs() < 0.01 * FS / 64.0 {
+                    ok += 1;
+                }
+            }
+        }
+        assert_eq!(ok, 50, "lead {lead}: {ok}/50");
+    }
+}
+
+#[test]
+fn streaming_decisions_are_causal_and_bounded() {
+    // The receiver decides from the samples seen so far: cutting the stream right after the
+    // decision, or replacing everything after it, gives the same acquisition. The decision rule
+    // (running maximum of the energy metric, accepted once 64 + (GI − B) later positions are no
+    // larger) bounds the delay: the energy at position i needs samples to i + (GI − B) − 1 + 127,
+    // and the maximum sits at most GI − B before T1, so the decision is made by
+    // T1 + 64 + 2·(GI − B) + 127 at the latest.
+    let mut rng = Rng::new(0x08b3);
+    let f = preamble();
+    for (fs, snr) in [(FS, 4.0), (FS, 10.0), (FS, 25.0), (10e6, 10.0), (5e6, 10.0)] {
+        let cfg = RxConfig::new(fs);
+        let w = GI_LEN - backoff_samples(&cfg);
+        let bound = LTF_SYMBOL_LEN + 2 * w + 2 * LTF_SYMBOL_LEN - 1;
+        let max_cfo = if fs < 10e6 { 25e3 } else { 235e3 };
+        for _ in 0..100 {
+            let lead = 200 + (rng.uniform() * 300.0) as usize;
+            let cfo = (rng.uniform() * 2.0 - 1.0) * max_cfo;
+            let x = scene(&f, lead, 400, rng.uniform(), cfo, fs, snr, &mut rng);
+            let Some(a) = acquire(&x, 0, &cfg) else {
+                continue;
+            };
+            assert!(
+                a.decided_at <= lead + T1 + bound,
+                "{snr} dB: decided {} after T1",
+                a.decided_at as i64 - (lead + T1) as i64
+            );
+            assert!(a.decided_at >= a.fft_start + 2 * LTF_SYMBOL_LEN);
+            assert_eq!(acquire(&x[..=a.decided_at], 0, &cfg), Some(a), "cut");
+            let mut y = x.clone();
+            let tail = noise(y.len() - a.decided_at - 1, &mut rng);
+            y[a.decided_at + 1..].copy_from_slice(&tail);
+            assert_eq!(acquire(&y, 0, &cfg), Some(a), "tail replaced");
+        }
+    }
+}
+
+#[test]
+fn spur_at_the_noise_level_at_the_4_db_target() {
+    // A CW spur at the noise level keeps detector A firing before the packet, so the
+    // provisional CFO comes from the last latch before T1 alone (no retries), and the spur
+    // biases both CFO estimators (tens of kHz). The 802.11-mode target, Pd ≥ 0.90 at 4 dB, must
+    // still hold for placement within ±1 sample. (The R0-08a block model, which retried from
+    // every later detection, placed 332/400 of these; the first streaming draft 261.)
+    let mut rng = Rng::new(0x08b6);
+    let cfg = RxConfig::new(FS);
+    let f = preamble();
+    let trials = 400;
+    let mut placed = 0;
+    for _ in 0..trials {
+        let lead = 300 + (rng.uniform() * 200.0) as usize;
+        let cfo = (rng.uniform() * 2.0 - 1.0) * 235e3;
+        let x = scene(&f, lead, 0, rng.uniform(), cfo, FS, 4.0, &mut rng);
+        // Noise power = signal / 10^0.4; the spur at the same power.
+        let x = add_tone(
+            &x,
+            mean_power(&f) / 10f64.powf(0.4),
+            1.3e6,
+            FS,
+            2.0 * PI * rng.uniform(),
+        );
+        if let Some(a) = acquire(&x, 0, &cfg) {
+            if a.fft_start.abs_diff(lead + T1 - 4) <= 1 {
+                placed += 1;
+            }
+        }
+    }
+    println!("0 dB spur, 4 dB SNR: {placed}/{trials} placed");
+    assert!(placed >= 360, "{placed}/{trials}");
+}
+
+#[test]
+fn a_search_without_a_packet_closes_in_bounded_time() {
+    // A truncated STF (no LTF) opens a search; with no further detection it must close once
+    // its window [d + 24, d + 264) has been evaluated — position i is evaluated at sample
+    // i + (GI − B) − 1 + 127 — and the receiver is idle again (power: the RTL gates the 128-tap
+    // correlator while idle). A searching receiver must also be able to stay open: the window
+    // moves with every detection.
+    let mut rng = Rng::new(0x08b5);
+    let cfg = RxConfig::new(FS);
+    let w = GI_LEN - backoff_samples(&cfg);
+    let f = preamble();
+    for _ in 0..50 {
+        let x = scene(&f[..160], 300, 1500, 0.0, 70e3, FS, 20.0, &mut rng);
+        let ev = detections(&x, &cfg);
+        let last = *ev.last().unwrap();
+        let close_by = last + 24 + 240 + w + 126;
+        let mut rx = RxFront::new(cfg.clone());
+        let mut opened = None;
+        for (n, &s) in x.iter().enumerate() {
+            assert!(rx.push(s).is_none());
+            if rx.searching() && opened.is_none() {
+                opened = Some(n);
+            }
+            if n >= close_by {
+                assert!(
+                    !rx.searching(),
+                    "still searching {} after the last detection",
+                    n - last
+                );
+            }
+            if opened.is_some() && n > ev[0] && n < last + 24 + 240 {
+                assert!(
+                    rx.searching(),
+                    "closed early at {n} (last detection {last})"
+                );
+            }
+        }
+        assert_eq!(opened, Some(ev[0]), "the first detection opens the search");
+    }
+}
+
+#[test]
+fn streaming_receiver_acquires_back_to_back_frames() {
+    // Pushed one sample at a time, the receiver re-arms after each acquisition and finds every
+    // frame of a burst separated by short gaps; `acquisitions` is the same receiver.
+    let mut rng = Rng::new(0x08b4);
+    let cfg = RxConfig::new(FS);
+    let f = preamble();
+    let mut x = Vec::new();
+    let mut starts = Vec::new();
+    for k in 0..20 {
+        let gap = 100 + (rng.uniform() * 200.0) as usize;
+        x.extend(vec![(0.0, 0.0); gap]);
+        starts.push(x.len());
+        let fr = frequency_offset(&f, (k as f64 - 10.0) * 20e3, FS, 2.0 * PI * rng.uniform());
+        x.extend(fr);
+    }
+    x.extend(vec![(0.0, 0.0); 300]);
+    let x = awgn(&x, 15.0, mean_power(&f), &mut rng);
+    let mut rx = RxFront::new(cfg.clone());
+    let pushed: Vec<_> = x.iter().filter_map(|&s| rx.push(s)).collect();
+    assert_eq!(pushed, acquisitions(&x, &cfg));
+    let got: Vec<usize> = pushed.iter().map(|a| a.fft_start + 4 - T1).collect();
+    assert_eq!(got, starts);
 }
 
 // ---------------------------------------------------------------------------------------------
