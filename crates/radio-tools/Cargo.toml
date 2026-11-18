@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "g2"
 path = "src/bin/g2.rs"
 
+[[bin]]
+name = "rxfront"
+path = "src/bin/rxfront.rs"
+
 [dependencies]
 radio-phy = { path = "../radio-phy" }
 
