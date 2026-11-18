@@ -1,6 +1,8 @@
 # R0-08a detector comparison — rxfront (crates/radio-tools/src/bin/rxfront.rs), branch r0-08a-rx-front
 # Commands: rxfront tail 1000; rxfront pd 4000; rxfront robust 10 (10 threads, macOS arm64)
 # pd/robust rerun after the review fixes (final coarse CFO anchored on the timing; CFO in the robust criterion)
+# R0-08b (branch r0-08b-streaming-timing): pd 4000 and robust 10 rerun on the streaming receiver (RxFront)
+# and the causal DC blocker; tail unchanged (same detector arithmetic). R0-08a block-model figures: git history.
 
 # rxfront tail: detection events per sample on complex white noise
 # 10 threads x 100 M samples; columns: run length 1..8
@@ -43,28 +45,27 @@
 
 ## AWGN
 # detector              0 dB: Pd    acq   CFO |    2 dB: Pd    acq   CFO |    4 dB: Pd    acq   CFO |    6 dB: Pd    acq   CFO |    9 dB: Pd    acq   CFO |   12 dB: Pd    acq   CFO
-  Autocorrelation     0.2347 0.5132  5844 |   0.8245 0.9895  4243 |   0.9992 1.0000  3054 |   1.0000 1.0000  2313 |   1.0000 1.0000  1505 |   1.0000 1.0000  1047
-  MatchedFilter       0.1415 0.2450  5847 |   0.3013 0.4380  4285 |   0.4708 0.6005  3089 |   0.5855 0.6847  2310 |   0.6795 0.7510  1516 |   0.7295 0.7880  1045
-  MatchedExact        0.8287 0.9180  5973 |   0.9660 0.9968  4259 |   0.9988 1.0000  3055 |   1.0000 1.0000  2313 |   1.0000 1.0000  1505 |   1.0000 1.0000  1047
+  Autocorrelation     0.2345 0.5587  5847 |   0.8245 0.9922  4241 |   0.9992 1.0000  3055 |   1.0000 1.0000  2313 |   1.0000 1.0000  1505 |   1.0000 1.0000  1047
+  MatchedFilter       0.1412 0.2740  5974 |   0.3008 0.4467  4270 |   0.4708 0.6022  3083 |   0.5855 0.6840  2311 |   0.6793 0.7495  1515 |   0.7295 0.7845  1045
+  MatchedExact        0.8290 0.9375  5991 |   0.9663 0.9970  4259 |   0.9988 1.0000  3054 |   1.0000 1.0000  2313 |   1.0000 1.0000  1505 |   1.0000 1.0000  1047
 
 ## TGn B
 # detector              0 dB: Pd    acq   CFO |    2 dB: Pd    acq   CFO |    4 dB: Pd    acq   CFO |    6 dB: Pd    acq   CFO |    9 dB: Pd    acq   CFO |   12 dB: Pd    acq   CFO
-  Autocorrelation     0.2933 0.3730  4620 |   0.4773 0.5695  3970 |   0.6913 0.7605  3567 |   0.8160 0.8668  3045 |   0.9363 0.9577  2236 |   0.9832 0.9895  1670
-  MatchedFilter       0.1375 0.1800  4642 |   0.2290 0.2918  3712 |   0.3202 0.4080  3156 |   0.4323 0.5142  2604 |   0.5363 0.6088  1998 |   0.6185 0.6810  1431
-  MatchedExact        0.5252 0.5012  5406 |   0.6763 0.6773  4571 |   0.8055 0.8163  3881 |   0.8765 0.8912  3240 |   0.9480 0.9615  2287 |   0.9762 0.9850  1682
+  Autocorrelation     0.2930 0.3922  4812 |   0.4773 0.5863  4076 |   0.6915 0.7715  3610 |   0.8160 0.8725  3077 |   0.9365 0.9610  2262 |   0.9832 0.9900  1682
+  MatchedFilter       0.1378 0.1888  4817 |   0.2288 0.3008  3879 |   0.3205 0.4130  3225 |   0.4323 0.5165  2640 |   0.5360 0.6095  2048 |   0.6185 0.6767  1438
+  MatchedExact        0.5250 0.5653  5737 |   0.6763 0.7322  4876 |   0.8055 0.8415  4116 |   0.8765 0.9048  3328 |   0.9480 0.9650  2345 |   0.9762 0.9868  1735
 
 ## TGn D
 # detector              0 dB: Pd    acq   CFO |    2 dB: Pd    acq   CFO |    4 dB: Pd    acq   CFO |    6 dB: Pd    acq   CFO |    9 dB: Pd    acq   CFO |   12 dB: Pd    acq   CFO
-  Autocorrelation     0.2990 0.4075  4656 |   0.5510 0.6685  4189 |   0.7877 0.8648  3598 |   0.9175 0.9570  2831 |   0.9880 0.9960  1987 |   1.0000 1.0000  1329
-  MatchedFilter       0.0640 0.1095  4662 |   0.1315 0.1948  3755 |   0.2157 0.2928  3171 |   0.2915 0.3817  2459 |   0.3668 0.4368  1770 |   0.4328 0.4858  1209
-  MatchedExact        0.3663 0.4295  5032 |   0.5490 0.6312  4261 |   0.6907 0.7712  3535 |   0.7985 0.8590  2669 |   0.8858 0.9267  1907 |   0.9285 0.9475  1269
+  Autocorrelation     0.2993 0.4318  4809 |   0.5507 0.6870  4243 |   0.7875 0.8760  3651 |   0.9175 0.9605  2847 |   0.9880 0.9962  1985 |   1.0000 1.0000  1329
+  MatchedFilter       0.0643 0.1168  4799 |   0.1315 0.2005  3859 |   0.2155 0.2915  3167 |   0.2915 0.3807  2469 |   0.3670 0.4353  1771 |   0.4328 0.4785  1218
+  MatchedExact        0.3663 0.4700  5373 |   0.5490 0.6593  4423 |   0.6903 0.7810  3578 |   0.7985 0.8642  2706 |   0.8858 0.9267  1904 |   0.9285 0.9465  1264
 
 ## TGn E
 # detector              0 dB: Pd    acq   CFO |    2 dB: Pd    acq   CFO |    4 dB: Pd    acq   CFO |    6 dB: Pd    acq   CFO |    9 dB: Pd    acq   CFO |   12 dB: Pd    acq   CFO
-  Autocorrelation     0.2945 0.4340  5029 |   0.5913 0.7392  4250 |   0.8525 0.9277  3499 |   0.9647 0.9868  2681 |   0.9982 0.9998  1836 |   1.0000 1.0000  1222
-  MatchedFilter       0.0340 0.0655  4545 |   0.0798 0.1333  3623 |   0.1280 0.1968  2853 |   0.2008 0.2797  2426 |   0.2717 0.3275  1606 |   0.3205 0.3660  1148
-  MatchedExact        0.1910 0.2680  5003 |   0.3523 0.4540  4002 |   0.4805 0.5935  3184 |   0.6002 0.6957  2465 |   0.7200 0.7870  1722 |   0.7927 0.8340  1170
-
+  Autocorrelation     0.2938 0.4642  5136 |   0.5913 0.7598  4307 |   0.8525 0.9360  3533 |   0.9647 0.9888  2687 |   0.9982 1.0000  1835 |   1.0000 1.0000  1222
+  MatchedFilter       0.0343 0.0712  4398 |   0.0798 0.1363  3662 |   0.1280 0.1985  2874 |   0.2008 0.2787  2427 |   0.2722 0.3215  1607 |   0.3207 0.3593  1152
+  MatchedExact        0.1910 0.2918  5224 |   0.3523 0.4675  4089 |   0.4800 0.5960  3188 |   0.6002 0.6953  2471 |   0.7198 0.7790  1730 |   0.7927 0.8205  1172
 # rxfront robust: detection events in 10 M samples of unit noise plus an impairment
 # cells: detections / false acquisitions (detections the LTF stage confirmed)
 # case                               Autocorrelation     MatchedFilter      MatchedExact
@@ -77,8 +78,8 @@
   DC +30 dB                                    0 / 0             0 / 0             0 / 0
   CW 0.30 MHz -10 dB                           0 / 0             0 / 0             0 / 0
   CW 0.30 MHz -3 dB                         4321 / 0             0 / 0             0 / 0
-  CW 0.30 MHz +0 dB                       359180 / 0             0 / 0             0 / 0
-  CW 0.30 MHz +3 dB                      2344807 / 0             0 / 0             0 / 0
+  CW 0.30 MHz +0 dB                       359178 / 0             0 / 0             0 / 0
+  CW 0.30 MHz +3 dB                      2344801 / 0             0 / 0             0 / 0
   CW 0.30 MHz +10 dB                     2499840 / 0             0 / 0             0 / 0
   CW 0.30 MHz +20 dB                     2499840 / 0             0 / 0             0 / 0
   CW 1.25 MHz -10 dB                           0 / 0             0 / 0             0 / 0
@@ -89,8 +90,8 @@
   CW 1.25 MHz +20 dB                     2499840 / 0             0 / 0             0 / 0
   CW 3.10 MHz -10 dB                           0 / 0             1 / 0             5 / 0
   CW 3.10 MHz -3 dB                         5073 / 0             1 / 0           517 / 0
-  CW 3.10 MHz +0 dB                       385277 / 0             0 / 0          2956 / 0
-  CW 3.10 MHz +3 dB                      2358474 / 0             0 / 0         10152 / 0
+  CW 3.10 MHz +0 dB                       385272 / 0             0 / 0          2956 / 0
+  CW 3.10 MHz +3 dB                      2358477 / 0             0 / 0         10152 / 0
   CW 3.10 MHz +10 dB                     2499840 / 0             0 / 0          7094 / 0
   CW 3.10 MHz +20 dB                     2499840 / 0             0 / 0             0 / 0
   gain steps ±10 dB every 0.1 M, DC 0 dB           581 / 0             0 / 0             0 / 0
@@ -100,30 +101,30 @@
 # acquisition rate of 10 dB frames under the impairment (1000 frames):
 # FFT start within ±2 samples and CFO within 2 % of the subcarrier spacing
   DC -10 dB                                    1.000             0.961             1.000
-  DC -3 dB                                     1.000             0.956             1.000
-  DC +0 dB                                     1.000             0.951             1.000
-  DC +3 dB                                     1.000             0.951             1.000
-  DC +10 dB                                    1.000             0.962             1.000
+  DC -3 dB                                     1.000             0.954             1.000
+  DC +0 dB                                     1.000             0.950             1.000
+  DC +3 dB                                     1.000             0.949             1.000
+  DC +10 dB                                    1.000             0.961             1.000
   DC +20 dB                                    1.000             0.959             1.000
-  DC +30 dB                                    1.000             0.962             1.000
-  CW 0.30 MHz -10 dB                           1.000             0.957             1.000
-  CW 0.30 MHz -3 dB                            0.982             0.894             0.982
-  CW 0.30 MHz +0 dB                            0.741             0.636             0.741
-  CW 0.30 MHz +3 dB                            0.420             0.291             0.421
+  DC +30 dB                                    1.000             0.958             1.000
+  CW 0.30 MHz -10 dB                           1.000             0.956             1.000
+  CW 0.30 MHz -3 dB                            0.982             0.892             0.982
+  CW 0.30 MHz +0 dB                            0.741             0.638             0.741
+  CW 0.30 MHz +3 dB                            0.421             0.294             0.421
   CW 0.30 MHz +10 dB                           0.000             0.000             0.000
   CW 0.30 MHz +20 dB                           0.000             0.000             0.000
-  CW 1.25 MHz -10 dB                           1.000             0.946             1.000
-  CW 1.25 MHz -3 dB                            0.991             0.921             0.991
-  CW 1.25 MHz +0 dB                            0.876             0.758             0.876
-  CW 1.25 MHz +3 dB                            0.530             0.382             0.530
+  CW 1.25 MHz -10 dB                           1.000             0.945             1.000
+  CW 1.25 MHz -3 dB                            0.991             0.922             0.991
+  CW 1.25 MHz +0 dB                            0.876             0.759             0.876
+  CW 1.25 MHz +3 dB                            0.530             0.385             0.530
   CW 1.25 MHz +10 dB                           0.052             0.000             0.050
   CW 1.25 MHz +20 dB                           0.000             0.000             0.000
-  CW 3.10 MHz -10 dB                           1.000             0.945             1.000
-  CW 3.10 MHz -3 dB                            0.972             0.930             0.972
-  CW 3.10 MHz +0 dB                            0.798             0.752             0.799
-  CW 3.10 MHz +3 dB                            0.598             0.580             0.600
-  CW 3.10 MHz +10 dB                           0.000             0.001             0.003
+  CW 3.10 MHz -10 dB                           1.000             0.940             1.000
+  CW 3.10 MHz -3 dB                            0.972             0.926             0.972
+  CW 3.10 MHz +0 dB                            0.799             0.749             0.799
+  CW 3.10 MHz +3 dB                            0.599             0.573             0.599
+  CW 3.10 MHz +10 dB                           0.000             0.000             0.001
   CW 3.10 MHz +20 dB                           0.000             0.000             0.000
-  gain steps ±10 dB every 0.1 M, DC 0 dB             1.000             0.956             1.000
+  gain steps ±10 dB every 0.1 M, DC 0 dB             1.000             0.954             1.000
   gain steps ±20 dB every 0.1 M, DC 0 dB             1.000             0.948             1.000
-  gain steps ±30 dB every 0.1 M, DC 0 dB             1.000             0.951             1.000
+  gain steps ±30 dB every 0.1 M, DC 0 dB             1.000             0.949             1.000
