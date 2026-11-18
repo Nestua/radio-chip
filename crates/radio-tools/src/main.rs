@@ -22,7 +22,8 @@ use radio_phy::ofdm::{modulate_symbol, IfftConfig};
 use radio_phy::ppdu::{build_ppdu, frame_hash, Rate};
 use radio_phy::rx_front::{RxConfig, LTF_SYMBOL_LEN, PAIR_LEN};
 use radio_phy::rx_front_fixed::{
-    ltf_corr, ltf_taps, to_adc, FixedRxConfig, RxFrontFixed, ADC_FULL_SCALE, IQ,
+    cordic_angle, cordic_table, ltf_corr, ltf_taps, nco_mix, nco_table, to_adc, FixedRxConfig,
+    RxFrontFixed, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::scrambler::Scrambler;
 
@@ -342,9 +343,25 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   localparam int Z_BITS    = {};\n\
          \x20   localparam int TAP_BITS  = {t};\n\
          \x20   localparam int CORR_BITS = {};\n\
+         \x20   localparam int Y_BITS    = {};\n\
+         \x20   localparam int CORDIC_IN_BITS = {CORDIC_IN_BITS};\n\
+         \x20   localparam int CORDIC_ITERS   = {};\n\
+         \x20   localparam int CORDIC_BITS    = {};\n\
+         \x20   localparam int ANGLE_BITS     = {};\n\
+         \x20   localparam int NCO_PHASE_BITS = {};\n\
+         \x20   localparam int NCO_LUT_BITS   = {};\n\
+         \x20   localparam int NCO_AMP_BITS   = {};\n\
          \n\
          \x20   // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().",
-        fx.z_bits, fx.corr_bits
+        fx.z_bits,
+        fx.corr_bits,
+        Y_BITS,
+        fx.cordic_iters,
+        fx.cordic_bits,
+        fx.angle_bits,
+        fx.nco_phase_bits,
+        fx.nco_lut_bits,
+        fx.nco_amp_bits
     )?;
     for (name, part) in [("ltf_tap_re", 0usize), ("ltf_tap_im", 1)] {
         writeln!(
@@ -366,7 +383,218 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
             "            default: {name} = '0;\n        endcase\n    endfunction"
         )?;
     }
+    let atan = cordic_table(&fx);
+    rom_function(
+        out,
+        "cordic_atan",
+        "CORDIC arctangent table: round(atan(2^-i) 2^A / 2pi), cordic_table()",
+        fx.angle_bits,
+        &atan,
+    )?;
+    let nco = nco_table(&fx);
+    let cos: Vec<i64> = nco.iter().map(|v| v.0).collect();
+    let sin: Vec<i64> = nco.iter().map(|v| v.1).collect();
+    rom_function(
+        out,
+        "nco_cos",
+        "NCO quarter-wave table, cos part: nco_table()",
+        fx.nco_amp_bits,
+        &cos,
+    )?;
+    rom_function(
+        out,
+        "nco_sin",
+        "NCO quarter-wave table, sin part: nco_table()",
+        fx.nco_amp_bits,
+        &sin,
+    )?;
     writeln!(out, "endpackage\n\n`default_nettype wire")
+}
+
+/// One constant ROM of `rx_front_rom_pkg`: `function automatic logic signed [w-1:0] name(int i)`.
+fn rom_function(
+    out: &mut impl Write,
+    name: &str,
+    doc: &str,
+    w: u32,
+    values: &[i64],
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "\n    // {doc}.\n    function automatic logic signed [{}:0] {name}(input int i);\n        case (i)",
+        w - 1
+    )?;
+    for (i, &v) in values.iter().enumerate() {
+        let lit = if v < 0 {
+            format!("-{w}'sd{}", -v)
+        } else {
+            format!("{w}'sd{v}")
+        };
+        writeln!(out, "            {i:3}: {name} = {lit};")?;
+    }
+    writeln!(
+        out,
+        "            default: {name} = '0;\n        endcase\n    endfunction"
+    )
+}
+
+/// Input width of `hw/rtl/cordic.sv`: the receiver's widest angle input, the provisional
+/// latch's lag-16 sum of 96 products of D-bit samples (|re|, |im| < 96 · 2 · 2^(2D−2) < 2^33
+/// at D = 13), as a signed register.
+const CORDIC_IN_BITS: u32 = 34;
+
+/// Vectors for `hw/rtl/cordic.sv` (gate G3: `make -C hw cordic`): `<re> <im> <angle>` per
+/// line, angle = `cordic_angle(re, im)`. Edges (zero, the axes, the extremes of the input
+/// width, the negative real axis where the half-turn applies), then random vectors at every
+/// magnitude from 1 to 34 bits (the block normalisation shifts left or right).
+fn cordic_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    let hi = (1i64 << (CORDIC_IN_BITS - 1)) - 1;
+    let lo = -(1i64 << (CORDIC_IN_BITS - 1));
+    writeln!(
+        out,
+        "# rvec cordic — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# input {CORDIC_IN_BITS} bits signed, N = {}, W_c = {}, A = {}: <re> <im> <angle>",
+        fx.cordic_iters, fx.cordic_bits, fx.angle_bits
+    )?;
+    let mut cases: Vec<(i64, i64)> = Vec::new();
+    let edges = [
+        0,
+        1,
+        -1,
+        2,
+        -2,
+        3,
+        hi,
+        lo,
+        hi - 1,
+        lo + 1,
+        1 << 14,
+        -(1 << 14),
+        (1 << 15) - 1,
+        -(1 << 15),
+    ];
+    for &a in &edges {
+        for &b in &edges {
+            cases.push((a, b));
+        }
+    }
+    let mut rng = XorShift32(0xC0_D1C0);
+    let mut word = || (0..32).fold(0u64, |acc, _| (acc << 1) | u64::from(rng.next_bit()));
+    for k in 0..6000u64 {
+        let bits = 1 + (k % u64::from(CORDIC_IN_BITS)) as u32;
+        let span = 1u64 << bits;
+        let half = (span / 2) as i64;
+        let a = ((word() << 32 | word()) % span) as i64 - half;
+        let b = ((word() << 32 | word()) % span) as i64 - half;
+        cases.push((a.clamp(lo, hi), b.clamp(lo, hi)));
+    }
+    for (re, im) in cases {
+        writeln!(out, "{re} {im} {}", cordic_angle(re, im, &fx))?;
+    }
+    Ok(())
+}
+
+/// One nco segment: `reset <label>`, then per sample `<y re> <y im> <step> <z re> <z im>`. The
+/// phase starts at 0 after reset and advances by the sample's step after the sample.
+fn nco_segment(out: &mut impl Write, label: &str, y: &[IQ], step: &[i64]) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    let full = 1i64 << fx.nco_phase_bits;
+    writeln!(out, "reset {label}")?;
+    let mut phase = 0i64;
+    for (&yv, &st) in y.iter().zip(step) {
+        let z = nco_mix(yv, phase, &fx).ok_or_else(|| io::Error::other("invalid FixedRxConfig"))?;
+        writeln!(out, "{} {} {st} {} {}", yv.0, yv.1, z.0, z.1)?;
+        phase = (phase + st).rem_euclid(full);
+    }
+    Ok(())
+}
+
+/// Vectors for `hw/rtl/nco.sv` (gate G3: `make -C hw nco`). Segments:
+/// 1. the receiver's own y and step per sample (`RxFrontFixed` traces; the generator checks its
+///    phase sequence is the accumulation of its steps): AWGN 25/4 dB, TGn D 9 dB, hot −3 dBFS;
+/// 2. random full-scale y and random steps (any P-bit value);
+/// 3. a table sweep: one table address per sample over two turns, y at both extremes;
+/// 4. the most negative y at quadrant boundaries.
+fn nco_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    let p = fx.nco_phase_bits;
+    writeln!(
+        out,
+        "# rvec nco — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# y {Y_BITS} bits, phase P {p} bits, table L {} bits, amplitude Q {}, z {} bits.",
+        fx.nco_lut_bits, fx.nco_amp_bits, fx.z_bits
+    )?;
+    writeln!(
+        out,
+        "# reset <label> starts a segment (phase 0); then <y re> <y im> <step> <z re> <z im>"
+    )?;
+    let scenes = [
+        ("frame_awgn_25dB", 25.0, -15.0, false, 0x6301u64),
+        ("frame_awgn_4dB", 4.0, -15.0, false, 0x6302),
+        ("frame_tgn_d_9dB", 9.0, -15.0, true, 0x6303),
+        ("frame_hot_-3dBFS", 30.0, -3.0, false, 0x6304),
+    ];
+    let full = 1i64 << p;
+    for (label, snr, dbfs, tgn, seed) in scenes {
+        let adc = rx_scene(snr, dbfs, tgn, seed)?;
+        let mut rx = RxFrontFixed::new(RxConfig::new(20e6), fx);
+        let (mut y, mut step) = (Vec::new(), Vec::new());
+        let mut phase = 0i64;
+        let mut moved = false;
+        for s in adc {
+            let (_, t) = rx.push_traced(s);
+            if t.phase != phase {
+                return Err(io::Error::other(format!(
+                    "{label}: phase is not the step sum"
+                )));
+            }
+            moved |= t.step != 0;
+            y.push(t.y);
+            step.push(t.step);
+            phase = (phase + t.step).rem_euclid(full);
+        }
+        if !moved {
+            return Err(io::Error::other(format!("{label}: the NCO never moved")));
+        }
+        nco_segment(out, label, &y, &step)?;
+    }
+
+    let ymax = (1i64 << (Y_BITS - 1)) - 1;
+    let ymin = -(1i64 << (Y_BITS - 1));
+    let mut rng = XorShift32(0x0C0_0A11);
+    let mut word = || (0..32).fold(0u64, |acc, _| (acc << 1) | u64::from(rng.next_bit()));
+    let yspan = 1u64 << Y_BITS;
+    let (mut y, mut step) = (Vec::new(), Vec::new());
+    for _ in 0..3000 {
+        y.push((
+            (word() % yspan) as i64 + ymin,
+            (word() % yspan) as i64 + ymin,
+        ));
+        step.push((word() % (full as u64)) as i64 - full / 2);
+    }
+    nco_segment(out, "random", &y, &step)?;
+
+    let addr_step = 1i64 << (p - fx.nco_lut_bits);
+    let n = 2usize << fx.nco_lut_bits;
+    let y: Vec<IQ> = (0..n)
+        .map(|k| {
+            if k % 2 == 0 {
+                (ymax, ymax)
+            } else {
+                (ymin, ymax)
+            }
+        })
+        .collect();
+    nco_segment(out, "table_sweep", &y, &vec![addr_step; n])?;
+    let y = vec![(ymin, ymin); 16];
+    nco_segment(out, "quadrants", &y, &[full / 4 - 1; 16])
 }
 
 /// (SHIFT, OUT_W) of the round_sat instances in `hw/tb/round_sat_bank.sv`, 12-bit input.
@@ -429,9 +657,11 @@ fn main() -> ExitCode {
         "ltf_corr" => ltf_corr_vectors(&mut out),
         "round_sat" => round_sat_vectors(&mut out),
         "rx-front-rom" => rx_front_rom(&mut out),
+        "cordic" => cordic_vectors(&mut out),
+        "nco" => nco_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, cordic, nco, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

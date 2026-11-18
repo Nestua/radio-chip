@@ -759,3 +759,77 @@ stay the maximum, and 0/40 packets are acquired, in the float model and in the f
 **Still open:** a true T1 that is weaker than a failing candidate and lies within the 63 + w
 positions after it is still lost. This is unchanged from the streaming design (journal,
 R0-08b) and is not a gate.
+
+## 2026-11-18 · G3 · R0-08b part 3c: CORDIC and NCO RTL
+
+**Blocks**
+- **`hw/rtl/cordic.sv`** is the vectoring CORDIC (golden `cordic_angle`).
+  - Input: 34 bits signed, the provisional latch's lag-16 sum (|·| < 2^33 at D = 13). The same
+    block serves the final coarse and fine CFO.
+  - Datapath, as in the model:
+    - block normalisation to T = W_c − 3 = 15 magnitude bits (leading-one detect on
+      |re| | |im|, arithmetic shift right or left);
+    - half turn when x < 0;
+    - 16 micro-rotations in 18-bit registers, angle wrapping at 16 bits;
+    - an explicit zero input gives 0.
+  - Fully pipelined, one stage per step: out_valid 18 clocks after the input. An iterative
+    (folded) version is a part-d area option.
+- **`hw/rtl/nco.sv`** is the phase accumulator plus mixer (golden `nco_mix`, new public function
+  that `RxFrontFixed` now calls, so the receiver and the vectors share one implementation).
+  - 22-bit phase, advanced on `in_valid` by the sample's step.
+  - Quarter-wave table of 128 × (cos, sin) at 11 bits, folded by quadrant.
+  - Exact complex product of 24 bits, then `round_sat` to 12 bits (drop 11, half to even,
+    saturate).
+  - 4 clocks of latency.
+- **Shared support:**
+  - `rx_front_rom_pkg` gains the formats and the `cordic_atan`, `nco_cos`, `nco_sin` ROMs
+    (generated, `rvec rx-front-rom`).
+  - `hw/lint.vlt` waives UNUSEDPARAM for the generated package only.
+  - `SampleTrace` gains the NCO `phase` and `step` per sample (behaviour-preserving; the
+    G1/G2 gates are unchanged).
+
+**Vectors** (`rvec cordic`, `rvec nco`)
+- **cordic:**
+  - edges: zero, ±1, ±2, the extremes ±2^33, ±2^14, ±2^15 in all combinations;
+  - 6000 random inputs at every magnitude from 1 to 34 bits.
+- **nco:**
+  - the receiver's own y and step traces of four frames (AWGN 25/4 dB, TGn D 9 dB,
+    −3 dBFS); the generator checks that the traced phase is the accumulation of the steps;
+  - 3000 random full-scale samples with random 22-bit steps;
+  - a table sweep over two turns, one address per sample, y at the extremes;
+  - the most negative y at quadrant steps.
+
+**Evidence**
+- `make -C hw cordic`: 6196 cases, 0 mismatches, with idle cycles and a mid-file reset.
+- `make -C hw nco`: 7 segments, 8554 samples, 0 mismatches, with idle cycles and garbage on
+  `in_step` while idle.
+- Stub RTL fails both: 6126 and 7685 mismatches.
+
+**Mutations, CORDIC**
+| Mutation | Mismatches |
+|---|---|
+| `y > 0` becomes `y ≥ 0` | 713 |
+| no half turn | 713 |
+| logical shift in the x update, y ≤ 0 branch | 6109 |
+| normalise to 14 bits | 1262 |
+| zero not special | 62 |
+| right shift one too far | 3129 |
+
+The same logical-shift mutation in the `y > 0` branch is equivalent: y is positive there.
+
+**Mutations, NCO**
+| Mutation | Mismatches |
+|---|---|
+| quadrants 1 and 3 swapped | 1698 |
+| phase moves every clock | 6487 |
+| one bit too few dropped | 8545 |
+| table address bit 0 flipped | 8545 |
+| conjugate rotation | 8430 |
+
+**Note on the method.** The first run of the "normalise to 14 bits" mutation reported 0
+mismatches. A rerun gave 1262, and the model confirms that 14 and 15 bits differ in 21 % of
+random inputs. The first run reused a stale Verilator build after the previous restore (the
+mtime gotcha in CLAUDE.md). Survivors are therefore re-run before they are trusted.
+
+**Not yet:** a Vivado OOC timing run. The NCO's 13 × 11 products and the CORDIC's 18-bit adders
+are each registered, so they are not expected to be critical; it will be run with the top level.
