@@ -110,6 +110,7 @@ struct Gate {
             tick();
             dut.in_valid = 0;
             dut.in_re = 0x7ff;  // garbage while idle
+            dut.in_im = 0x800;
             if (n % 5 == 4) tick();
             if (n % 13 == 12) {
                 tick();

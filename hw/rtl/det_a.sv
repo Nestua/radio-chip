@@ -16,7 +16,9 @@
 //
 // Stream: one sample per in_valid, never stalls. Pipeline: products, sums, the two sides,
 // compare and count: fire/event_o registered 4 edges after the edge that takes the sample.
-// `clear` acts on the counter at the stage that counts (the top level aligns it).
+// `clear` resets the counter after the counting of the sample in stage 4, and only on a cycle
+// that stage holds a valid sample (v3): the top level asserts it on the cycle sample n is in
+// stage 4 to express the model's count reset at apply_pending of sample n (step 1 first).
 
 `default_nettype none
 
@@ -56,7 +58,7 @@ module det_a
     // ---- history and sample counter
     logic signed [D-1:0] h_re [0:DEPTH-1];
     logic signed [D-1:0] h_im [0:DEPTH-1];
-    logic [6:0] n;                                 // saturates at DEPTH
+    logic [$clog2(DEPTH+1)-1:0] n;                 // saturates at DEPTH
     always_ff @(posedge clk) begin
         if (in_valid) begin
             h_re[0] <= x_re;
@@ -131,15 +133,22 @@ module det_a
     // ---- stage 3: the two sides of the threshold
     logic [CMP_W-1:0] lhs3, rhs3;
     logic             ok3, v3;
-    logic signed [CMP_W-1:0] wc_re, wc_im;
-    logic [CMP_W-1:0]        wp1, wp2;
-    assign wc_re = CMP_W'(c_re);
-    assign wc_im = CMP_W'(c_im);
-    assign wp1   = CMP_W'(p1);
-    assign wp2   = CMP_W'(p2);
+    // Natural widths: squares 2·C_W signed, P1·P2 2·P_W unsigned, then the 15-bit constant;
+    // both sides extended to CMP_W only for the shift and the compare.
+    localparam int SQ_W = 2 * C_W;
+    localparam int PP_W = 2 * P_W;
+    logic signed [SQ_W-1:0] sq_re, sq_im, wc_re, wc_im;
+    logic [PP_W-1:0]        pp, wp1, wp2;
+    assign wc_re = SQ_W'(c_re);
+    assign wc_im = SQ_W'(c_im);
+    assign sq_re = wc_re * wc_re;
+    assign sq_im = wc_im * wc_im;
+    assign wp1   = PP_W'(p1);
+    assign wp2   = PP_W'(p2);
+    assign pp    = wp1 * wp2;
     always_ff @(posedge clk) begin
-        lhs3 <= CMP_W'(wc_re * wc_re + wc_im * wc_im) << THETA_SHIFT;
-        rhs3 <= CMP_W'(THETA_NUM) * wp1 * wp2;
+        lhs3 <= (CMP_W'(sq_re) + CMP_W'(sq_im)) << THETA_SHIFT;
+        rhs3 <= CMP_W'(THETA_NUM) * CMP_W'(pp);
         ok3  <= full2 && p1 != '0 && p2 != '0;
         if (!rst_n) v3 <= 1'b0;
         else        v3 <= v2;

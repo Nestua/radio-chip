@@ -950,5 +950,25 @@ previous mutation. Rerun with clean builds:
 - **3a, `ltf_corr`:** tap index (pair 31 uses tap 1) 6458; re/im swap 6418.
 
 Every mutation is still caught; the counts in the 3a and 3c tables above are superseded.
+
+**Pre-PR review (fresh agent, code only), 2026-11-18:** nothing blocking.
+- Its stress harness ran ≈ 4.9 M samples with 0 mismatches. The streams covered:
+  - a 300 k-sample segment;
+  - cuts at n = 15, 16, 62, 63 and 64;
+  - P1 and P2 returning to 0 after being positive;
+  - the largest DC step;
+  - period-16 full-scale patterns.
+- The harness bites: with no P > 0 check it gives 15 132 mismatches, and with CMP_W = 72
+  135 941.
+- `clear` aligned to stage 4 matched the model's reset at `apply_pending` (0 mismatches), and
+  misaligned versions failed. The header now states this contract; its gate is the top level's.
+- Fixed after the review:
+  - the counter width is derived from the parameters;
+  - the stage-3 multiplies use natural widths;
+  - idle garbage is on both inputs.
+- Open:
+  - the `g_narrow` path (DET_BITS < Y_BITS) has no G3 evidence while D = Y_BITS;
+  - the top bits of C, P and M are unreachable through the DC blocker (by analysis), so a
+    mutation that shrinks them by one bit is not caught.
 `hw/Makefile` now builds every gate from scratch, so the hazard is gone for gates and mutation
 runs alike.
