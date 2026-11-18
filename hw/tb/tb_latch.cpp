@@ -9,7 +9,9 @@
 // 13th (idle inputs carry garbage). Sample k leaves the latch when sample k + D enters, so each
 // segment is followed by D flush samples, whose own outputs never appear. Exact latencies:
 // event kDLatency edges after its sample; step and z kSLatency and kZLatency edges after sample
-// k + D. Three junk samples are in flight at each reset: nothing of them may come out.
+// k + D. Before each segment the chain is reset with a latch in flight (CORDIC mid-way, result
+// FIFO not empty), with a one-clock reset; three junk samples are in the detector's pipeline at
+// each segment's end reset: nothing of either may come out or disturb the next run.
 // rx_latch's own timing check ($error) aborts the run if a latch is late. Exit code 0 = passed.
 
 #include <cstdint>
@@ -53,6 +55,7 @@ struct Gate {
     int R = 8, D = 3;
     long cycle = 0, mismatches = 0;
     long es = 0, ss = 0, zs = 0;          // totals compared
+    long in_flight_resets = 0;
     size_t ne = 0, ns = 0, nz = 0;        // per-segment output indices
     const Segment* seg = nullptr;
     std::vector<long> fed;                // cycle of each fed sample (segment + flush)
@@ -133,13 +136,32 @@ struct Gate {
         for (int i = 0; i < idle; ++i) tick();
     }
 
+    // A reset while a latch is in flight: the segment up to its first latching event, eight
+    // more clocks (the CORDIC is then mid-way and the result FIFO holds the entry), and a
+    // one-clock reset. Nothing is compared here; a result that survives the reset lands in the
+    // run that follows and breaks it.
+    void reset_in_flight(const Segment& s) {
+        size_t e = 135;
+        while (e < s.s.size() && !s.s[e].event) ++e;
+        if (e >= s.s.size()) return;
+        ++in_flight_resets;
+        junk = true;
+        dut.rst_n = 0;
+        dut.in_valid = 0;
+        tick();
+        dut.rst_n = 1;
+        for (size_t k = 0; k <= e; ++k) feed(s.s[k].xr, s.s[k].xi, s.s[k].acq, k);
+        for (int i = 0; i < 8; ++i) tick();
+        junk = false;
+    }
+
     void run(const Segment& s) {
         seg = &s;
+        reset_in_flight(s);
         fed.clear();
         ne = ns = nz = 0;
         dut.rst_n = 0;
         dut.in_valid = 0;
-        tick();
         tick();
         dut.rst_n = 1;
         const size_t n = s.s.size();
@@ -230,9 +252,10 @@ int main(int argc, char** argv) {
         g.run(s);
     }
     std::printf("latch G3 (R = %d, D = %d): %zu segments, %ld samples (%ld events, %ld step changes, "
-                "%ld acquisitions), %ld mismatches\n",
-                g.R, g.D, segments.size(), samples, events, steps, acqs, g.mismatches);
-    if (g.ss == 0 || steps == 0 || events == 0) {
+                "%ld acquisitions, %ld resets with a latch in flight), %ld mismatches\n",
+                g.R, g.D, segments.size(), samples, events, steps, acqs, g.in_flight_resets,
+                g.mismatches);
+    if (g.ss == 0 || steps == 0 || events == 0 || g.in_flight_resets == 0) {
         std::cerr << "nothing compared — refusing to pass an empty gate\n";
         return 1;
     }

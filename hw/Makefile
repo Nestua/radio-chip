@@ -94,6 +94,7 @@ det: vectors/det.txt
 
 # Three builds: D_SAMPLES = 3 at R = 8 clocks per sample (and R = 16, the 10 MHz mode), D_SAMPLES
 # = 4 at R = 6 (ADR 0006), and D_SAMPLES = 5 at R = 5, the only one with two latches in flight.
+# Registers without a reset and the delay line start from random values (rand+reset+2).
 latch: vectors/latch.txt
 	rm -rf obj_dir/latch && mkdir -p obj_dir/latch
 	$(VERILATOR) $(VFLAGS) -GD_SAMPLES=3 --Mdir obj_dir/latch/d3 --top-module latch_chain \
@@ -102,10 +103,10 @@ latch: vectors/latch.txt
 		$(SRC_latch) tb/tb_latch.cpp -o sim_latch
 	$(VERILATOR) $(VFLAGS) -GD_SAMPLES=5 --Mdir obj_dir/latch/d5 --top-module latch_chain \
 		$(SRC_latch) tb/tb_latch.cpp -o sim_latch
-	./obj_dir/latch/d3/sim_latch vectors/latch.txt 8 3
-	./obj_dir/latch/d3/sim_latch vectors/latch.txt 16 3
-	./obj_dir/latch/d4/sim_latch vectors/latch.txt 6 4
-	./obj_dir/latch/d5/sim_latch vectors/latch.txt 5 5
+	./obj_dir/latch/d3/sim_latch vectors/latch.txt 8 3 +verilator+rand+reset+2
+	./obj_dir/latch/d3/sim_latch vectors/latch.txt 16 3 +verilator+rand+reset+2
+	./obj_dir/latch/d4/sim_latch vectors/latch.txt 6 4 +verilator+rand+reset+2
+	./obj_dir/latch/d5/sim_latch vectors/latch.txt 5 5 +verilator+rand+reset+2
 
 clean:
 	rm -rf obj_dir

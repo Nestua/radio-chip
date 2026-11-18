@@ -18,11 +18,15 @@
 // changes an earlier sample's step: the order of the model is kept for any input timing that
 // meets the one contract below.
 //
-// Contract: a latch result must be back before its sample is emitted, i.e. CORDIC_ITERS + 6
-// clocks (measured: event at stage 4, CORDIC, step register) must not exceed the time taken by
-// D_SAMPLES samples. With R clocks per sample, D_SAMPLES ≥ ⌈23/R⌉ + 1 (ADR 0006): 3 at R = 8,
-// 4 at R = 6. CHECK_TIMING = 1 stops simulation when it is broken (no hardware is generated for
-// the check; synthesis drops $error and its unused logic).
+// Contract: a latch result must be back before its sample is emitted. From the sample's x edge
+// the result is usable CORDIC_ITERS + 7 = 23 clocks later (det_a to stage 4: 5, the CORDIC: 17,
+// the FIFO write: 1), and the sample is emitted D_SAMPLES sample periods after it, so with R
+// clocks per sample D_SAMPLES·R ≥ 23: 3 at R = 8 (one clock to spare), 4 at R = 6, 5 at R = 5.
+// Any register added on that path (the CORDIC's arbiter in part d step 3) costs D_SAMPLES = 4
+// at R = 8. CHECK_TIMING = 1 stops simulation when the contract is broken; hardware has no
+// such guard: a late result is applied one sample late, and one that arrives after its
+// sample was emitted blocks later latches until the 8-bit tag comes round. Pick D_SAMPLES
+// from the formula, not by trial.
 //
 // Inputs, all the same sample stream, each in its own pipeline stage of det_a:
 //   y_*: det_a's input (dc_block output); c_*: det_a stage 2 (C of that sample); d_valid/event_i:
