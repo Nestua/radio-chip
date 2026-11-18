@@ -12,18 +12,18 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use radio_phy::channel::{
-    awgn, fractional_delay, frequency_offset, mean_power, tgn_taps, Doppler, Multipath, Rng,
-    TgnModel,
+    add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, tgn_taps, Doppler,
+    Multipath, Rng, TgnModel,
 };
 use radio_phy::fixed::{requantize, Overflow, QFormat, Rounding};
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, IfftConfig};
 use radio_phy::ppdu::{build_ppdu, frame_hash, Rate};
-use radio_phy::rx_front::{RxConfig, LTF_SYMBOL_LEN, PAIR_LEN};
+use radio_phy::rx_front::{RxConfig, AUTOCORR_LEN, LTF_SYMBOL_LEN, PAIR_LEN, STF_PERIOD};
 use radio_phy::rx_front_fixed::{
-    cordic_angle, cordic_table, ltf_corr, ltf_taps, nco_mix, nco_table, to_adc, FixedRxConfig,
-    RxFrontFixed, ADC_FULL_SCALE, IQ, Y_BITS,
+    cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
+    to_adc, FixedRxConfig, RxFrontFixed, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::scrambler::Scrambler;
 
@@ -323,6 +323,11 @@ fn ltf_corr_vectors(out: &mut impl Write) -> io::Result<()> {
 /// so the generator refuses taps that are not Hermitian.
 fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
     let fx = FixedRxConfig::default();
+    let rx = RxConfig::new(20e6);
+    let dc_shift = rx
+        .dc_shift
+        .ok_or_else(|| io::Error::other("the default receiver has no DC blocker"))?;
+    let det_run = rx.run;
     let taps = ltf_taps(&fx);
     let hermitian = taps[0].1 == 0
         && taps[32].1 == 0
@@ -351,6 +356,14 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   localparam int NCO_PHASE_BITS = {};\n\
          \x20   localparam int NCO_LUT_BITS   = {};\n\
          \x20   localparam int NCO_AMP_BITS   = {};\n\
+         \x20   localparam int DET_BITS       = {};\n\
+         \x20   localparam int DC_FRAC        = {};\n\
+         \x20   localparam int DC_SHIFT       = {dc_shift};\n\
+         \x20   localparam int STF_PERIOD     = {STF_PERIOD};\n\
+         \x20   localparam int AUTOCORR_LEN   = {AUTOCORR_LEN};\n\
+         \x20   localparam int DET_RUN        = {det_run};\n\
+         \x20   localparam int THETA_NUM      = {};\n\
+         \x20   localparam int THETA_SHIFT    = {};\n\
          \n\
          \x20   // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().",
         fx.z_bits,
@@ -361,7 +374,11 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
         fx.angle_bits,
         fx.nco_phase_bits,
         fx.nco_lut_bits,
-        fx.nco_amp_bits
+        fx.nco_amp_bits,
+        fx.det_bits,
+        fx.dc_frac,
+        fx.theta_num,
+        fx.theta_shift
     )?;
     for (name, part) in [("ltf_tap_re", 0usize), ("ltf_tap_im", 1)] {
         writeln!(
@@ -650,6 +667,114 @@ fn round_sat_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// One det segment: `reset <label>`, then per sample `<x re> <x im> <y re> <y im> <fire> <event>`.
+fn det_segment(out: &mut impl Write, label: &str, x: &[(i16, i16)]) -> io::Result<usize> {
+    let tr = detector_trace_fixed(x, &RxConfig::new(20e6), &FixedRxConfig::default());
+    if tr.len() != x.len() {
+        return Err(io::Error::other("invalid FixedRxConfig"));
+    }
+    writeln!(out, "reset {label}")?;
+    for (s, t) in x.iter().zip(&tr) {
+        writeln!(
+            out,
+            "{} {} {} {} {} {}",
+            s.0,
+            s.1,
+            t.y.0,
+            t.y.1,
+            u8::from(t.fire),
+            u8::from(t.event)
+        )?;
+    }
+    Ok(tr.iter().filter(|t| t.event).count())
+}
+
+/// Vectors for `hw/rtl/dc_block.sv` + `hw/rtl/det_a.sv` (gate G3: `make -C hw det`): the
+/// receiver's step 1 per sample (`detector_trace_fixed`). Segments: four received frames (as
+/// for `ltf_corr`); noise alone at −30 dBFS; noise with a CW tone at the noise level and 10 dB
+/// above it; a −20 dB AGC step before a frame (the DC transient); a large DC offset under a
+/// frame; full-scale random samples; full-scale steps (the DC blocker's largest error, y at its
+/// saturation bound).
+fn det_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    writeln!(
+        out,
+        "# rvec det — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# x 12-bit ADC, y {Y_BITS} bits (DC blocker, F = {}), detector A D = {} bits, θ² = {}/2^{}.",
+        fx.dc_frac, fx.det_bits, fx.theta_num, fx.theta_shift
+    )?;
+    writeln!(
+        out,
+        "# reset <label> starts a segment; then <x re> <x im> <y re> <y im> <fire> <event>"
+    )?;
+    let scenes = [
+        ("frame_awgn_25dB", 25.0, -15.0, false, 0x6301u64),
+        ("frame_awgn_4dB", 4.0, -15.0, false, 0x6302),
+        ("frame_tgn_d_9dB", 9.0, -15.0, true, 0x6303),
+        ("frame_hot_-3dBFS", 30.0, -3.0, false, 0x6304),
+    ];
+    let mut events = 0;
+    for (label, snr, dbfs, tgn, seed) in scenes {
+        events += det_segment(out, label, &rx_scene(snr, dbfs, tgn, seed)?)?;
+    }
+    if events == 0 {
+        return Err(io::Error::other("no detection event in the frame segments"));
+    }
+    let fs = 20e6;
+    let full = f64::from(ADC_FULL_SCALE);
+    let mut rng = Rng::new(0xDE7_0001);
+    let noise = |n: usize, dbfs: f64, rng: &mut Rng| -> Vec<(f64, f64)> {
+        let p = (full * 10f64.powf(dbfs / 20.0)).powi(2);
+        awgn(&vec![(0.0, 0.0); n], 0.0, p, rng)
+    };
+    let q = |x: &[(f64, f64)]| to_adc(x, 1.0);
+    det_segment(out, "noise_-30dBFS", &q(&noise(3000, -30.0, &mut rng)))?;
+    let pn = (full * 10f64.powf(-30.0 / 20.0)).powi(2);
+    let n1 = noise(3000, -30.0, &mut rng);
+    det_segment(out, "tone_0dB", &q(&add_tone(&n1, pn, 1.3e6, fs, 0.4)))?;
+    let n2 = noise(3000, -30.0, &mut rng);
+    det_segment(
+        out,
+        "tone_10dB",
+        &q(&add_tone(&n2, 10.0 * pn, -0.7e6, fs, 1.1)),
+    )?;
+    let frame = rx_scene(15.0, -5.0, false, 0x6305)?;
+    let xf: Vec<(f64, f64)> = frame
+        .iter()
+        .map(|&(a, b)| (f64::from(a), f64::from(b)))
+        .collect();
+    det_segment(out, "agc_step", &q(&gain_step(&xf, 150, -20.0)))?;
+    let dc: Vec<(f64, f64)> = rx_scene(15.0, -20.0, false, 0x6306)?
+        .iter()
+        .map(|&(a, b)| (f64::from(a) + 1500.0, f64::from(b) - 1200.0))
+        .collect();
+    det_segment(out, "dc_offset", &q(&dc))?;
+    let mut bits = XorShift32(0xDE7_0002);
+    let mut word = || (0..32).fold(0u32, |acc, _| (acc << 1) | u32::from(bits.next_bit()));
+    let lo = -ADC_FULL_SCALE;
+    let random: Vec<(i16, i16)> = (0..2000)
+        .map(|_| {
+            let v = |w: u32| (i64::from(w % 4096) + i64::from(lo)) as i16;
+            (v(word()), v(word()))
+        })
+        .collect();
+    det_segment(out, "random_full_scale", &random)?;
+    let hi = (ADC_FULL_SCALE - 1) as i16;
+    let steps: Vec<(i16, i16)> = (0..1200)
+        .map(|k| match (k / 150) % 4 {
+            0 => (hi, -hi - 1),
+            1 => (-hi - 1, hi),
+            2 => (hi, hi),
+            _ => (-hi - 1, -hi - 1),
+        })
+        .collect();
+    det_segment(out, "full_scale_steps", &steps)?;
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let stdout = io::stdout();
@@ -663,9 +788,10 @@ fn main() -> ExitCode {
         "rx-front-rom" => rx_front_rom(&mut out),
         "cordic" => cordic_vectors(&mut out),
         "nco" => nco_vectors(&mut out),
+        "det" => det_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, cordic, nco, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, cordic, nco, det, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

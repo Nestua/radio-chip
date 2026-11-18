@@ -390,9 +390,25 @@ impl DetFixed {
     }
 }
 
-/// Every detection event of the fixed-point detector (DC blocker, detector A, run counter
-/// restarting after each event).
-pub fn detections_fixed(x: &[(i16, i16)], cfg: &RxConfig, fx: &FixedRxConfig) -> Vec<usize> {
+/// One sample of the fixed-point detection path (the RTL gate's per-sample values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DetectorTrace {
+    /// DC blocker output, [`Y_BITS`] bits.
+    pub y: IQ,
+    /// Detector A's metric at or above the threshold at this sample.
+    pub fire: bool,
+    /// A detection event: the run counter reached `run` (it restarts after each event).
+    pub event: bool,
+}
+
+/// The fixed-point detection path per sample: DC blocker, detector A, run counter restarting
+/// after each event — the receiver's step 1 without the acquisition's counter reset. Empty for
+/// an invalid configuration.
+pub fn detector_trace_fixed(
+    x: &[(i16, i16)],
+    cfg: &RxConfig,
+    fx: &FixedRxConfig,
+) -> Vec<DetectorTrace> {
     if !fx.is_valid() {
         return Vec::new();
     }
@@ -400,20 +416,33 @@ pub fn detections_fixed(x: &[(i16, i16)], cfg: &RxConfig, fx: &FixedRxConfig) ->
     let mut det = DetFixed::new();
     let run = cfg.run.max(1);
     let mut count = 0;
-    let mut out = Vec::new();
-    for (n, &(a, b)) in x.iter().enumerate() {
-        let y = dc_out(&mut dc, (i64::from(a), i64::from(b)));
-        if det.push(narrow_iq(y, Y_BITS, fx.det_bits), fx) {
-            count += 1;
-            if count >= run {
-                out.push(n);
+    x.iter()
+        .map(|&(a, b)| {
+            let y = dc_out(&mut dc, (i64::from(a), i64::from(b)));
+            let fire = det.push(narrow_iq(y, Y_BITS, fx.det_bits), fx);
+            let mut event = false;
+            if fire {
+                count += 1;
+                if count >= run {
+                    event = true;
+                    count = 0;
+                }
+            } else {
                 count = 0;
             }
-        } else {
-            count = 0;
-        }
-    }
-    out
+            DetectorTrace { y, fire, event }
+        })
+        .collect()
+}
+
+/// Every detection event of the fixed-point detector (DC blocker, detector A, run counter
+/// restarting after each event).
+pub fn detections_fixed(x: &[(i16, i16)], cfg: &RxConfig, fx: &FixedRxConfig) -> Vec<usize> {
+    detector_trace_fixed(x, cfg, fx)
+        .iter()
+        .enumerate()
+        .filter_map(|(n, t)| t.event.then_some(n))
+        .collect()
 }
 
 /// The fixed-point DC blocker over a whole stream (a copy when it is disabled).
