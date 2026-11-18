@@ -12,8 +12,10 @@
 //      final wrap of z into [−2^(A−1), 2^(A−1)) is that wrap).
 // T magnitude bits grow by at most √2 · 1.65 < 4 in the iterations, so x and y never wrap.
 //
-// Stream: one input per in_valid, never stalls; fully pipelined, one stage per step:
-// out_valid CORDIC_ITERS + 2 clocks after the edge that takes the input. Iterative (one
+// Stream: one input per in_valid, never stalls; fully pipelined, one stage per step (stage 0
+// registers the normalised input, stage 1 the half turn, then one per micro-rotation):
+// out_valid is seen CORDIC_ITERS + 1 clock edges after the edge that takes the input (17;
+// gated by tb_cordic). Iterative (one
 // micro-rotation per clock) would be smaller; the receiver needs an angle only at detection
 // events and decisions, so part d may fold it.
 
@@ -69,7 +71,7 @@ module cordic
     logic [N+1:0]         v;
 
     always_ff @(posedge clk) begin
-        x[0]    <= CW'(sh_re);   // |sh| < 2^T: the low CW bits are the value
+        x[0]    <= CW'(sh_re);   // |sh| ≤ 2^T: the low CW bits are the value
         y[0]    <= CW'(sh_im);
         z[0]    <= '0;
         zero[0] <= (mag == '0);
@@ -115,7 +117,7 @@ module cordic
     assign out_angle = zero[N+1] ? '0 : z[N+1];
 
     // x of the last stage is not needed (only its sign and y drive the iterations), and the
-    // shifted components' top bits are their sign extension (|sh| < 2^T).
+    // shifted components' top bits are their sign extension (|sh| ≤ 2^T).
     logic unused;
     assign unused = ^{x[N+1], sh_re[IN-1:CW], sh_im[IN-1:CW]};
 endmodule

@@ -445,8 +445,9 @@ const CORDIC_IN_BITS: u32 = 34;
 
 /// Vectors for `hw/rtl/cordic.sv` (gate G3: `make -C hw cordic`): `<re> <im> <angle>` per
 /// line, angle = `cordic_angle(re, im)`. Edges (zero, the axes, the extremes of the input
-/// width, the negative real axis where the half-turn applies), then random vectors at every
-/// magnitude from 1 to 34 bits (the block normalisation shifts left or right).
+/// width, the negative real axis where the half-turn applies), then random vectors with re
+/// and im at independent magnitudes from 1 to 34 bits (the block normalisation shifts left or
+/// right).
 fn cordic_vectors(out: &mut impl Write) -> io::Result<()> {
     let fx = FixedRxConfig::default();
     let hi = (1i64 << (CORDIC_IN_BITS - 1)) - 1;
@@ -485,12 +486,15 @@ fn cordic_vectors(out: &mut impl Write) -> io::Result<()> {
     let mut rng = XorShift32(0xC0_D1C0);
     let mut word = || (0..32).fold(0u64, |acc, _| (acc << 1) | u64::from(rng.next_bit()));
     for k in 0..6000u64 {
-        let bits = 1 + (k % u64::from(CORDIC_IN_BITS)) as u32;
-        let span = 1u64 << bits;
-        let half = (span / 2) as i64;
-        let a = ((word() << 32 | word()) % span) as i64 - half;
-        let b = ((word() << 32 | word()) % span) as i64 - half;
-        cases.push((a.clamp(lo, hi), b.clamp(lo, hi)));
+        // re and im at independent bit lengths: one large and one tiny component too
+        let n = u64::from(CORDIC_IN_BITS);
+        let mut draw = |bits: u32| {
+            let span = 1u64 << bits;
+            (((word() << 32 | word()) % span) as i64 - (span / 2) as i64).clamp(lo, hi)
+        };
+        let a = draw(1 + (k % n) as u32);
+        let b = draw(1 + ((k / n + 7 * k) % n) as u32);
+        cases.push((a, b));
     }
     for (re, im) in cases {
         writeln!(out, "{re} {im} {}", cordic_angle(re, im, &fx))?;

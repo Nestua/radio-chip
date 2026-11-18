@@ -718,8 +718,7 @@ impl RxFrontFixed {
         let rot: Vec<IQ> = (0..PAIR_LEN + w)
             .map(|m| {
                 let ph = (step as i128 * m as i128).rem_euclid(1i128 << fx.nco_phase_bits) as i64;
-                let p = imul(self.y.get(sym + m), rotate_with(ph, &fx, &self.nco));
-                narrow_iq(p, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits)
+                nco_mix_with(self.y.get(sym + m), ph, &fx, &self.nco)
             })
             .collect();
         let xc = |o: usize| {

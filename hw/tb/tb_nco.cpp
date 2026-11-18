@@ -4,7 +4,9 @@
 //
 // Each `reset` segment starts from reset (phase 0). Samples are fed with an idle cycle after
 // every 5th and two after every 13th, so the gate also checks that the phase advances only on
-// valid samples. Outputs are compared in order. Exit code 0 = gate passed.
+// valid samples. Every output must come exactly kLatency clocks after its input. Each segment
+// ends with three junk samples still in the pipeline when the next reset arrives: none may come
+// out. Exit code 0 = gate passed.
 
 #include <cstdint>
 #include <cstdio>
@@ -23,6 +25,8 @@ namespace {
 constexpr int kYBits = 13;
 constexpr int kPhaseBits = 22;
 constexpr int kZBits = 12;
+// Clock edges from the one that takes a sample to the one after which its out_valid is seen.
+constexpr long kLatency = 3;
 
 long sext(uint32_t v, int bits) {
     const uint32_t m = 1u << (bits - 1);
@@ -32,6 +36,7 @@ long sext(uint32_t v, int bits) {
 
 struct Sample {
     long yr, yi, step, zr, zi;
+    long cycle = 0;
 };
 
 struct Segment {
@@ -41,7 +46,7 @@ struct Segment {
 
 struct Gate {
     Vnco dut;
-    long outputs = 0, mismatches = 0;
+    long outputs = 0, mismatches = 0, cycle = 0;
     std::deque<Sample> pending;
     const std::string* label = nullptr;
 
@@ -50,6 +55,7 @@ struct Gate {
         dut.eval();
         dut.clk = 1;
         dut.eval();
+        ++cycle;
         if (dut.out_valid) check();
     }
 
@@ -63,6 +69,12 @@ struct Gate {
         }
         const Sample w = pending.front();
         pending.pop_front();
+        if (cycle - w.cycle != kLatency) {
+            if (mismatches < 10)
+                std::fprintf(stderr, "%s output %ld: latency %ld, expected %ld\n",
+                             label->c_str(), outputs, cycle - w.cycle, kLatency);
+            ++mismatches;
+        }
         if (re != w.zr || im != w.zi) {
             if (mismatches < 10)
                 std::fprintf(stderr, "%s output %ld: rtl=(%ld,%ld) golden=(%ld,%ld)\n",
@@ -85,7 +97,9 @@ struct Gate {
             dut.in_re = static_cast<uint32_t>(x.yr) & ((1u << kYBits) - 1);
             dut.in_im = static_cast<uint32_t>(x.yi) & ((1u << kYBits) - 1);
             dut.in_step = static_cast<uint32_t>(x.step) & ((1u << kPhaseBits) - 1);
-            pending.push_back(x);
+            Sample d = x;
+            d.cycle = cycle + 1;
+            pending.push_back(d);
             tick();
             dut.in_valid = 0;
             dut.in_step = 0x2aaaaa;  // garbage while idle: must not move the phase
@@ -102,6 +116,15 @@ struct Gate {
             ++mismatches;
             pending.clear();
         }
+        // Junk in flight when the next segment's reset arrives: it must not come out.
+        for (int k = 0; k < static_cast<int>(kLatency); ++k) {
+            dut.in_valid = 1;
+            dut.in_re = 0x0fff;
+            dut.in_im = 0x1001;
+            dut.in_step = 0x155555;
+            tick();
+        }
+        dut.in_valid = 0;
     }
 };
 

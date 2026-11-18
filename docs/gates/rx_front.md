@@ -772,15 +772,16 @@ R0-08b) and is not a gate.
     - half turn when x < 0;
     - 16 micro-rotations in 18-bit registers, angle wrapping at 16 bits;
     - an explicit zero input gives 0.
-  - Fully pipelined, one stage per step: out_valid 18 clocks after the input. An iterative
-    (folded) version is a part-d area option.
+  - Fully pipelined, one stage per step: out_valid is seen 17 clock edges after the edge that
+    takes the input, as gated by the testbench. An iterative (folded) version is a part-d area
+    option.
 - **`hw/rtl/nco.sv`** is the phase accumulator plus mixer (golden `nco_mix`, new public function
   that `RxFrontFixed` now calls, so the receiver and the vectors share one implementation).
   - 22-bit phase, advanced on `in_valid` by the sample's step.
   - Quarter-wave table of 128 × (cos, sin) at 11 bits, folded by quadrant.
   - Exact complex product of 24 bits, then `round_sat` to 12 bits (drop 11, half to even,
     saturate).
-  - 4 clocks of latency.
+  - Latency 3 clock edges, gated.
 - **Shared support:**
   - `rx_front_rom_pkg` gains the formats and the `cordic_atan`, `nco_cos`, `nco_sin` ROMs
     (generated, `rvec rx-front-rom`).
@@ -790,8 +791,9 @@ R0-08b) and is not a gate.
 
 **Vectors** (`rvec cordic`, `rvec nco`)
 - **cordic:**
-  - edges: zero, ±1, ±2, the extremes ±2^33, ±2^14, ±2^15 in all combinations;
-  - 6000 random inputs at every magnitude from 1 to 34 bits.
+  - edges in all pairwise combinations: 0, ±1, ±2, 3, 2^33 − 1, −2^33 and their
+    neighbours, ±2^14, 2^15 − 1, −2^15;
+  - 6000 random inputs, re and im at independent magnitudes from 1 to 34 bits.
 - **nco:**
   - the receiver's own y and step traces of four frames (AWGN 25/4 dB, TGn D 9 dB,
     −3 dBFS); the generator checks that the traced phase is the accumulation of the steps;
@@ -800,9 +802,14 @@ R0-08b) and is not a gate.
   - the most negative y at quadrant steps.
 
 **Evidence**
-- `make -C hw cordic`: 6196 cases, 0 mismatches, with idle cycles and a mid-file reset.
-- `make -C hw nco`: 7 segments, 8554 samples, 0 mismatches, with idle cycles and garbage on
-  `in_step` while idle.
+- `make -C hw cordic`: 6196 cases, 0 mismatches.
+  - Idle cycles between inputs.
+  - Every output must arrive exactly 17 edges after its input.
+  - Five inputs are in flight at a mid-file reset, and none may come out.
+- `make -C hw nco`: 7 segments, 8554 samples, 0 mismatches.
+  - Idle cycles with garbage on `in_step`.
+  - Latency exactly 3 edges.
+  - Three junk samples are in flight at each segment's reset, and none may come out.
 - Stub RTL fails both: 6126 and 7685 mismatches.
 
 **Mutations, CORDIC**
@@ -815,6 +822,13 @@ R0-08b) and is not a gate.
 | zero not special | 62 |
 | right shift one too far | 3129 |
 
+Two further CORDIC mutations, for the timing checks:
+
+| Mutation | Mismatches |
+|---|---|
+| valid pipeline not cleared by reset | 5877 |
+| out_valid one stage early | 11856 |
+
 The same logical-shift mutation in the `y > 0` branch is equivalent: y is positive there.
 
 **Mutations, NCO**
@@ -825,11 +839,29 @@ The same logical-shift mutation in the `y > 0` branch is equivalent: y is positi
 | one bit too few dropped | 8545 |
 | table address bit 0 flipped | 8545 |
 | conjugate rotation | 8430 |
+| valid not cleared by reset | 700 |
+
+"NCO out_valid one stage early" leaves a bit unused and is stopped by lint (-Wall), so it never
+builds.
 
 **Note on the method.** The first run of the "normalise to 14 bits" mutation reported 0
 mismatches. A rerun gave 1262, and the model confirms that 14 and 15 bits differ in 21 % of
 random inputs. The first run reused a stale Verilator build after the previous restore (the
 mtime gotcha in CLAUDE.md). Survivors are therefore re-run before they are trusted.
+
+**Pre-PR review (fresh agent, code only), 2026-11-18:** nothing significant.
+- The reviewer's own stress run reached 0 mismatches:
+  - cordic: 2.4 M cases, including every input in [−300, 300]² and every ±2^b ± 1 pair;
+  - nco: 3.0 M samples, including all 512 table addresses × 36 extreme y.
+- Fixed after the review:
+  - independent re/im magnitudes in the vectors;
+  - the latency and reset-flush checks above (the module headers had the latency one too
+    high);
+  - the confirmation path now also calls `nco_mix_with`, so the receiver has one mixer;
+  - explicit sign-extended operands in the NCO products, so they do not depend on a tool's
+    cast semantics;
+  - the |sh| ≤ 2^T comment.
+- Noted, not changed: `CORDIC_IN_BITS` = 34 is set in `rvec`, not derived from `det_bits`.
 
 **Not yet:** a Vivado OOC timing run. The NCO's 13 × 11 products and the CORDIC's 18-bit adders
 are each registered, so they are not expected to be critical; it will be run with the top level.

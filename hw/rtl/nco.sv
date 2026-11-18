@@ -10,7 +10,8 @@
 //
 // Stream: one sample per in_valid, never stalls. in_step is the step in effect at this sample
 // (after the receiver's latch, if any); the phase register starts at 0 after reset and moves
-// only on in_valid. out_valid 4 clocks after the edge that takes the sample.
+// only on in_valid. out_valid is seen 3 clock edges after the edge that takes the sample
+// (gated by tb_nco).
 
 `default_nettype none
 
@@ -68,11 +69,16 @@ module nco
         y2_im <= y1_im;
     end
 
-    // ---- stage 3: complex product (exact)
-    logic signed [PW-1:0] p3_re, p3_im;
+    // ---- stage 3: complex product (exact). Operands sign-extended to PW first, so the
+    // products do not depend on a tool's handling of cast-widened multiplies.
+    logic signed [PW-1:0] yr, yi, cc, ss, p3_re, p3_im;
+    assign yr = PW'(y2_re);
+    assign yi = PW'(y2_im);
+    assign cc = PW'(c2);
+    assign ss = PW'(s2);
     always_ff @(posedge clk) begin
-        p3_re <= PW'(y2_re * c2) - PW'(y2_im * s2);
-        p3_im <= PW'(y2_re * s2) + PW'(y2_im * c2);
+        p3_re <= yr * cc - yi * ss;
+        p3_im <= yr * ss + yi * cc;
     end
 
     // ---- stage 4: narrow to Z bits
