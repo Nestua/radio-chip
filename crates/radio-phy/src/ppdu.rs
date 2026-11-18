@@ -197,7 +197,7 @@ pub fn long_training_sequence() -> [i8; 53] {
 
 /// Non-zero short-training subcarriers and their sign s (S_k = √(13/6)·s·(1 + j)).
 /// IEEE 802.11-2020 §17.3.3.
-const SHORT_TRAINING: [(i8, i8); 12] = [
+pub const SHORT_TRAINING: [(i8, i8); 12] = [
     (-24, 1),
     (-20, -1),
     (-16, 1),

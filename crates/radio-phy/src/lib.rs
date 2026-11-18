@@ -14,5 +14,6 @@ pub mod mapper;
 pub mod modulation;
 pub mod ofdm;
 pub mod ppdu;
+pub mod rx_front;
 pub mod scrambler;
 pub mod viterbi;

@@ -1,0 +1,805 @@
+# OpenOFDM Decoder.decode_next on rxfront frames, black box.
+# Tool: openofdm ea638eb2d3abd6c6d9c0c87a430f393fc3ffc859, python 2.7.18, numpy 1.16.6
+# <k> | start <sample or none> phase <rad/sample or none> signal <rate> <length> <parity> | psdu <hex or none>
+# frames 800 per-snr 200 fnv f1ee656c89b4b18c
+# Frames: cargo run -q --release -p radio-tools --bin rxfront -- frames 200 (generator commit on this branch)
+0 | start 437 phase 0.049409 signal 6 20 1 | psdu 58a475f9fe2b5304e9adb782cb55d6af5c3c2ea2
+1 | start 438 phase 0.007671 signal 6 20 1 | psdu 4c2d62ee4d3858431252ed42a56ae1f49dc6efef
+2 | start 437 phase -0.049528 signal 6 20 1 | psdu 597a4915b66b43727aef713249cf48e56bd266a3
+3 | start 438 phase 0.019871 signal 6 20 1 | psdu b3f54a34795b8afb3841046e7d8c3f9c4bf7b18f
+4 | start 437 phase 0.018826 signal 6 20 1 | psdu ac4ced965916301dec4c9219c79d8081145018ec
+5 | start none phase none signal none | psdu none
+6 | start none phase none signal none | psdu none
+7 | start 437 phase -0.003066 signal 6 20 1 | psdu a5a189cd0dca7c1b299f0b0039f47b508e49b441
+8 | start 438 phase 0.013701 signal 6 20 1 | psdu af25a25c7f806d178b5438ba40cb5b7445747fa0
+9 | start none phase none signal none | psdu none
+10 | start none phase none signal none | psdu none
+11 | start 438 phase 0.023949 signal 6 20 1 | psdu a8a1bbe69d9de1e3101308cf5fc6c5ff912a396a
+12 | start 437 phase 0.027375 signal 6 20 1 | psdu 137ca09c14d3cda9af819c9055cb115f6c606291
+13 | start 437 phase 0.018475 signal 6 20 1 | psdu ce2423cf615eca7e7e5aacf90b4bb333e486187b
+14 | start none phase none signal none | psdu none
+15 | start 438 phase 0.055869 signal 6 20 1 | psdu 3407e82ad255bd86f310a2c3a3f665a51658b758
+16 | start 438 phase -0.006660 signal 6 20 1 | psdu 1e36c640feb0b3d2bd475964269f1f51dedabb14
+17 | start 438 phase 0.039143 signal 6 20 1 | psdu da8e2d9c266b2b36c79ff45be190537eaa5cbf20
+18 | start none phase none signal none | psdu none
+19 | start 437 phase -0.028395 signal 6 20 1 | psdu 45681e2b9fa1b22179b61933a512a1bfe7f9ba20
+20 | start 438 phase -0.045169 signal 6 20 1 | psdu ed3a864ea694b3d0aef2e0f8f07cc6c9e50569aa
+21 | start 438 phase 0.036943 signal 0 16 1 | psdu none
+22 | start 438 phase 0.024094 signal 6 20 1 | psdu bfcc4f31118eb4438ded2186612241b1f684160d
+23 | start none phase none signal none | psdu none
+24 | start none phase none signal none | psdu none
+25 | start none phase none signal none | psdu none
+26 | start 437 phase -0.001179 signal 6 20 1 | psdu 337ebd0ba3d4a47f87a23117a008aa75fc8a8109
+27 | start 438 phase 0.057224 signal 6 20 1 | psdu b870300a819263e7c62ac91a238981635da5b803
+28 | start 438 phase 0.009882 signal 6 20 1 | psdu e6c669c7b76c11f0e96192d8e4dbd5da65c074bf
+29 | start 437 phase 0.048344 signal 6 20 1 | psdu d60338c8890fb5aef20ac857d716c7a0e1070e5f
+30 | start 437 phase -0.041110 signal 6 20 1 | psdu 1583c338ed80003dfbec1b41b5ee9c532024ffa7
+31 | start 437 phase -0.038182 signal 6 20 1 | psdu c716abac38ed7155891537599deeacf6cdef8355
+32 | start 438 phase -0.038863 signal 6 20 1 | psdu 9b2cea15d62c36f695ae8d35416b104c4d7289f3
+33 | start none phase none signal none | psdu none
+34 | start 438 phase -0.047866 signal 6 20 1 | psdu e1bf8ba90edd506bfdd7fd64dd93ffc4597c8344
+35 | start 438 phase 0.049017 signal 6 20 1 | psdu f82c02b4f98e7309b00083a19bdc7735d9c19ab8
+36 | start 438 phase -0.046774 signal 0 8 1 | psdu none
+37 | start 438 phase 0.009198 signal 6 20 1 | psdu 3dd64775c5d8a4daec5863b0d1ccbed9088c647c
+38 | start 437 phase 0.039063 signal 6 20 1 | psdu 33b9f24dad5a872ef6bdac9d93c1c878916e4eb2
+39 | start none phase none signal none | psdu none
+40 | start 437 phase -0.058309 signal 6 20 1 | psdu 2f64ceab76560556e3637634a2bee2aab7588c75
+41 | start 437 phase 0.046744 signal 6 20 1 | psdu 32224b7e539cf296562ff6c8f8fd5e149f551196
+42 | start 437 phase 0.003195 signal 6 20 1 | psdu 43d2fea6a52ddfd634f43c2069ccaa15fcdb30d6
+43 | start 438 phase -0.060286 signal 6 20 1 | psdu b86bb76ef7ebec56db57d3f0c526134f48b330ce
+44 | start none phase none signal none | psdu none
+45 | start 437 phase -0.031214 signal 6 20 1 | psdu 534e2fc7560c03a0d2867470122b94bd45c0fd36
+46 | start none phase none signal none | psdu none
+47 | start none phase none signal none | psdu none
+48 | start 438 phase 0.051869 signal 6 20 1 | psdu c89bb52d36261026b49dbfccb12ec3a52469d6b8
+49 | start none phase none signal none | psdu none
+50 | start 438 phase -0.050121 signal 6 20 1 | psdu 0e062b49ad10ce01b6f1c197bff6ef7512df4014
+51 | start 437 phase -0.063637 signal 6 20 1 | psdu 43c7871877b84060ff575e7729f1439397b21ca0
+52 | start 438 phase 0.048360 signal 6 20 1 | psdu e6471b9ffc08dae6d70ddeee74c11ead52fed797
+53 | start 437 phase 0.028168 signal 6 20 1 | psdu 23b7ae82243c11568d014595b414ad1ecbd62b60
+54 | start none phase none signal none | psdu none
+55 | start 438 phase -0.056145 signal 6 20 1 | psdu 3842a83b7f0f5eadeb830ff6d3d32e62831d831b
+56 | start 437 phase -0.014159 signal 6 20 1 | psdu f9344ae7f4fdae4ac86a1bf69d3a31344b1c14e4
+57 | start 438 phase -0.011865 signal 6 20 1 | psdu 715bdbc978ff141f353cf83c5799ff18753e20e5
+58 | start 438 phase 0.034477 signal 6 20 1 | psdu 80a5b01f27964b97c1eb5d0591b38aa7ef2fb555
+59 | start 438 phase 0.068535 signal 6 20 1 | psdu 95c52e3fdde568c8aea0a068e179a1a32e63d35e
+60 | start 437 phase -0.047759 signal 6 20 1 | psdu 43d03402c58f0491c6645941e671bcd0eac80d93
+61 | start none phase none signal none | psdu none
+62 | start 438 phase 0.019687 signal 6 20 1 | psdu 91807135ddc42eac625710334dfab2ef54bab1d4
+63 | start 437 phase -0.003920 signal 6 20 1 | psdu 07d57ff7391b6a86fa1bd8fc66c0e569de936b9a
+64 | start none phase none signal none | psdu none
+65 | start 437 phase -0.035745 signal 6 20 1 | psdu 5c6e459729549e3d101ddd2edc17eee91c253877
+66 | start 437 phase 0.003434 signal 6 20 1 | psdu 4acfc884fd70ac45374f19261be8d4862360b7eb
+67 | start none phase none signal none | psdu none
+68 | start none phase none signal none | psdu none
+69 | start 437 phase 0.031903 signal 6 20 1 | psdu d07ba19c3e81aeb7525080ff430ce556f6346e1c
+70 | start 437 phase -0.004488 signal 6 20 1 | psdu f3b3e38a876dad4a7af2be6a5a7262fb48603cc9
+71 | start 437 phase 0.028069 signal 6 20 1 | psdu 07cdb9c26b0a0dc6878b955cd65dcca3ec9fba47
+72 | start none phase none signal none | psdu none
+73 | start 438 phase -0.000211 signal 6 20 1 | psdu 90e1498abf8bfeec6d72544bd2a1ccc9f1a112cb
+74 | start 438 phase -0.061361 signal 6 20 1 | psdu 2aa0c6a03e3304c54615ed96e8932793ab98911e
+75 | start none phase none signal none | psdu none
+76 | start 437 phase -0.007706 signal 6 20 1 | psdu de93a38cdc54d3ab508d318c705a329591c42e84
+77 | start 437 phase -0.003524 signal 6 20 1 | psdu 68d5e3960e209742b7120c4dcb4c3c151a735675
+78 | start 438 phase 0.007198 signal 6 20 1 | psdu c8eb1ee079f708c0d81bddb84a1ec6c9ebbb3ffa
+79 | start 437 phase 0.000924 signal 6 20 1 | psdu c7aa3f4282ee208355e13ade275213f0fc3e6d09
+80 | start 437 phase -0.036302 signal 6 20 1 | psdu 5a892168065016ac2b24ab67dbe414ad884c362b
+81 | start 437 phase 0.052676 signal 6 20 1 | psdu a85b6d2b897dab2fe915f79a669bc0fae46b705f
+82 | start 438 phase -0.007361 signal 6 20 1 | psdu d3db9923d14409a77d79a594047ef1b140877da2
+83 | start 437 phase 0.026999 signal 6 20 1 | psdu afbc5ba6f731990d84176afbcb7e8ddd366d0f75
+84 | start 437 phase 0.015256 signal 6 20 1 | psdu 0659f2fac3e91097ed2f3df46dfd08d7aeb82690
+85 | start 437 phase -0.015085 signal 6 20 1 | psdu 08d218bfc7d727bb1786bfeb9fba130fdd97552c
+86 | start 437 phase 0.035392 signal 6 20 1 | psdu 2ace90f34ce39701417843a7289732b536fa3f9c
+87 | start 438 phase 0.029608 signal 6 20 1 | psdu 91fba320c24b72fa8b4248103353db7c021b95cc
+88 | start 437 phase 0.002780 signal 6 20 1 | psdu 6e74c0ccdb83e7dfa9e4b89cac112ba2332c5b91
+89 | start 437 phase -0.000141 signal 6 20 1 | psdu e28059c9aed7e3030065e6e1d10351520a01dc71
+90 | start 437 phase 0.024079 signal 6 20 1 | psdu 0bc392251db1b90ebfc5d5e01c7aa3d86a0a9f1e
+91 | start 438 phase 0.048707 signal 6 20 1 | psdu d35a7917923722d593809dea0ad55edcb53434f8
+92 | start 438 phase -0.016807 signal 6 20 1 | psdu a7e7599b6bc35f6ced1b09c9ce7aabff4e6dda7c
+93 | start none phase none signal none | psdu none
+94 | start none phase none signal none | psdu none
+95 | start 437 phase 0.029456 signal 6 700 0 | psdu none
+96 | start 438 phase -0.057938 signal 6 20 1 | psdu 862bfb3554bf116507354afcabd27b18d1b799d5
+97 | start 438 phase -0.005935 signal 6 20 1 | psdu 914a5ca3bac3d5b48cf389c01096df4c3481f46f
+98 | start 438 phase 0.040836 signal 6 20 1 | psdu 06ccd8eae028462e8f9401d1c58a44f9465a1441
+99 | start 438 phase -0.044917 signal 6 20 1 | psdu fc75a38c7600d77251f014960a9289a29c9663b9
+100 | start none phase none signal none | psdu none
+101 | start none phase none signal none | psdu none
+102 | start 438 phase -0.008668 signal 6 472 0 | psdu none
+103 | start 437 phase -0.017019 signal 6 20 1 | psdu b5ebee37a0ceaa9a15666a264c6b38cbea150ef1
+104 | start none phase none signal none | psdu none
+105 | start none phase none signal none | psdu none
+106 | start none phase none signal none | psdu none
+107 | start 438 phase -0.034287 signal 6 20 1 | psdu 82a562f0efb6a95f9f0c60b184d9497511127ea4
+108 | start none phase none signal none | psdu none
+109 | start none phase none signal none | psdu none
+110 | start none phase none signal none | psdu none
+111 | start 438 phase 0.043732 signal 6 20 1 | psdu 164845389de637df974893cc265ab004090c843f
+112 | start 437 phase -0.017278 signal 6 20 1 | psdu 826f596d9d39b2dc7399376f76a6bfc9e8a1e975
+113 | start none phase none signal none | psdu none
+114 | start 437 phase 0.023472 signal 6 20 1 | psdu 536ce1d9b2878b7eb5e41480eadafd6396dc91eb
+115 | start none phase none signal none | psdu none
+116 | start 438 phase 0.016129 signal 6 20 1 | psdu b0507bcb2683b0ad05f2f7a91eec93e7d048b1d8
+117 | start 438 phase -0.047669 signal 6 20 1 | psdu 3b4fe25631dced043c53a9347ccff3c5d4fe175f
+118 | start none phase none signal none | psdu none
+119 | start 438 phase -0.024853 signal 6 20 1 | psdu 5008a7616fde554305d976439d87e59a61dd62a8
+120 | start 437 phase 0.026261 signal 6 20 1 | psdu 1ef0a558fe8753cadb09f5dd13d326d952341d24
+121 | start 437 phase -0.043411 signal 6 20 1 | psdu 6cb15dcd7296448ac5e026434f373c96c54e1f0e
+122 | start 437 phase 0.058969 signal 6 20 1 | psdu e0f38cb8f6585bf7059dc21f7e57a677e1283100
+123 | start 438 phase 0.034413 signal 6 20 1 | psdu fa4c62350c35c3a9dd4f2bf9d0e841073af0bdb0
+124 | start none phase none signal none | psdu none
+125 | start 408 phase -0.069526 signal 48 114 1 | psdu b2982439cda8a86758f3bdb169aff114129fc177ec12d9b2e2f4f8917a9e9243fb39ea8e0126c1a1dacb154775a9fc9478626b350aba4f8a04e7029fa2c40df34b0cd24bb45004c78d8461b60c5db7269c52ca3d55aa0f1fe71c63b2083dcd14d915507fae6844fb03aa6ca24586e30140c6
+126 | start none phase none signal none | psdu none
+127 | start none phase none signal none | psdu none
+128 | start 437 phase 0.003183 signal 6 20 1 | psdu 8b6b6b53c6c7ce12521ec6b2afa0be1633db1c15
+129 | start 437 phase 0.033853 signal 6 20 1 | psdu 2204a48892519062849e3272f95cab03554a9557
+130 | start 437 phase 0.035550 signal 6 20 1 | psdu 5e6a20f770c78dbd3d85460ca83e42c5d9c2d5f6
+131 | start none phase none signal none | psdu none
+132 | start 437 phase 0.032583 signal 6 20 1 | psdu a9652cf5b12d1c6d2e15d7715aae7edcf75828b0
+133 | start 437 phase 0.028704 signal 6 20 1 | psdu 95fdc645e793d346bff446edbc2c59052091725c
+134 | start 437 phase 0.010394 signal 6 20 1 | psdu 2040df4d11454ec758a1b2f1958c8aad733ab1ab
+135 | start none phase none signal none | psdu none
+136 | start 438 phase 0.020915 signal 6 20 1 | psdu f30737790c6ff0826a76a2506235a0304100660d
+137 | start none phase none signal none | psdu none
+138 | start 437 phase -0.009121 signal 6 20 1 | psdu 11ffb60eded507e4392d14baeab0edeb429de4a3
+139 | start 437 phase -0.017567 signal 6 20 1 | psdu 630e820e43bf6f60895a463a7509729b4e83bd61
+140 | start 437 phase -0.026359 signal 6 20 1 | psdu 7ad0ae1c2d86acb654d1a26278ad84ec7b4c2c5e
+141 | start 437 phase 0.004357 signal 6 20 1 | psdu efa35506576d852da029ca5090caa2d09496461d
+142 | start 438 phase 0.029508 signal 6 20 1 | psdu 620f5d1f7c211f080ed0790d46db71aaf7130ba6
+143 | start 438 phase -0.043590 signal 6 20 1 | psdu 84d3813805ea114f330ccdad7f70d97ff02b3fc3
+144 | start 437 phase 0.040130 signal 6 20 1 | psdu ed0c961f6d3223834eebe76c0f6748f8e7368587
+145 | start 438 phase -0.038543 signal 6 20 1 | psdu de394a80403db0fd3b3d4a7739c83396ccb51900
+146 | start none phase none signal none | psdu none
+147 | start 437 phase 0.003534 signal 6 20 1 | psdu 6af619f62a8fb357eae274060f9ceb134d30a9ae
+148 | start 438 phase 0.052086 signal 6 20 1 | psdu 7d86300869bf304aa51078b76b492fe3432ef59d
+149 | start 437 phase -0.033030 signal 6 20 1 | psdu d57117d1b06cf94bc46434cbe90da7ffb5b8ca0c
+150 | start 437 phase -0.004738 signal 6 20 1 | psdu ed339a178ce1bd08c567d3d026ca6d81ef008486
+151 | start 438 phase 0.027696 signal 6 20 1 | psdu db02ed01552b4024272234376a2b4bdf6f85fce6
+152 | start 437 phase 0.014205 signal 6 20 1 | psdu 2dfbf1d1e4a4355afc9cd8389575d1bd4a3f04c0
+153 | start 438 phase -0.059066 signal 6 20 1 | psdu cb70cab4fccf8835795e026839aea730d1c6155c
+154 | start none phase none signal none | psdu none
+155 | start 438 phase -0.047917 signal 6 20 1 | psdu dcdeb0df92acee123d26fa1ec418070b694438f4
+156 | start 437 phase 0.040002 signal 6 20 1 | psdu c0c0c6bf2cba81f68396efb1359fb68d45f4e8cd
+157 | start 438 phase -0.011921 signal 6 20 1 | psdu 07d2c21624e77b2c496d2316db41c492de89cfd8
+158 | start 437 phase -0.019888 signal 6 20 1 | psdu 73922d0c2d96e8684512945c71c8e92f8da8d9d7
+159 | start 438 phase -0.036445 signal 6 20 1 | psdu 673df3288102050dda2b63a4c90cae0c220778d2
+160 | start none phase none signal none | psdu none
+161 | start 437 phase -0.061223 signal 6 20 1 | psdu b3e15cd6f5d6bea7675625d86ead7e914fdf0b0e
+162 | start 438 phase 0.035373 signal 6 20 1 | psdu 65752d635538239141a26674919d8e619dd3241f
+163 | start none phase none signal none | psdu none
+164 | start none phase none signal none | psdu none
+165 | start 437 phase -0.030501 signal 6 20 1 | psdu 6760054c9e863da595043ef8cc03712ce77bb74a
+166 | start 437 phase 0.042837 signal 6 20 1 | psdu 75c6a95907fb0c17076d717f6ba2bb546a47d257
+167 | start none phase none signal none | psdu none
+168 | start 438 phase 0.000558 signal 6 20 1 | psdu b3d981f8e9d05f0a022a423199186dcc44ad760d
+169 | start 438 phase 0.024433 signal 6 20 1 | psdu 1b25122ae994088a2c7d3cc08c6fea6693972316
+170 | start none phase none signal none | psdu none
+171 | start 438 phase 0.030988 signal 6 20 1 | psdu f7eb7cb96a9e44735299b1d72a088cbebd0a22e7
+172 | start 438 phase 0.030207 signal 6 20 1 | psdu c64223261c81d94dcbe72261aa2e129b71748cfa
+173 | start 437 phase 0.033366 signal 6 20 1 | psdu b4c1f8cf0bf8814b28a92f59c0b514111f0d0c54
+174 | start 438 phase -0.023465 signal 6 20 1 | psdu ff6647cc9a16bf9a85354fac027548033f40513e
+175 | start none phase none signal none | psdu none
+176 | start 437 phase 0.054653 signal 6 20 1 | psdu f176d85eaa35c68a28f70254351754fc78cc12f9
+177 | start 437 phase 0.007594 signal 6 20 1 | psdu efa9658537e85b9c458389045b8ec93a07b0f142
+178 | start 408 phase 0.064591 signal 6 52 0 | psdu none
+179 | start 437 phase 0.019119 signal 6 20 1 | psdu 355280ea3a4efd4806a5d694da7203f3e8397cd3
+180 | start 438 phase 0.004551 signal 6 20 1 | psdu 952dc1c11266939c7d604c1ce5f6beb88bb68394
+181 | start 437 phase -0.015253 signal 6 20 1 | psdu b2a49a5a565a960476c9104970edb20f5cb96d31
+182 | start 437 phase -0.002664 signal 6 20 1 | psdu cffcb1ac14a18e24d6f71c5d47ef62fc842295a1
+183 | start none phase none signal none | psdu none
+184 | start 438 phase -0.040365 signal 6 20 1 | psdu e8fa3312b2191d1e47e68f641e2abefc73ccfeb8
+185 | start 438 phase 0.005408 signal 9 11 0 | psdu none
+186 | start 437 phase 0.001409 signal 6 20 1 | psdu 2e542e7601623c9d038b4bd8a36f4e56d1d76680
+187 | start 438 phase 0.019315 signal 6 20 1 | psdu 030aa47e7b55a1cceb06c513c2a770124770e55d
+188 | start 438 phase -0.010252 signal 6 20 1 | psdu c2d3b16437513404b7e422eb8bebb41cb9f4fb71
+189 | start 438 phase -0.012846 signal 6 20 1 | psdu b28ed41389027874122b76da615bc172fd93624c
+190 | start 438 phase 0.003759 signal 6 20 1 | psdu none
+191 | start none phase none signal none | psdu none
+192 | start none phase none signal none | psdu none
+193 | start 437 phase 0.007837 signal 6 20 1 | psdu 3a83df8ca5eaf5ff0ee6686b7d2153fd3844b3b6
+194 | start 438 phase -0.003782 signal 6 20 1 | psdu 8665c265ff55c92c2e0ece4bc07f70ea9b06ab4d
+195 | start none phase none signal none | psdu none
+196 | start 437 phase 0.034079 signal 6 20 1 | psdu 74fa173521fb70036a27a64e2686fb0010cc128f
+197 | start none phase none signal none | psdu none
+198 | start 437 phase -0.008640 signal 6 20 1 | psdu c165ea09d0d0e981c0d13d0729f4c6d238aca5ed
+199 | start 438 phase -0.019409 signal 6 20 1 | psdu 4dec542fec0a82bde128a88329c20462ec9888ec
+200 | start none phase none signal none | psdu none
+201 | start 437 phase -0.001972 signal 6 20 1 | psdu 4a424c27ced02f3105e5d34ae3b7387f57b3dc43
+202 | start 437 phase 0.053210 signal 6 20 1 | psdu c3e4088865a42f1edadbfc51826dfdb568a6e3a4
+203 | start 438 phase -0.054849 signal 6 20 1 | psdu 3a292a80652edf73717d4d8a277f0bb0b34023ef
+204 | start 438 phase 0.056045 signal 6 20 1 | psdu b0c41802bb13b2ad9f3c86071e693049b0c47441
+205 | start 437 phase -0.022418 signal 6 20 1 | psdu 25ac5fd8e3ce4a44e3927e29b9acde1005d40131
+206 | start 437 phase 0.020525 signal 6 20 1 | psdu e711f6be30d8c4da0e3e7da6baa6c803c1a58e86
+207 | start 438 phase 0.035544 signal 6 20 1 | psdu c9f7f37e4518a6fadba8fe7f782d8900d203faa5
+208 | start 437 phase 0.013540 signal 6 20 1 | psdu 003d7c9ab529c0d2764a21f6cb91717ef0a07bf8
+209 | start none phase none signal none | psdu none
+210 | start 437 phase -0.003950 signal 6 20 1 | psdu 33911eb0fbf40592ff574a6ae6fa83d48288ce1f
+211 | start 437 phase 0.017894 signal 6 20 1 | psdu 972e95e580ba7f651b1f341cb09b5ada9e87364f
+212 | start 437 phase 0.033067 signal 6 20 1 | psdu 8d04c046697653d05b89d25c839e8e569c732207
+213 | start none phase none signal none | psdu none
+214 | start 438 phase 0.044209 signal 6 20 1 | psdu ac9ab510737be07c5c01f9c73afbd2bd91863336
+215 | start 438 phase 0.021501 signal 6 20 1 | psdu 214e9deac62f5c30efecab1adebb1b9336e767e5
+216 | start 437 phase -0.013466 signal 6 20 1 | psdu 4eacea7e2b6e9ab6cd6e333d5ddb7b017ccfcd6d
+217 | start 438 phase -0.004445 signal 6 20 1 | psdu 658ab9364c6194ce01e1dd39abbd46d0a15b6b71
+218 | start 438 phase -0.038031 signal 6 20 1 | psdu 22c507bc8e3085b50fde04df2630fc576b413f60
+219 | start 437 phase 0.017374 signal 6 20 1 | psdu acd4511daa4d29f7a8e9444aa24f7eb3d353a082
+220 | start 438 phase 0.023539 signal 6 20 1 | psdu 3feb508db803e072a047aed9b9814b6ab9e3800f
+221 | start 437 phase -0.028776 signal 6 20 1 | psdu d7a29f782d7cf1f1dca4903d4438f82048243eb9
+222 | start 437 phase -0.008445 signal 6 20 1 | psdu 90abefc1e41928d0828fcb7def507ef1b90a662e
+223 | start 438 phase 0.043876 signal 6 20 1 | psdu 0caca1d647089a754ba2a22568b4c4ae99742a19
+224 | start 437 phase 0.026504 signal 6 20 1 | psdu eaca29d0a609f75893cea52afa395ab689daaf1f
+225 | start 438 phase 0.006861 signal 6 20 1 | psdu ebc758c2fc6a332f9b52510506ea17a33139d8fc
+226 | start 437 phase -0.030898 signal 6 20 1 | psdu b7cfa2eb0e5d6fa5c1293a2a52a98798d729b020
+227 | start 438 phase -0.055241 signal 6 20 1 | psdu 2c000c9340c979ce1c8360e66383ba198d9b2cdf
+228 | start 437 phase -0.006619 signal 6 20 1 | psdu 742a19395ca9411c8b2ef1ef77e8b9813224c5af
+229 | start none phase none signal none | psdu none
+230 | start 437 phase 0.039303 signal 6 20 1 | psdu a5ac12528789a6fe50d9cea53d4e677a84673b18
+231 | start none phase none signal none | psdu none
+232 | start 437 phase 0.021540 signal 6 20 1 | psdu 36bdfbe75503cfbbf543f53939fe955426eeb710
+233 | start none phase none signal none | psdu none
+234 | start 438 phase -0.039969 signal 6 20 1 | psdu 60db1d65dc5a81a35aad9b5988b3a32ba8f7339c
+235 | start 437 phase 0.042294 signal 6 20 1 | psdu 3b9d1dd779d23a4e64a8b23ea29fa199919886b6
+236 | start none phase none signal none | psdu none
+237 | start 438 phase 0.018006 signal 6 20 1 | psdu 5b974ad4520c92c2dbb1e3e5cf8a0334c3e9e067
+238 | start 438 phase 0.054606 signal 6 20 1 | psdu 294fb7d55d5cad7f5aab4b9488183b6c9d8f5ae4
+239 | start 437 phase 0.036595 signal 6 20 1 | psdu 817c8791d6ee53fe72cd1dd31f7489ae7ff247cf
+240 | start 438 phase 0.043002 signal 6 20 1 | psdu 3c37124c8b8cedb3b40039673f4368240fff3451
+241 | start none phase none signal none | psdu none
+242 | start 437 phase 0.026976 signal 6 20 1 | psdu c2c515c68d55e74606be85ced2c6cc42e01d1a4f
+243 | start 438 phase -0.035439 signal 6 20 1 | psdu 282057a2aaf8dcae4035cd6f5cb7a0820eb99cb4
+244 | start none phase none signal none | psdu none
+245 | start none phase none signal none | psdu none
+246 | start 438 phase 0.022585 signal 6 20 1 | psdu 77362779cadc100cbd95e25c21c58b92f86bdb88
+247 | start 437 phase -0.033778 signal 6 20 1 | psdu 78ef94bfd6360176e1096207458f99c76ba4d484
+248 | start 438 phase -0.027711 signal 6 20 1 | psdu d9f7175af0dcd351a05de205998906934c879afc
+249 | start 438 phase -0.054329 signal 6 20 1 | psdu 8d6eaecc81f8966069612905c8038062016a2249
+250 | start none phase none signal none | psdu none
+251 | start 437 phase 0.043444 signal 6 20 1 | psdu 59a9debc39cd7359cf9422c90b8f37629fc156a1
+252 | start none phase none signal none | psdu none
+253 | start 438 phase 0.027415 signal 6 20 1 | psdu ffd465614bbbbf2de133f73f1af4c3807e5529c3
+254 | start 437 phase -0.034883 signal 6 20 1 | psdu 58c419c0345acb4bf406ffe3ee02f99577be3bef
+255 | start 437 phase 0.008348 signal 6 20 1 | psdu c5982dfdac1444eaf2e6b4b739b8e7b10a8ac6bc
+256 | start 437 phase 0.013808 signal 6 20 1 | psdu 3898ebec06934f2c186ba2bceef5fd2c1dfdaf20
+257 | start 437 phase 0.036929 signal 6 20 1 | psdu 6be1e747d37e7d91d2c9bdcbcccecab4641d0e87
+258 | start 437 phase 0.052430 signal 6 20 1 | psdu 5cd5cb8ef2da7040beca631b6be8c78be4ce0d30
+259 | start 437 phase 0.022139 signal 6 20 1 | psdu 09132eac854c01b5d6172358e187412bcff98744
+260 | start none phase none signal none | psdu none
+261 | start none phase none signal none | psdu none
+262 | start none phase none signal none | psdu none
+263 | start 438 phase 0.049782 signal 6 20 1 | psdu 7d67f5f1c14312d58832ce1869942679d26f2acb
+264 | start 437 phase 0.026725 signal 6 20 1 | psdu 525f3869f2da5a27d6383e8811171001d119c7e9
+265 | start 438 phase -0.030651 signal 6 20 1 | psdu 3381142083036161433919772ff1a2f7c0cab5ca
+266 | start 437 phase 0.008666 signal 6 20 1 | psdu 16ee65461708fed36c7c38ad2ece6866bb6d5b02
+267 | start none phase none signal none | psdu none
+268 | start none phase none signal none | psdu none
+269 | start 437 phase 0.019804 signal 6 20 1 | psdu 7c5a200717be0b1b5a1db42d40a459abbc39de02
+270 | start 438 phase -0.033264 signal 6 20 1 | psdu b4fcaf004fc0d5a69cda071b3c1df13d94772f83
+271 | start 438 phase 0.054361 signal 6 20 1 | psdu 156b3f6ee5700b83647e8a35da79b7e280f05ed1
+272 | start none phase none signal none | psdu none
+273 | start none phase none signal none | psdu none
+274 | start none phase none signal none | psdu none
+275 | start none phase none signal none | psdu none
+276 | start 438 phase -0.008795 signal 6 20 1 | psdu 138823c999b2caf8026f2fd9674bb979543fac85
+277 | start 437 phase 0.004297 signal 6 20 1 | psdu b85bf39f35f95975f18d12766ec23ab1da3a7127
+278 | start 438 phase 0.018892 signal 6 20 1 | psdu 2389a2da6e687a9747de19d0ea9649ca7b6cd85b
+279 | start 437 phase 0.016218 signal 6 20 1 | psdu 2922d80fa01ad85eedcf65ef3dbca91d66e9e051
+280 | start 438 phase -0.005400 signal 6 20 1 | psdu a1596a4d464068a2104ef4bf81cf0b14b9903b8e
+281 | start 437 phase -0.055984 signal 6 20 1 | psdu e1338a222255a3ebd011f6591c24c8ddf20ffe76
+282 | start none phase none signal none | psdu none
+283 | start 438 phase 0.011536 signal 6 20 1 | psdu b281773e47c45ee3894f44b4d13b1a1ae9d7cffa
+284 | start none phase none signal none | psdu none
+285 | start 437 phase -0.046848 signal 6 20 1 | psdu aa0da1bc62d9cd0c13086cefb4a35f420b50cf18
+286 | start none phase none signal none | psdu none
+287 | start 437 phase -0.051536 signal 6 20 1 | psdu d1df6820a570791d61d5266076174b8462029e85
+288 | start none phase none signal none | psdu none
+289 | start 438 phase -0.001599 signal 6 20 1 | psdu 38b92a01b4f626f1f7f0dacd1157ed35dc9915d3
+290 | start 437 phase -0.045215 signal 6 20 1 | psdu 706b4f54eedc12cff4b35eae89b77fc15236f4fa
+291 | start 438 phase -0.010722 signal 6 20 1 | psdu 4b44b3af1c0fa24ea2675c50fab8a210719eff8f
+292 | start 438 phase 0.012240 signal 6 20 1 | psdu none
+293 | start none phase none signal none | psdu none
+294 | start none phase none signal none | psdu none
+295 | start 437 phase 0.014725 signal 6 20 1 | psdu 7cf543266df8c6449930ef63aba324804293f016
+296 | start 438 phase 0.047365 signal 6 20 1 | psdu b8456d4c687df7498c48fb05920805aa2d913d3d
+297 | start 437 phase 0.029028 signal 6 20 1 | psdu 7375f04e49dd400fa5845a28797b8ad95d90a99b
+298 | start none phase none signal none | psdu none
+299 | start 437 phase -0.003690 signal 6 20 1 | psdu c31b2bffe8bb75eb3012b742655b3c8a010a2a0e
+300 | start 437 phase 0.027027 signal 6 20 1 | psdu 55fcecd159b8ccf76d136e11006035f3a647686b
+301 | start none phase none signal none | psdu none
+302 | start 438 phase 0.003174 signal 6 20 1 | psdu dca750ed1364d75be2ef977cec9a8ced2bc10145
+303 | start 437 phase -0.027442 signal 6 20 1 | psdu 0824d3c5898bf6fe4d7bdd6da4267acde6524bbe
+304 | start 438 phase 0.010496 signal 6 20 1 | psdu 710bdc771c90b0179e52cd4654df669dc8905edb
+305 | start 437 phase -0.015903 signal 6 20 1 | psdu 7960f133964021192a1823e33f3cef53c4e67b61
+306 | start 437 phase 0.008671 signal 6 20 1 | psdu ebcf9349f7edd46413d83e25264e60b21269a4f2
+307 | start 437 phase -0.028018 signal 6 20 1 | psdu 5e42393b282ba2aecbd92481d15bef3acc3c96e0
+308 | start 438 phase -0.057081 signal 6 20 1 | psdu 779ed5709fce846ef97145eb953ec2c2e4505121
+309 | start none phase none signal none | psdu none
+310 | start 437 phase -0.041687 signal 6 20 1 | psdu 12048fdc063884714935d4c158ac152f817d9fc6
+311 | start 438 phase -0.030651 signal 6 20 1 | psdu 9f7c1e8119fedf0ec66535f92df4101b121755ea
+312 | start none phase none signal none | psdu none
+313 | start 438 phase 0.030966 signal 6 20 1 | psdu ce06b1591aefac130acdcd9be7fc6cf7a12c892e
+314 | start none phase none signal none | psdu none
+315 | start 407 phase -0.070064 signal 6 20 1 | psdu d97d02dc149de2b97fa4ebf453a791be302443e1
+316 | start 438 phase -0.016192 signal 6 20 1 | psdu b8f30cb060f17e2bee0b782dce9b048992e0b733
+317 | start 437 phase -0.035602 signal 6 20 1 | psdu 2d7052b3d1f8da9b7ce5d791cea510ce71b31044
+318 | start 437 phase 0.065594 signal 6 20 1 | psdu 88f588a5b580bf9a830fc0e27a37ce402333f9e5
+319 | start 437 phase -0.013471 signal 6 20 1 | psdu c2f8064045a71652a234bdb132cecda0ba5f5d11
+320 | start 438 phase 0.032082 signal 6 20 1 | psdu a087a2fa915a23b0abdfd8cb3eaa60146a9ba786
+321 | start 438 phase 0.032151 signal 6 20 1 | psdu 0e368729c34c0acf98854e8ff9b8c8541d51160f
+322 | start 437 phase -0.050221 signal 6 20 1 | psdu 8574e9eeed31955d22c8491250fe39e3125448e5
+323 | start 438 phase 0.050188 signal 6 20 1 | psdu a2246e8463de3f460105894bdc630e16494b1207
+324 | start 437 phase -0.039584 signal 6 20 1 | psdu 88dd826fd94001e2e8ff1679a015a36f7bc25743
+325 | start none phase none signal none | psdu none
+326 | start none phase none signal none | psdu none
+327 | start 438 phase -0.037723 signal 6 20 1 | psdu bb8401a943b7378efd37653e8a109f84ad088a5a
+328 | start 438 phase -0.056182 signal 6 20 1 | psdu de8dd6840b3b291337e081a6f7e07906204aee02
+329 | start 438 phase -0.039162 signal 6 20 1 | psdu 5ba6a683451ec19f86e35a0b09cf73089e9fa73d
+330 | start 438 phase -0.005757 signal 6 20 1 | psdu dfe32d2e45a4487dac33dfab6d802f0785d6fdf3
+331 | start 437 phase 0.039438 signal 6 20 1 | psdu 87258dbec57650a0d485e6f67a6fcf5d7c935f30
+332 | start 438 phase 0.043327 signal 6 20 1 | psdu c09c786d230ffdd16c276c992e9413e66f80fd6e
+333 | start 437 phase -0.048250 signal 6 20 1 | psdu 1183715ba4d3066f607191256d1bb7de4934185a
+334 | start 437 phase -0.027217 signal 6 20 1 | psdu e480ab559d321f9b928e0963726e7de86216da6c
+335 | start none phase none signal none | psdu none
+336 | start 437 phase 0.034540 signal 6 20 1 | psdu 3c6369a4b19de620be7531e14211a49b743847c6
+337 | start 438 phase -0.000948 signal 6 20 1 | psdu 90f6504d631e38e88a059594cbbd328af133d8c7
+338 | start none phase none signal none | psdu none
+339 | start 437 phase 0.002375 signal 6 20 1 | psdu 3e64e5106415afba099655173fd4f59c28ce804f
+340 | start none phase none signal none | psdu none
+341 | start 437 phase 0.038464 signal 6 20 1 | psdu efdc11324df5c27e09644e784514b58a7b463634
+342 | start 438 phase 0.038972 signal 6 20 1 | psdu b50cb55c02219194194a2608ce7b1ab91fb6437c
+343 | start 437 phase 0.048438 signal 6 20 1 | psdu 6dbb1231b52be16be9b5fc5d27c2879ee123556c
+344 | start 438 phase 0.042868 signal 6 20 1 | psdu 7acc1450fa3ea33e4cb39b17249527790c149b68
+345 | start 438 phase -0.043268 signal 6 20 1 | psdu fb74c0a7d2d6e1cd6471a435e109d88484750e36
+346 | start 438 phase 0.015500 signal 6 20 1 | psdu 95144a48849e7f8a83b649e0df645e914faab04a
+347 | start none phase none signal none | psdu none
+348 | start 437 phase -0.036671 signal 6 20 1 | psdu 766e4a12ffca27a44187242d54f02bd00c823f49
+349 | start 438 phase -0.010083 signal 6 20 1 | psdu 51a0f7cf474c26df4c3975c3e13890ebf20eef37
+350 | start none phase none signal none | psdu none
+351 | start none phase none signal none | psdu none
+352 | start 437 phase 0.056706 signal 6 20 1 | psdu 97e33fb18be79ababe1910af99fda9aff140303f
+353 | start none phase none signal none | psdu none
+354 | start none phase none signal none | psdu none
+355 | start 437 phase 0.051653 signal 6 20 1 | psdu 498aaada02b2b8aa8ddd164c53de60828822db02
+356 | start 438 phase -0.040506 signal 6 20 1 | psdu 1b638a6d7e0af1a7102278593e447e018ece959d
+357 | start 437 phase -0.030279 signal 6 20 1 | psdu 44bb3bb578ea787bed1951359980d5a0bce68347
+358 | start 438 phase -0.046414 signal 6 20 1 | psdu dc93df3d63423479d23de693892955640bdc67eb
+359 | start 438 phase -0.050770 signal 6 20 1 | psdu d2bc11a52bfd9a609dd98b3c573269d3239d0feb
+360 | start 438 phase -0.062510 signal 6 20 1 | psdu 6d4dde2c460703c8a3be4bb7f1b1b204c3e82b19
+361 | start 438 phase -0.062164 signal 6 20 1 | psdu ca49f5905a704cb0a39841de0aa686292afea59d
+362 | start 437 phase -0.069291 signal 6 20 1 | psdu 7ec1e3b0d5004d9be311ded4f584f2117cd35593
+363 | start 437 phase -0.028284 signal 6 20 1 | psdu 6821200c25a769ea645d034f45f544cf30f7bab0
+364 | start 437 phase -0.050932 signal 6 20 1 | psdu cae70f9137488e94385fa93a68a94a3c1abb93fb
+365 | start none phase none signal none | psdu none
+366 | start 437 phase -0.055806 signal 6 20 1 | psdu c6d8debe8b6b76ea8a403f2928366c88f52f2a5b
+367 | start 437 phase 0.052077 signal 6 20 1 | psdu 5f8a9bb508e9332c08c722de22be3bc268eefc5a
+368 | start none phase none signal none | psdu none
+369 | start 438 phase 0.027313 signal 6 20 1 | psdu 7ca67c5cd3518d1cc982c7a1a94edc2faa1c9fac
+370 | start 438 phase -0.007574 signal 6 20 1 | psdu fd201178ca06f23e89e25b58508b1ebed1c878f6
+371 | start 437 phase -0.026905 signal 6 20 1 | psdu edb7b3ab790b2bbc4bcea306ce709c00c1ea9699
+372 | start 437 phase 0.055590 signal 6 20 1 | psdu 94c9fce27da93e646c2a11c9c0c1e614c03e3fcf
+373 | start none phase none signal none | psdu none
+374 | start 437 phase 0.012079 signal 6 20 1 | psdu 79f228ed33c4b454aae278341f6777560ae19600
+375 | start 437 phase -0.004715 signal 6 20 1 | psdu 280a0746826129e6242f4ab8ad7fe33d042975a1
+376 | start 438 phase 0.054163 signal 6 20 1 | psdu 26dfe6ffbf096e1ec520df7d12f18799d6561642
+377 | start 437 phase -0.057416 signal 6 20 1 | psdu a1efbba94d4e8f1b9d0cd6777cd9a50c6d71eb81
+378 | start 437 phase -0.047128 signal 6 20 1 | psdu 1a5f3c6848f8b5d293bc01754c426bd1e85cfa16
+379 | start 437 phase -0.044280 signal 6 20 1 | psdu 8ade72da22add6f498544cf64699b07f61e888f0
+380 | start 437 phase -0.056882 signal 6 20 1 | psdu a03476203b82a4ddf0211f35557549cb658c98a2
+381 | start 437 phase 0.002074 signal 6 20 1 | psdu a923d5c113d79bf2dc41c662532332cf266f3b3a
+382 | start none phase none signal none | psdu none
+383 | start 437 phase -0.063259 signal 6 20 1 | psdu 125b3e75feb2abb5d78a87cafac00154de76f152
+384 | start 437 phase -0.028123 signal 6 20 1 | psdu df2e6be49962abb0909ec56fcd5d8ba46551ef61
+385 | start 407 phase -0.073623 signal 6 1300 0 | psdu none
+386 | start 437 phase -0.051752 signal 6 20 1 | psdu 1b6c81b3a4f9787caa7fd39648a69a5cb38a2eaf
+387 | start none phase none signal none | psdu none
+388 | start 438 phase 0.053785 signal 6 20 1 | psdu 2dae2dc84c7002d953c1c1808f807ee9d8f842a2
+389 | start 437 phase 0.006433 signal 6 20 1 | psdu 8cf1f8e8ea9637c8662d25670b546980b8365aab
+390 | start 438 phase 0.049576 signal 6 20 1 | psdu 1f2c9cea0c1f2c91604ae8562df5250adc38c6bf
+391 | start 438 phase -0.050864 signal 6 20 1 | psdu cb72b5f8d195c4114838f76c69dba8fdfcfce96d
+392 | start none phase none signal none | psdu none
+393 | start 437 phase -0.003092 signal 6 20 1 | psdu 20063dacff0a56a45c00cd4a00804cddfceff1b4
+394 | start none phase none signal none | psdu none
+395 | start none phase none signal none | psdu none
+396 | start 437 phase 0.020822 signal 6 20 1 | psdu 7f722c6a89cafd79074501860f458f1511ebdd26
+397 | start none phase none signal none | psdu none
+398 | start none phase none signal none | psdu none
+399 | start none phase none signal none | psdu none
+400 | start 438 phase -0.004175 signal 6 20 1 | psdu 6ebdf334f8eea04a95f706091155bb8d16108f09
+401 | start 437 phase -0.024630 signal 6 20 1 | psdu 12e5043c7d86e3d7596affb41b8c3c2b9105ba7b
+402 | start 437 phase -0.012927 signal 6 20 1 | psdu 2286ce63efcc2feef37a69cbb047d9a10db3c978
+403 | start 437 phase 0.017081 signal 6 20 1 | psdu 698a64e1cb244ba86e51e31e63422522174cde9d
+404 | start 437 phase -0.017411 signal 6 20 1 | psdu 8aff746ba4601b684328184a3f05f9e193736f0e
+405 | start none phase none signal none | psdu none
+406 | start 437 phase 0.057287 signal 6 20 1 | psdu d6275fbae09625ea695f7c14586861100a2d91f1
+407 | start none phase none signal none | psdu none
+408 | start 437 phase -0.055218 signal 6 20 1 | psdu ce71c4643e9c0bc2a1ccd832a19ede3f81e46f79
+409 | start 438 phase 0.057940 signal 6 20 1 | psdu ad8bc8be76cd9586999e8529803ac84bf4612e20
+410 | start 438 phase 0.014605 signal 6 20 1 | psdu 15d1fec05a83753a43e86da0919b26b1c2f20d13
+411 | start 438 phase -0.039623 signal 6 20 1 | psdu 227d72b4d250cfdbdbeba9ecddea4aae0c488891
+412 | start 437 phase 0.059684 signal 6 20 1 | psdu 1467567ba9aeb930fc6a6cfcead06217f317fe8b
+413 | start 437 phase 0.039086 signal 6 20 1 | psdu d5116e09405cd20a1a97db981b4b3aad12dc048a
+414 | start 437 phase -0.014800 signal 6 20 1 | psdu 552ea86bd087d20af3b3e1bd4092a647e95601fa
+415 | start 437 phase 0.050336 signal 6 20 1 | psdu e846ec7520601dede81ca1bc9e12cff3d27ad262
+416 | start 437 phase 0.062837 signal 6 20 1 | psdu e2718f9ac72930b06e84e86cefbefaa49f281512
+417 | start 438 phase 0.040666 signal 6 20 1 | psdu 0b8c064158997c202e26002726f61985456d43ba
+418 | start 438 phase -0.013953 signal 6 20 1 | psdu 550cff46c02e0401c7ed6d8b00a4b751ff2aaa77
+419 | start 437 phase 0.011880 signal 6 20 1 | psdu 19c9513a139cbcabb526a3e5a65c879dfbe25409
+420 | start 438 phase -0.023836 signal 6 20 1 | psdu 16880d237463bbff2131fb649ca98573f135c01c
+421 | start 437 phase -0.027180 signal 6 20 1 | psdu 7fbed32b3e72500c3ff2bfb4c3233402504da05c
+422 | start 437 phase 0.016356 signal 6 20 1 | psdu 998a774193101e58bccf4d9251865b3d8a35382e
+423 | start 438 phase 0.012603 signal 6 20 1 | psdu c7e57c8ccb3a55b59edc348906662e3077781b0e
+424 | start 438 phase -0.008337 signal 6 20 1 | psdu 08101c6e562a2eb79668385faf191d5182843502
+425 | start 437 phase -0.025512 signal 6 20 1 | psdu 682021ef8de5d0be794ab2a7b201ffb1c79d6e90
+426 | start 437 phase -0.013793 signal 6 20 1 | psdu 2996e931f8a3e4e6d390b501ff4a53cf86f3ff30
+427 | start 437 phase -0.029173 signal 6 20 1 | psdu d5565efe0c8df407178379b531f8bd803b9dac07
+428 | start 438 phase 0.043507 signal 6 20 1 | psdu c252751385757a6b1c93fbf019a45e53517e2c31
+429 | start 438 phase 0.020725 signal 6 20 1 | psdu 9f87a3a2f6d2cad71ab8257f4bbca0e2030ccc82
+430 | start none phase none signal none | psdu none
+431 | start 438 phase 0.046411 signal 6 20 1 | psdu 466f7d2f885087e6e639c3d4c0f6f8bb79c9c2aa
+432 | start none phase none signal none | psdu none
+433 | start 438 phase -0.013419 signal 6 20 1 | psdu 20d702494f1f803338f57c6e61b3c35d1523099d
+434 | start 437 phase 0.028097 signal 6 20 1 | psdu 3f3b8d6b7d67e82ce987530631cdbcc59e0cb317
+435 | start none phase none signal none | psdu none
+436 | start 438 phase -0.051294 signal 6 20 1 | psdu 7569790ea49ab570d2f52409add721525e4f7cf6
+437 | start 437 phase -0.021032 signal 6 20 1 | psdu 246ba054f9635fdcdf886a4cd19693173ba5d45c
+438 | start none phase none signal none | psdu none
+439 | start 438 phase -0.032105 signal 6 20 1 | psdu 5f85db9eda5057e9cedff89021be73d136639e0b
+440 | start 438 phase -0.041781 signal 6 20 1 | psdu 48bae524a243900d628350859860c499e1a95d89
+441 | start 437 phase 0.051898 signal 6 20 1 | psdu af451ae9d337a865f274b07a51fb30ec7dbd3576
+442 | start none phase none signal none | psdu none
+443 | start 438 phase 0.041561 signal 6 20 1 | psdu 4919152636da0cd14e7f4e2a5fa8cc6915c4ab9a
+444 | start 437 phase -0.050170 signal 6 20 1 | psdu ca7f71be977b6eb060e287a423be5ab7b806e21c
+445 | start none phase none signal none | psdu none
+446 | start 437 phase 0.000939 signal 6 20 1 | psdu 6169ab6b267f2b1285e6cfb11bfa61ed5abaf4f8
+447 | start 437 phase 0.024921 signal 6 20 1 | psdu f7355e2d0b8b3d23c632b7ce3630c7633d17095f
+448 | start 437 phase 0.061993 signal 6 20 1 | psdu e1aff79157b1356c33b76f9eb6febf6a302e8c4c
+449 | start 437 phase 0.026867 signal 6 20 1 | psdu f3e974001b793bd53355320dd89393dae2b28836
+450 | start 438 phase 0.041312 signal 6 20 1 | psdu 880c371ff06116a75202d6ed5e9411dbe19ba159
+451 | start 437 phase -0.034950 signal 6 20 1 | psdu f57d79273eaab75a98290477febf10eafe9a3e2d
+452 | start none phase none signal none | psdu none
+453 | start 438 phase -0.014479 signal 6 20 1 | psdu e8e312570b54ae845d1c85d40acf583aeccf91e9
+454 | start 437 phase -0.022043 signal 6 20 1 | psdu 4ccbeb51879782808d04dc0af5b7083539a479a6
+455 | start 438 phase 0.015757 signal 6 20 1 | psdu 2164ec3d1c204176ef10d896c051520f1c12b6cf
+456 | start 438 phase -0.023426 signal 6 20 1 | psdu e3ac96cfb98a3d54954e2fd03d7bc3c9c3ee303e
+457 | start 437 phase -0.033029 signal 6 20 1 | psdu 1ac464fbc3825df5b08d8ff6362b1d215bbe1fa7
+458 | start 437 phase -0.046801 signal 6 20 1 | psdu a81f87337289054011b6ca0dbcec5dd5a6dc56a2
+459 | start 438 phase 0.053989 signal 6 20 1 | psdu d4b15018da1f31492f1b9329b322aab5fe05c1cd
+460 | start 437 phase 0.035493 signal 6 20 1 | psdu 855c4370904bc7d16df13024ee69b9d7881870fd
+461 | start 437 phase -0.054884 signal 6 20 1 | psdu 456adf383d7c3d0bc50ee2ea3b6e356e43c5612c
+462 | start 408 phase 0.063772 signal 6 20 1 | psdu 4b7609f56f2b697abd5313c780b2ad3190eff8f4
+463 | start none phase none signal none | psdu none
+464 | start 437 phase 0.030319 signal 6 20 1 | psdu 71ea9abddfa5116c972d1171f170f897fe90b55f
+465 | start 437 phase 0.005001 signal 6 20 1 | psdu 3af6b1647f9f3cc29be5c65cacadbee12948f22d
+466 | start none phase none signal none | psdu none
+467 | start 437 phase -0.062400 signal 6 20 1 | psdu bc73866ced4706b6c54fbf8b7f0f8f0e1e713ce2
+468 | start 437 phase 0.022172 signal 6 20 1 | psdu 65de72db92c0d4cb9835787ebb2b18c817910926
+469 | start 437 phase 0.006177 signal 6 20 1 | psdu cb8e04a95456e7adad86ae9ca863b49dde342d11
+470 | start 437 phase -0.000118 signal 6 20 1 | psdu 9d4afc180aa1e6c010ca0eaabaaf8ed3d44f4b19
+471 | start 437 phase -0.028264 signal 6 20 1 | psdu 4e6830f63746fa9d3547cf4c24156824e59cf35c
+472 | start 438 phase -0.030253 signal 6 20 1 | psdu f92698ce88f0658db016acb0cc65f418f3dfda85
+473 | start 438 phase 0.021492 signal 6 20 1 | psdu bfa0d8af8326f221089197f2107669f315f7a286
+474 | start 438 phase 0.007153 signal 6 20 1 | psdu 9566f3718c6aabf5e03757bd4774ac581b947928
+475 | start 437 phase 0.014772 signal 6 20 1 | psdu a9dfc630e1c05eaead13979e95735f5393b00686
+476 | start 437 phase -0.000002 signal 6 20 1 | psdu 1d1de05ccfeb4ea90a05e4996b89ecd6fbc89002
+477 | start 437 phase 0.046752 signal 6 20 1 | psdu 5155fc59853a789f8134fc73b4c26e6bf14eb7bb
+478 | start 438 phase -0.014295 signal 6 20 1 | psdu 61003ba7fe35b1f1cc484811e9ed51c9b9b35e0a
+479 | start 438 phase -0.023395 signal 6 20 1 | psdu be05f8edf19ee43127de0c469cdb459deee0da92
+480 | start 438 phase -0.047350 signal 6 20 1 | psdu 06ac11a7720190fb82e68bdc2ae19f58b458fba6
+481 | start 437 phase 0.002564 signal 6 20 1 | psdu f9420247e2c3157ed0e4402dc19177ae63c2ba23
+482 | start 437 phase -0.061531 signal 6 20 1 | psdu 9d5cc35967c76935431e2f20581a3106b1cc0c13
+483 | start 438 phase 0.013066 signal 6 20 1 | psdu 0fb5abcf312132b567f3e3c1fab60c8f8e4b75f1
+484 | start 437 phase -0.018977 signal 6 20 1 | psdu 7cba284e143b41ac0448ac39ebb8c991cb2606c8
+485 | start none phase none signal none | psdu none
+486 | start none phase none signal none | psdu none
+487 | start none phase none signal none | psdu none
+488 | start 438 phase 0.013088 signal 6 20 1 | psdu 19f029907beb8c41407cf52341d41e27392552ed
+489 | start 437 phase -0.000404 signal 6 20 1 | psdu ee1035d11cf0958b3efe9b89c8f1148a2eb0a5a2
+490 | start 437 phase 0.016036 signal 6 20 1 | psdu e2f9fbc43af00fe9417df764212c8c9d1f719ee6
+491 | start 438 phase 0.035896 signal 6 20 1 | psdu 3bf586bcd3af112bc8bca331202fff288e4d5250
+492 | start 437 phase 0.028013 signal 6 20 1 | psdu 90e89a2315b62e4016f2425ba35fc49053f5fe17
+493 | start 437 phase 0.021349 signal 6 20 1 | psdu 28f08c9d1066effe95d647960650c24de247c8b1
+494 | start 438 phase 0.039212 signal 6 20 1 | psdu cfd3b53fdc535d351d9639d4b418e9e4dd88c3e1
+495 | start 438 phase 0.060988 signal 6 20 1 | psdu a7fb4d8fef7ff70a71034ff91344536dc129e1a5
+496 | start 437 phase -0.017191 signal 6 20 1 | psdu 187a09d847816ce1b11a7c195f1f00ac497c8723
+497 | start 438 phase -0.046118 signal 6 20 1 | psdu c1a934f217b3b67336dc30075f654729ed4ceed5
+498 | start 437 phase -0.028166 signal 6 20 1 | psdu abb1110244694fffa7b4ac8c4c6f5c18488037e4
+499 | start 438 phase 0.063359 signal 6 20 1 | psdu 8decddcd73f49ad4c3a1113ccc64bb56a50f2b05
+500 | start 437 phase 0.011312 signal 6 20 1 | psdu b373fd5374b9fb67b8d9ae54a9286e753b5327e4
+501 | start 438 phase 0.001194 signal 6 20 1 | psdu a36a1749e777614f76b7d7d84dadd9daf3d04200
+502 | start none phase none signal none | psdu none
+503 | start 438 phase 0.063130 signal 6 20 1 | psdu c84df15c2482beae34faecbac7ba981c580bef51
+504 | start 438 phase 0.034346 signal 6 20 1 | psdu 202e4cc1d97069d3c4c171749bbc75c17c36e29c
+505 | start none phase none signal none | psdu none
+506 | start 437 phase 0.059037 signal 6 20 1 | psdu c5f752dcf212a2fbfb3d23fa08d6b1adeb685732
+507 | start 437 phase -0.034715 signal 6 20 1 | psdu e5f3898f8140ea9164132aebfa88ed684249d9cf
+508 | start 437 phase -0.018854 signal 6 20 1 | psdu e035799eb902d04a42ddcaca1d16f31c5e675cc7
+509 | start 438 phase -0.060701 signal 6 20 1 | psdu 7de17f8330100d095a3691e43d42b20e1542b4e8
+510 | start 408 phase -0.076151 signal 6 20 1 | psdu 85574f5786a7b61f513799b2a988eb9baa8c5550
+511 | start 437 phase 0.009470 signal 6 20 1 | psdu 2e5dc9e56471f9291a2e9126a672432199114a5a
+512 | start none phase none signal none | psdu none
+513 | start none phase none signal none | psdu none
+514 | start 438 phase 0.028498 signal 6 20 1 | psdu d053fbff6745096baa4c92406acdf3509fe97d02
+515 | start 437 phase -0.022564 signal 6 20 1 | psdu e1b37cca340a2214cae7a15155d0e6665bf579bd
+516 | start 438 phase 0.054618 signal 6 20 1 | psdu c1ffe2351d39fccce742c9effdad8c244fb25283
+517 | start 438 phase -0.010573 signal 6 20 1 | psdu 1abe95aaff37e241f2fed7455a838d00cacee080
+518 | start none phase none signal none | psdu none
+519 | start 437 phase -0.019532 signal 6 20 1 | psdu 855228260d9c43c4e3de1d7de84399a1c99c90ee
+520 | start 438 phase -0.044364 signal 6 20 1 | psdu 55e41ec927045ff4c571c6cacd18f45f0a91aa69
+521 | start none phase none signal none | psdu none
+522 | start 438 phase -0.027739 signal 6 20 1 | psdu 14a3cdf1f0bfed45a05757dced9d26f25ff164e0
+523 | start 438 phase 0.063288 signal 6 20 1 | psdu 3dd12f618490557b6cb4dd3f2b9066894f8d8de9
+524 | start 437 phase 0.035599 signal 6 20 1 | psdu a3d803f43639a77207135ea84941ab1c06806d1f
+525 | start none phase none signal none | psdu none
+526 | start 438 phase 0.044250 signal 6 20 1 | psdu 5e912a1eb0c9470350dce92d6d9fa87b66deff18
+527 | start 437 phase 0.042784 signal 6 20 1 | psdu 266c3a3a1c4ff566d3b5a9d0350ab601fa3b1b04
+528 | start 437 phase -0.013962 signal 6 20 1 | psdu 9264a44f229b5d84751fafe3d76b6ddd6bbc19e2
+529 | start 437 phase 0.007967 signal 6 20 1 | psdu 53395b37bea9ae073b666d696d9470348c259106
+530 | start 437 phase -0.032754 signal 6 20 1 | psdu cc2228165619b54daefee3b59573f0b89033c269
+531 | start 437 phase -0.010330 signal 6 20 1 | psdu 0879cf4e566b0e5b4921f5f0f63da4cbf613a653
+532 | start 437 phase -0.006059 signal 6 20 1 | psdu 75ff16bb3145c5aa2ff0a437ec121daea8c1e290
+533 | start 438 phase 0.016031 signal 6 20 1 | psdu 7c807fec17efa15eadf6ce4a3d1002e750628900
+534 | start 437 phase -0.063320 signal 6 20 1 | psdu 97720b055f4f23789a87fcf40a58283e08a9e693
+535 | start 437 phase 0.022963 signal 6 20 1 | psdu 758195e00cb4a8760086b6fd5127614614246ede
+536 | start 437 phase -0.017754 signal 6 20 1 | psdu b2bcde75c2eff3bb61d106543a1e793901acb44b
+537 | start 438 phase -0.025049 signal 6 20 1 | psdu ef659c6d893b3d76de988d14e345e6940eec073d
+538 | start 437 phase 0.034416 signal 6 20 1 | psdu 780049d80b54ec97212dd1334534108740507735
+539 | start none phase none signal none | psdu none
+540 | start 437 phase 0.039685 signal 6 20 1 | psdu 05d681e6579cf40bbeb304fd03fe4fe000dcda21
+541 | start 438 phase -0.023389 signal 6 20 1 | psdu e669e332024eea1b96ae3a4974867d25e2bda285
+542 | start 437 phase 0.051893 signal 6 20 1 | psdu bf2384e49e88a3f1ed56c347e06b2ef0be12bed1
+543 | start 437 phase 0.013450 signal 6 20 1 | psdu 95b01fc15bc2cfb070338fe3e2dc8cc132a4854b
+544 | start 437 phase 0.032491 signal 6 20 1 | psdu fb4ee09461546741209754afe8bf1bba27275899
+545 | start 437 phase 0.033688 signal 6 20 1 | psdu 047613603ca06e86c98f76262562771a29500aba
+546 | start 438 phase -0.013192 signal 6 20 1 | psdu 9e8910ef904947d5d672603137dd2f50acc6e8fd
+547 | start 437 phase -0.042248 signal 6 20 1 | psdu a43a62bc3c7dc1b2c1f8e49965fa8d97ca060cc0
+548 | start 438 phase -0.008206 signal 6 20 1 | psdu 6f54523e8d95efb1abda73f426e020fab7719df3
+549 | start 437 phase 0.044414 signal 6 20 1 | psdu 0b7125031686e5f16f2ff050b4e5175c1a5cf3c6
+550 | start none phase none signal none | psdu none
+551 | start 437 phase 0.015578 signal 6 20 1 | psdu 9c31042c951063c6f116493d26290794fd97b032
+552 | start none phase none signal none | psdu none
+553 | start 437 phase -0.060428 signal 6 20 1 | psdu c20f0a80bdd2a2abca5c37d6cf08eef1c9c7c2c9
+554 | start 437 phase -0.052786 signal 6 20 1 | psdu a62db51b390e125addf3174af47511ecdf9686eb
+555 | start none phase none signal none | psdu none
+556 | start none phase none signal none | psdu none
+557 | start 437 phase -0.008996 signal 6 20 1 | psdu 652a05ca185eeb9360406c4dc729037f1979e51b
+558 | start 438 phase -0.047253 signal 6 20 1 | psdu 5926cbaa6ef2c95068c2c44086a7682fd80d4d00
+559 | start 437 phase 0.025250 signal 6 20 1 | psdu e96fb0a64166bb9f25fdfde18d7048b3b47b0540
+560 | start 437 phase 0.010033 signal 6 20 1 | psdu 7f39c1fe0914521ec77745e9bf7c582b4a569fd8
+561 | start 438 phase -0.057327 signal 6 20 1 | psdu ee1137baa112187bb4ed9c9eba0ee2911d80e164
+562 | start 438 phase -0.032040 signal 6 20 1 | psdu 299f0d80bd208ed76935ceaec7d6290583dd2445
+563 | start 437 phase -0.004762 signal 6 20 1 | psdu 40a7ec41d946019d1c620a277e9fb31337fa982a
+564 | start none phase none signal none | psdu none
+565 | start 437 phase -0.033953 signal 6 20 1 | psdu c58533c409fa2ea98f4dbe160aebd3d2d1a1c2d6
+566 | start 438 phase 0.001591 signal 6 20 1 | psdu 468258f4e4c90301c2aea910494b491561e63aa9
+567 | start 438 phase 0.019599 signal 6 20 1 | psdu 780b9ab822a0a51254d0e4b900ae1ebe9a9b3014
+568 | start 438 phase -0.041998 signal 6 20 1 | psdu 788482baacc5e5d52b11ecf9f27bebcc6cbe21c8
+569 | start none phase none signal none | psdu none
+570 | start 437 phase 0.006737 signal 6 20 1 | psdu abda71ece615ccebcb560b56e139d99d067ac057
+571 | start none phase none signal none | psdu none
+572 | start 437 phase 0.007232 signal 6 20 1 | psdu e4cea79170b850a089fac329f099408f7e231401
+573 | start 437 phase -0.054327 signal 6 20 1 | psdu a48e97e33e93432784297e213c536a25042cccf2
+574 | start 438 phase -0.051899 signal 6 20 1 | psdu 0582720fa2a5c576902eb1408ac6d43dd5ee7ecd
+575 | start 438 phase -0.037023 signal 6 20 1 | psdu ca4faf9e33a8f00abd0cb8bab64d0a960429e6d9
+576 | start 437 phase -0.020407 signal 6 20 1 | psdu 0bdf2cfc273f6dbe318d35f911f7c7ee9217c3ff
+577 | start none phase none signal none | psdu none
+578 | start 437 phase 0.036834 signal 6 20 1 | psdu 8413e4dd1bea3aec9a50f13cf10d196b72b70d91
+579 | start none phase none signal none | psdu none
+580 | start 437 phase 0.039802 signal 6 20 1 | psdu d5b48002415bab2c1f763faa4bef92fad6df0571
+581 | start 438 phase -0.023909 signal 6 20 1 | psdu 3985169b33e22a50bdab233a213eaaa762dce34f
+582 | start 438 phase 0.031464 signal 6 20 1 | psdu bba67d228d0c9ae4bdbcdedce0a86478bed465f4
+583 | start 438 phase -0.038948 signal 6 20 1 | psdu 3ec574450c32a1f16afdccb35ca2fe3982f02e9e
+584 | start 437 phase -0.020469 signal 6 20 1 | psdu 59b28cd2a9681716dee68c3d05cc462fd88971dd
+585 | start 438 phase 0.062499 signal 6 20 1 | psdu 9be6c879b1505c5c8aaed8244b86ac0e0e5655d3
+586 | start none phase none signal none | psdu none
+587 | start 438 phase -0.038097 signal 6 20 1 | psdu 68c53343a7fd978b999603fc13bce72e5130b95a
+588 | start 438 phase 0.039622 signal 6 20 1 | psdu 23ed1d3c2f216d6127d64c1d742e21da295ce262
+589 | start 437 phase 0.004139 signal 6 20 1 | psdu 907b6212ed50e0498424e95956ee25f2fe782685
+590 | start 438 phase -0.031346 signal 6 20 1 | psdu 3042e2a01425c32e95a6b2cc20263069155bd7bd
+591 | start 437 phase 0.012378 signal 6 20 1 | psdu e44b5b365899f08e143debd56ed151650ab10265
+592 | start 437 phase -0.035969 signal 6 20 1 | psdu 67acafeed5b5e4da4b01bdd3a71e3b51e1069ab6
+593 | start 438 phase -0.010069 signal 6 20 1 | psdu b6e0fdf7d0ce87c5f67a423f43d91f108ab2f55c
+594 | start 437 phase -0.050005 signal 6 20 1 | psdu 72dc22c0a3ccff69fd96b7cfd4c6a9e1d265f3fe
+595 | start 408 phase -0.071081 signal 6 20 1 | psdu 7b30f515e9c9916362626192b8093028318134cd
+596 | start 438 phase -0.054932 signal 6 20 1 | psdu fcb29e4b41fba873bc7a452fe8b40089ae0d8bb2
+597 | start 438 phase -0.037468 signal 6 20 1 | psdu 2e30365559fb6ea097961dc9bdfb7527f9b1908e
+598 | start 437 phase -0.011807 signal 6 20 1 | psdu b0e0d65bf355f9e3e29ea7149a35562ba91a8585
+599 | start 438 phase 0.040452 signal 6 20 1 | psdu b5c67a42d4eeac78d992a2860028a49e820996be
+600 | start 408 phase -0.070035 signal 6 20 1 | psdu 2eb2b0d52d596ec38dce099c3f1a1ff1089454fd
+601 | start 438 phase -0.056334 signal 6 20 1 | psdu 0b978f26d54abe3313c485e887242ad5297f6e08
+602 | start 438 phase 0.050909 signal 6 20 1 | psdu 36504c0f127e0d8bd501608bac7ce9d17c89b51d
+603 | start 438 phase -0.036227 signal 6 20 1 | psdu 928fb62b011270d5bcd6774a7bd8e7503b972a3c
+604 | start 437 phase 0.023911 signal 6 20 1 | psdu a89f4bad11760420e84eeb80701cdbaab0132f2a
+605 | start 438 phase 0.045423 signal 6 20 1 | psdu 363e02ae315f8d931118dab628615506dcf3b59f
+606 | start 438 phase -0.050804 signal 6 20 1 | psdu 8d832525bb13f03ea79a9f3279ae86cba0dfdefd
+607 | start 438 phase 0.040595 signal 6 20 1 | psdu f990255fb719213bac45b736a7f7a981657d4916
+608 | start 437 phase 0.020710 signal 6 20 1 | psdu b86ce0d1e3b3f3f8de94caeda623033d124088eb
+609 | start 437 phase 0.008885 signal 6 20 1 | psdu 27f4715eac3712e767edc67dec66ba024cb07c4e
+610 | start 437 phase -0.023534 signal 6 20 1 | psdu d1b26af1576a0694f57d9723ddfe902f14420fae
+611 | start none phase none signal none | psdu none
+612 | start 438 phase -0.006587 signal 6 20 1 | psdu d1317090e7a2afeab2ee91b6c459b69f2a647f13
+613 | start 437 phase -0.040582 signal 6 20 1 | psdu 475cdb1c114e9de7c757d5180344a63d061021a5
+614 | start 437 phase 0.048941 signal 6 20 1 | psdu 3e332b73c83d1eae5d1d05cb81ef3eb0555f2558
+615 | start 437 phase -0.036150 signal 6 20 1 | psdu 41599685382021f6e126ca364e47839f70bd42b6
+616 | start 437 phase 0.037019 signal 6 20 1 | psdu 2dd7a0a793f2f5241b0f988014bece7697776d2f
+617 | start 438 phase 0.002036 signal 6 20 1 | psdu 82efc6930999395b288123b2d5eb5bd207928ad6
+618 | start 437 phase -0.044244 signal 6 20 1 | psdu 160b6abae5b139b0cc470ab4f0a62c63db4370e4
+619 | start 437 phase -0.008631 signal 6 20 1 | psdu 89b93361af838a44bfccde08a3e1ad39ff137a02
+620 | start 438 phase -0.007811 signal 6 20 1 | psdu a3ec49a33ee8643c55e671063583e22ce92da6bf
+621 | start 438 phase -0.036338 signal 6 20 1 | psdu 970bd61b4c05f2d64d53ef1620b0060d2603de76
+622 | start 438 phase -0.029884 signal 6 20 1 | psdu 497f66ba94412dc7c3bbfc07bb68c46372f9c882
+623 | start 437 phase 0.004417 signal 6 20 1 | psdu bf1ee58d869854e65188b8ae76fa36da0538b2ec
+624 | start 438 phase 0.052088 signal 6 20 1 | psdu 7e9e2ce541aab9556d835fbcfc20a831d96ac5f9
+625 | start 437 phase 0.007805 signal 6 20 1 | psdu 72ca2d1c986ddab698313bfbb48fa8d78a72ab2c
+626 | start 437 phase -0.059134 signal 6 20 1 | psdu c6ab564e4a03da456e5ba345f8a3926fb35ff988
+627 | start 437 phase -0.030971 signal 6 20 1 | psdu 5c9d648d8a422779b1f4cb5883ef68d7c47797a6
+628 | start none phase none signal none | psdu none
+629 | start 437 phase 0.054640 signal 6 20 1 | psdu 3a79d81f0e6d44b606e226f267096b1144c77560
+630 | start 438 phase 0.029792 signal 6 20 1 | psdu 2e0721cd17c084eba6eadd2c40fee7964a21bbd8
+631 | start 437 phase -0.035269 signal 6 20 1 | psdu dba4e42cdb4b098e144f7e73ae9a618cb82540b0
+632 | start 438 phase -0.050743 signal 6 20 1 | psdu 3b268b0dd96ac2bd8d79111508ab9a9a5c98ac0c
+633 | start 437 phase -0.036387 signal 6 20 1 | psdu 0d87f14d8845233466045c7155945829ff1b5712
+634 | start 438 phase 0.052198 signal 6 20 1 | psdu 7a6d64b2198ee1b164749f9fcfcac440331464f1
+635 | start 438 phase 0.033769 signal 6 20 1 | psdu d10335fe01a137e0269550529752be4a3c593fdb
+636 | start 437 phase -0.014468 signal 6 20 1 | psdu none
+637 | start 437 phase -0.047142 signal 6 20 1 | psdu f99c7fbe0cf363e9e278706a5ec12125f57f0934
+638 | start 438 phase -0.031482 signal 6 20 1 | psdu 31deb98da4664915b641a3dd9d02b59dc3b09e7f
+639 | start 438 phase -0.039351 signal 6 20 1 | psdu b6d91c4a802a032070e3ce464d5fcf9c7bdbf4be
+640 | start 437 phase -0.003071 signal 6 20 1 | psdu 0beec5bd7a1c39eb0f9a1e9ce9a7ebe31e9109e2
+641 | start 437 phase -0.029099 signal 6 20 1 | psdu d75fbd711d9b391a285ef4fc7b299558ec6fe121
+642 | start 407 phase -0.067636 signal 6 20 1 | psdu dd1cbe5093b842c06684995d0cfff3b059588c86
+643 | start 437 phase -0.022788 signal 6 20 1 | psdu 721f4d0d14331616c6fad26b5362e7affb3556c6
+644 | start 438 phase -0.064113 signal 6 20 1 | psdu bec4d1f075e2c2740a94ef023c9f0ddbd9c2f9a0
+645 | start 438 phase -0.051687 signal 6 20 1 | psdu 934d8333349d3802d4fb9e5d10b32870818c0372
+646 | start 438 phase -0.022543 signal 6 20 1 | psdu 8db8d2743e1646cc1dd75e369e8233df74a7f0ba
+647 | start 438 phase 0.032787 signal 6 20 1 | psdu 7861e1f18f01efe7023e9dc4ef19d90e85a25e0f
+648 | start 438 phase 0.047243 signal 6 20 1 | psdu 6165a6603609233820946686f590fdf241c48492
+649 | start 437 phase -0.036482 signal 6 20 1 | psdu 2c0950c317323a3aad59919c552ce1696d6f7dbb
+650 | start 437 phase -0.012716 signal 6 20 1 | psdu 576a4b73156d113ecd56f58060d53c1df29c8f0c
+651 | start 437 phase 0.040141 signal 6 20 1 | psdu 710f61d778809218b03cd48f12543c952137cd71
+652 | start 438 phase -0.025980 signal 6 20 1 | psdu 6113dba30ce1f279866eb5ec5bbb82e648fd9032
+653 | start none phase none signal none | psdu none
+654 | start 438 phase 0.019124 signal 6 20 1 | psdu e1c793899c3c135d565008d4af10578d0a3e6180
+655 | start 438 phase 0.056019 signal 6 20 1 | psdu 037831fa686db7d6ad21bbf372aa04065bee5780
+656 | start 438 phase -0.060280 signal 6 20 1 | psdu 7e6d20ea8af3c7d8583d31d29c0e7a51cabf4f83
+657 | start none phase none signal none | psdu none
+658 | start 438 phase 0.042915 signal 6 20 1 | psdu a234cb955b0e28056bfa49934d1618acf1759c27
+659 | start 438 phase 0.045228 signal 6 20 1 | psdu cd1bc244ba1dee4aee6c86b595ab7852aa8cfe68
+660 | start 437 phase -0.036646 signal 6 20 1 | psdu a66962f230511681bc97b0f8c30f0bfd0aeb0c82
+661 | start 438 phase 0.030683 signal 6 20 1 | psdu baba6cdb7537e687d06b69064702ff566c443b99
+662 | start 437 phase 0.031288 signal 6 20 1 | psdu 5f405d7bbb5ef6750d56d3795cce7a2c0ffc6a66
+663 | start 438 phase 0.045311 signal 6 20 1 | psdu 7d7320da87bd9aeb8f7306ae3727cbe2dcf02362
+664 | start 438 phase 0.041649 signal 6 20 1 | psdu 4551cecc409a02c7c9408ec8ef4348851a82c77d
+665 | start 438 phase 0.000794 signal 6 20 1 | psdu 350c15edb575f1ad8a77766b4c734240b95ec7cd
+666 | start 438 phase 0.047264 signal 6 20 1 | psdu 2fed7f0bafc878c12cf142f117555d2dfde5415c
+667 | start none phase none signal none | psdu none
+668 | start none phase none signal none | psdu none
+669 | start 438 phase -0.060360 signal 6 20 1 | psdu c5241626078396c9056e63cce0c08b99db5efe93
+670 | start 437 phase -0.024645 signal 6 20 1 | psdu c8d62f61e51cc036ae8b39ec0a7e78e069ee1a03
+671 | start 437 phase 0.038579 signal 6 20 1 | psdu cda0dbe2e667942efd5848b1eefb440d4af889fd
+672 | start 438 phase -0.057696 signal 6 20 1 | psdu ba9982ad6a282a814308deffbe28571a656579e1
+673 | start 437 phase -0.042742 signal 6 20 1 | psdu 2b5d94d7ffd716ef329fd63381fa07d28725873a
+674 | start 437 phase 0.049153 signal 6 20 1 | psdu ad1473248f8912e837f56b00ca021903777387d2
+675 | start 438 phase -0.015650 signal 6 20 1 | psdu ddbb6c00be1e7e4cac38652d3da6b78bca24039b
+676 | start 437 phase 0.026724 signal 6 20 1 | psdu 86ec106c0c656fff0e85763c8adcfb2786765daa
+677 | start none phase none signal none | psdu none
+678 | start 438 phase 0.054294 signal 6 20 1 | psdu fdc4b36f4ca767c697beb387afa85a0792aacebb
+679 | start 437 phase -0.031044 signal 6 20 1 | psdu cc2fad489e120010c1d07099bee0dd12d0e363e4
+680 | start 438 phase 0.048243 signal 6 20 1 | psdu bb04fb7e3d44345adb4cb62afc75d15dcdc67739
+681 | start 438 phase 0.006186 signal 6 20 1 | psdu 8923be531b1a39e7cee1f8303ba4ac3024464877
+682 | start 438 phase 0.006623 signal 6 20 1 | psdu e1419448717dc216e44a8f478bd46941b1164472
+683 | start 437 phase -0.060723 signal 6 20 1 | psdu 2355ff36d43a1ceefa0aed39ffbf898edd963351
+684 | start 437 phase 0.003548 signal 6 20 1 | psdu ca05e997e1811e6b90c2509ed0f7cd3231ac21ca
+685 | start 437 phase 0.024428 signal 6 20 1 | psdu 2f7fb2f6d493778cf77a4dcfd6224f29c25f1931
+686 | start none phase none signal none | psdu none
+687 | start 437 phase -0.022709 signal 6 20 1 | psdu c053f80b1ee688973edbf56eb67b746e23eb5e09
+688 | start 438 phase -0.053182 signal 6 20 1 | psdu e0113295b5b3b2e65e4a7325aad96d136a50b232
+689 | start 437 phase 0.047496 signal 6 20 1 | psdu 9133d52711297068cd4c755d9bd65f54cdc49581
+690 | start 437 phase -0.050412 signal 6 20 1 | psdu 623f4d273a1f782397676c7c487d1222f07dcba7
+691 | start 438 phase 0.037512 signal 6 20 1 | psdu a6162a8b8b98c0a0612eb00ea671f66e75ffa35e
+692 | start 438 phase -0.012540 signal 6 20 1 | psdu 5c8fd0609aca89c4d24325b4ae37602d2231fec2
+693 | start none phase none signal none | psdu none
+694 | start 437 phase 0.042019 signal 6 20 1 | psdu ccec399e3443a1d5a8c7ce06cd468839f6c1c449
+695 | start 437 phase 0.047892 signal 6 20 1 | psdu b3b86fb3ec747b9e655fb39b133951e7bde1b413
+696 | start 438 phase 0.018715 signal 6 20 1 | psdu 801ee4357dd3347f0c3f5eb1dbb1abc2f8956566
+697 | start 438 phase -0.012257 signal 6 20 1 | psdu af034d2a5f7ea29b83fd4c1932ed26d274f2cc97
+698 | start none phase none signal none | psdu none
+699 | start 438 phase 0.015596 signal 6 20 1 | psdu 72e08ff3ffd5e39e9337f4dcc0ef738655f6a400
+700 | start 438 phase -0.024098 signal 6 20 1 | psdu 20c2a338c3ddcf5a86ed83ea4e9a37f5fd4b138c
+701 | start 437 phase -0.025107 signal 6 20 1 | psdu 81c7f5f89370b3907bf86e40174d6b958fd1c716
+702 | start 437 phase -0.027930 signal 6 20 1 | psdu a93a0bd2b948c7d652b56e7b003d69690c469386
+703 | start 437 phase 0.032579 signal 6 20 1 | psdu 0fec3141d42625d410e7bd2c322f7a946240f606
+704 | start 438 phase 0.031950 signal 6 20 1 | psdu 451ab7b6f48838de865bc8b51253a98419cd2ae5
+705 | start 437 phase 0.008349 signal 6 20 1 | psdu 31f3eacfda2714d88c09eb39a8ac3541b70c917d
+706 | start 437 phase 0.028404 signal 6 20 1 | psdu 8b90684026b1cb287697b51923ce0181c4672394
+707 | start 438 phase 0.024693 signal 6 20 1 | psdu 89fada4a09610764887a37a6468a35b6a86e7285
+708 | start 438 phase -0.012017 signal 6 20 1 | psdu 379b4507861a3531938fe43106f36c8dd37dba26
+709 | start 407 phase -0.070696 signal 6 20 1 | psdu 8f397a666692fd724b72a1fdc12345f8d0ca3a68
+710 | start 437 phase -0.041751 signal 6 20 1 | psdu 075e1047824327d92827ee20088bf0688d178fe1
+711 | start 437 phase 0.029666 signal 6 20 1 | psdu 45c73a736b20f6e5262ab65b44de43841b33a905
+712 | start 437 phase 0.050742 signal 6 20 1 | psdu 20c3f379c57dceb91352c8eb00449b7748b3cafc
+713 | start 438 phase -0.013390 signal 6 20 1 | psdu cd9166d350df0c35cb6bf88a60de712f712e3e84
+714 | start 437 phase 0.006118 signal 6 20 1 | psdu 2df4e1fa90fe1e885c3c179c5e25228d4b2a7b69
+715 | start 403 phase 0.073309 signal 6 16 1 | psdu none
+716 | start 438 phase 0.010105 signal 6 20 1 | psdu c91c992ef7a8259907e6073c125c612869e6655d
+717 | start none phase none signal none | psdu none
+718 | start 438 phase 0.012860 signal 6 20 1 | psdu 681d16c5c584f6f45847d065d658acd35e9c6c36
+719 | start 437 phase -0.000889 signal 6 20 1 | psdu 1669d4bc11d7b01988b8103d68844f93dd6741e4
+720 | start 437 phase 0.020451 signal 6 20 1 | psdu 8e3fa1d4908294653f16105cc5b69354a6be0ca9
+721 | start 438 phase 0.054451 signal 6 20 1 | psdu 0dddab0f3478ff4662ada76fbce9a498805a41bb
+722 | start 438 phase -0.041522 signal 6 20 1 | psdu b2844573db5b16aebdc63cad198e887b9b066845
+723 | start none phase none signal none | psdu none
+724 | start 437 phase -0.001077 signal 6 20 1 | psdu 33abde69ce55277250171f0f628a3b9e077ededb
+725 | start 438 phase 0.066102 signal 6 20 1 | psdu 4e1f519ac7333f77f55772e5d942d0cdfc5737c8
+726 | start 438 phase -0.059372 signal 6 20 1 | psdu e8f1906a7921b7eb78b8226ad34fd6002f76ef0e
+727 | start 438 phase -0.008445 signal 6 20 1 | psdu a7ec53aa5addd535d93e78457eaca86ff24bf1d2
+728 | start none phase none signal none | psdu none
+729 | start 437 phase 0.060991 signal 6 20 1 | psdu 35a3da69f3446bb155c9d29a780c1a505b383ae6
+730 | start 438 phase 0.040618 signal 6 20 1 | psdu ad6dcc11441f9c9822768d3162e5e96e96cb04a6
+731 | start 437 phase -0.030173 signal 6 20 1 | psdu ff8cb6a47941ec16c538e9f5a02a2f9a54a95d61
+732 | start 438 phase 0.023641 signal 6 20 1 | psdu 1dc8cd25dcb646b8fc5be0e963e439ca7d582f95
+733 | start 437 phase 0.059633 signal 6 20 1 | psdu 7f9f452d7e5d36a8b4d2d342d54f293d09180eb1
+734 | start 437 phase 0.053845 signal 6 20 1 | psdu 4560e29ea8ea38978c9ab88c4b1845e1fc22be3a
+735 | start 438 phase -0.014150 signal 6 20 1 | psdu fd2d348276e634cfe54cab34396e7e716480c203
+736 | start 437 phase -0.018948 signal 6 20 1 | psdu 75934af667ff7e845816130ce63b2247fd364ddb
+737 | start 408 phase -0.073324 signal 6 20 1 | psdu 3b6650ad713c83851549bc299488dc63d18ba883
+738 | start 438 phase -0.029517 signal 6 20 1 | psdu 16609b60b22d975509b63519aa461c87fe2df4b4
+739 | start 438 phase 0.031242 signal 6 20 1 | psdu cab2fbc3f6362a79bd2a11e6202e794f1ae02324
+740 | start 408 phase 0.067766 signal 6 20 1 | psdu 5f535ca8ce25ed1b0129dc098c6d75ec1ec5c427
+741 | start 407 phase 0.074429 signal 6 20 1 | psdu 1c076eb8d60577388c534ddf29d5a28eff326d12
+742 | start none phase none signal none | psdu none
+743 | start 437 phase -0.032566 signal 6 20 1 | psdu 016c4e826c7a70d1e7c0e8cc1005ba928e891632
+744 | start 438 phase -0.030089 signal 6 20 1 | psdu 0b9f65cff87dda90961396e4ecb047d45c0b8857
+745 | start 438 phase -0.037547 signal 6 20 1 | psdu bd9fd0bdd9a04f2ada788f2d39f8ad24972856d5
+746 | start 438 phase -0.007275 signal 6 20 1 | psdu ac58450cf0c9789e59efd0fe0bc8717816225445
+747 | start 437 phase 0.032959 signal 6 20 1 | psdu eaf2784728f546bb0399e5c381316f6a42fffb83
+748 | start 438 phase 0.060122 signal 6 20 1 | psdu 861a70b7de64185529ff1487b685a6bd2cfe1971
+749 | start 438 phase -0.042355 signal 6 20 1 | psdu 2bc5245a7aca5a8e967fabaef09c8d4fbc71f76a
+750 | start 437 phase 0.060087 signal 6 20 1 | psdu 65d91d878cb12d45f9ee5e6171c2d51d8d86830d
+751 | start 437 phase 0.033002 signal 6 20 1 | psdu 2af1c8bf091115e46838866660faf8208d845693
+752 | start none phase none signal none | psdu none
+753 | start 438 phase 0.007399 signal 6 20 1 | psdu 9d041540d8524b92c0156df79026dbc2d9ca3bec
+754 | start 438 phase 0.014583 signal 6 20 1 | psdu e213a6ad15a4568798cc52fac6067918e60f581b
+755 | start 437 phase -0.000138 signal 6 20 1 | psdu 6523bbcf2517efbbe847aff19a6bc9413dc50ee0
+756 | start 438 phase -0.025846 signal 6 20 1 | psdu 5b3c72adcee59d3090285241d824e252f4784828
+757 | start 437 phase -0.016301 signal 6 20 1 | psdu d3451354e1a06ec3bf515e2d497b2c94a94fa21f
+758 | start 438 phase -0.054063 signal 6 20 1 | psdu 01f220349f745185428a4f459a4dcdda30e78a68
+759 | start 438 phase 0.039016 signal 6 20 1 | psdu c1e0df952d16aa6e1bd9fc7a755605a2cf21eced
+760 | start 438 phase 0.045056 signal 6 20 1 | psdu f8084b6dcca7c03e53c84104576f85011081980d
+761 | start 438 phase 0.026493 signal 6 20 1 | psdu 8bd27ea4c26f6150c46337110246a4bb7c9b8be7
+762 | start 437 phase -0.061624 signal 6 20 1 | psdu 1f8d38908ab99bd581ab6a1215f425e5b4822087
+763 | start 437 phase -0.002469 signal 6 20 1 | psdu b21dfb4d97ddd545ed37408ce5a4d71d55cb5f0e
+764 | start 437 phase -0.026561 signal 6 20 1 | psdu c2929461faaf937e771805b58595af6bf1df3cc7
+765 | start none phase none signal none | psdu none
+766 | start 437 phase -0.041081 signal 6 20 1 | psdu 734b3e1126e1dfd000ecfb6b218cdad73d3e92eb
+767 | start 438 phase -0.002765 signal 6 20 1 | psdu 72688231c44afe1bcceed36cfcbe3ab6e53ebeea
+768 | start 437 phase -0.021837 signal 6 20 1 | psdu 2cfefe3b096d6fae5449f2848e005379a19e857a
+769 | start 437 phase -0.030852 signal 6 20 1 | psdu 30fbaa674aef9ffd7630fe653099932fba649e63
+770 | start 437 phase -0.042881 signal 6 20 1 | psdu 13ce66cca7e617dfc76a8a28d6110e59778b3e9e
+771 | start 438 phase 0.045154 signal 6 20 1 | psdu 9b9a38fecc808da9342fd328cb2fe57040790105
+772 | start none phase none signal none | psdu none
+773 | start 438 phase -0.036720 signal 6 20 1 | psdu 5baccf225a6916437c9731630f8c4576cb3d4c6b
+774 | start 437 phase 0.011995 signal 6 20 1 | psdu 63bdf42bccef56a5c3a6b63cf676221c4fd5dc9c
+775 | start 438 phase -0.017770 signal 6 20 1 | psdu a968a045811be4bdecc3abada0a4487ab336bd3e
+776 | start 438 phase -0.021076 signal 6 20 1 | psdu 6bd937efb129d049b21b526fe5fc763aaa8a67d2
+777 | start 437 phase 0.036092 signal 6 20 1 | psdu 5b2d4eb1de0494445ae7cdbde5b572cd656654f6
+778 | start 438 phase 0.034891 signal 6 20 1 | psdu 48936853931d8f019dd6c12b3c27b9c7acb1f736
+779 | start 438 phase 0.043434 signal 6 20 1 | psdu ed857f5a8fbba7fb6177c3669154e9634fd6c432
+780 | start 437 phase 0.033268 signal 6 20 1 | psdu f6fc186652b081aa7d282783afdfcde7e9756703
+781 | start 438 phase -0.026263 signal 6 20 1 | psdu 14033728d74a6d6e377832ed21ed5c775c1cb350
+782 | start 437 phase -0.033533 signal 6 20 1 | psdu c05a46e9b5af3281d082572401cdccfebc79b05b
+783 | start 438 phase 0.039854 signal 6 20 1 | psdu bb2f14ee44e3ecf281b18466db5822caeb896d3f
+784 | start 438 phase -0.037409 signal 6 20 1 | psdu 1c03cc334334ef1ac1ecf1a0d2bcdcf7c68252d6
+785 | start 437 phase 0.028061 signal 6 20 1 | psdu d3ba45a34e66116c804d6d4f434581d7882f1111
+786 | start 437 phase 0.011886 signal 6 20 1 | psdu f60f2bb00160a097cbcad0f12230592b7309e7de
+787 | start 438 phase -0.060232 signal 6 20 1 | psdu 19d7e06e75336223d3a7258f17887d42053519fe
+788 | start 437 phase 0.010971 signal 6 20 1 | psdu 952cf269f7463211f325466baab53c1867e5e385
+789 | start 438 phase 0.060370 signal 6 20 1 | psdu 8b9a9c91d34a2b4e544376b046edd7e20134a167
+790 | start 437 phase -0.009862 signal 6 20 1 | psdu 7b94dde0b8a9d5861eb57d878631e52821161f89
+791 | start 438 phase 0.018602 signal 6 20 1 | psdu 8f5e8b031192a6860ba5cf36bb54255b5219bce3
+792 | start 438 phase -0.063123 signal 6 20 1 | psdu 64c793dee049924b5066674439ac4918200c08a2
+793 | start 438 phase 0.058134 signal 6 20 1 | psdu 5243ee1abb60d52380c47ff9eceddfdfffa5dd98
+794 | start 438 phase -0.025938 signal 6 20 1 | psdu 37c4f96e499bfb368db47b20e1b3c0798f496bd5
+795 | start 438 phase -0.006271 signal 6 20 1 | psdu b9072879d17de00ee74365843977ceeb620bd8fa
+796 | start none phase none signal none | psdu none
+797 | start 437 phase -0.020147 signal 6 20 1 | psdu 9da03add6d915a45626a1bd97f06fdb6df93ab9d
+798 | start 437 phase 0.021438 signal 6 20 1 | psdu f7e984f1b10ad9665a7a5ab051f77c8d059f1c19
+799 | start 438 phase 0.047558 signal 6 20 1 | psdu b7736db7482454132fec9565db8361ed876a2bf7
