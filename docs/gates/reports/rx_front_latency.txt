@@ -1,0 +1,31 @@
+# command: cargo run -q --release -p radio-tools --bin rxfront -- latency 2000
+# base fe61f34 + branch r0-08b-decision-latency (2026-11-18), macOS arm64
+# rxfront latency: 2000 streams per kind, SNR 0/3/6/12 dB (tone+2 pkts: 20 dB), CFO ±235 kHz, 20 MHz
+# per L, float / fixed: streams whose acquisitions differ from L = 0 in timing/CFO/
+# metric/count (grid), in detected_at only (det), decided more than L later (late,
+# most extra samples). Last column: acquisitions at L = 0, float / fixed.
+# kind                    L=16          L=32          L=48          L=63          L=64          L=79         L=128    acq at L=0
+  clean
+     grid                  0/0           0/0           0/0           0/0           0/0           0/0           0/0     1692/1692
+     det                   0/0           0/0           0/0           0/0           0/0           0/0           0/0
+     late                  0/0           0/0           0/0           0/0           0/0           0/0           0/0
+  CW tone
+     grid                  0/0           0/0           0/0           0/0           0/0           0/0           1/1       645/647
+     det                   0/0           0/0           0/0           0/0           0/0           0/0           0/0
+     late                  0/0           0/0           0/0           0/0           0/0     1(4)/1(4)   3(42)/3(42)
+  AGC step
+     grid                  0/0           0/0           0/0           0/0           0/0           0/0           0/0     1791/1790
+     det                   0/0           0/0           0/0           0/0           0/0           0/0           0/0
+     late                  0/0           0/0           0/0           0/0           0/0           0/0           0/0
+  two packets
+     grid                  0/0           0/0           0/0           0/0           0/0           0/0           0/0     3541/3540
+     det                   0/0           0/0           0/0           0/0           0/0           0/0           0/0
+     late                  0/0           0/0           0/0           0/0           0/0           0/0           0/0
+  noise only
+     grid                  0/0           0/0           0/0           0/0           0/0           0/0           0/0           0/0
+     det                   0/0           0/0           0/0           0/0           0/0           0/0           0/0
+     late                  0/0           0/0           0/0           0/0           0/0           0/0           0/0
+  tone+2 pkts
+     grid                  0/1           0/1           0/0           0/1           0/1           0/1           1/2     1703/1702
+     det                 92/91         93/92         95/94         98/97         99/98       105/104       107/106
+     late                  0/0           0/0           0/0           0/0           0/0        0/1(9)   4(36)/2(36)

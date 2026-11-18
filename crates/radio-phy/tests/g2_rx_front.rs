@@ -391,3 +391,72 @@ fn fixed_detector_follows_the_float_one_at_onsets_and_high_snr() {
         assert!(same >= 194, "{snr} dB: same detection in {same}/200");
     }
 }
+
+#[test]
+fn fixed_decision_latency_only_delays_the_result() {
+    // Open question 13 in the fixed model: up to 63 + (GI − B) samples of decision latency the
+    // acquisitions are those of latency 0, bit for bit, each decided exactly L samples later.
+    // Clean packets, a CW spur at the noise level, an AGC step and two packets back to back.
+    let mut rng = Rng::new(0x0d14);
+    let f = preamble();
+    let fx = FixedRxConfig::default();
+    let base = RxConfig {
+        decision_latency: 0,
+        ..RxConfig::new(20e6)
+    };
+    let mut acquired = 0;
+    for k in 0..80 {
+        let mut g = f.clone();
+        if k % 4 == 3 {
+            g.extend(vec![(0.0, 0.0); (rng.uniform() * 300.0) as usize]);
+            g.extend_from_slice(&f);
+        }
+        let (adc, t1, _) = adc_scene(
+            &g,
+            None,
+            if k % 2 == 0 { 4.0 } else { 10.0 },
+            20e6,
+            &mut rng,
+        );
+        let x = as_f64(&adc);
+        let x = match k % 4 {
+            1 => add_tone(&x, mean_power(&x[..t1 - 200]), 1.3e6, 20e6, 0.3),
+            2 => gain_step(&x, t1 - 300, -20.0),
+            _ => x,
+        };
+        let adc = to_adc(&x, 1.0);
+        let a0 = acquisitions_fixed(&adc, &base, &fx);
+        acquired += a0.len();
+        for l in [1, 64, 75] {
+            let cfg = RxConfig {
+                decision_latency: l,
+                ..base.clone()
+            };
+            let got = acquisitions_fixed(&adc, &cfg, &fx);
+            assert_eq!(got.len(), a0.len(), "L = {l}");
+            for (g, a) in got.iter().zip(&a0) {
+                assert_eq!(g.decided_at, a.decided_at + l, "L = {l}");
+                assert_eq!(
+                    (
+                        g.detected_at,
+                        g.ltf_start,
+                        g.fft_start,
+                        g.cfo_phase,
+                        g.coarse_phase,
+                        g.fine_phase
+                    ),
+                    (
+                        a.detected_at,
+                        a.ltf_start,
+                        a.fft_start,
+                        a.cfo_phase,
+                        a.coarse_phase,
+                        a.fine_phase
+                    ),
+                    "L = {l}"
+                );
+            }
+        }
+    }
+    assert!(acquired >= 80, "{acquired} acquisitions in 80 scenes");
+}
