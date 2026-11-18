@@ -1,7 +1,8 @@
 # ADR 0006 — Receiver front top level: decision engine, provisional latch, NCO delay
 
-Status: **proposed** · 2026-11-18 · PHY architecture (risk point): independent review and
-founder approval before part d of R0-08b is built on it.
+Status: **accepted** · 2026-11-18 · PHY architecture (risk point). An independent review of
+the proposal set its conditions, all included below. Founder approval: 2026-11-18, recommendation
+taken (R = 8 at L = 64). The KV260 is not a constraint: more capable FPGA boards are coming.
 
 ## Context
 
