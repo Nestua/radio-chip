@@ -581,7 +581,7 @@ vectors of later blocks.
   frequency, so the quantised taps are Hermitian, t(64−k) = conj(t(k)), t(0) and t(32) real
   (unit test `ltf_taps_are_hermitian` for T = 2…16; `rvec` refuses non-Hermitian taps). Pairs
   (k, 64−k) then need 4 real products instead of 8: **128 constant 14 × 8-bit multiplications
-  instead of 512 general 12 × 8** (plus 64 + 128 adders before them), all exact integer sums.
+  instead of 512 general 12 × 8** (plus 128 + 124 adders before them), all exact integer sums.
 - Narrowing to K = 20 by `hw/rtl/round_sat.sv` (half to even, saturating), the generic form of
   the model's `narrow`, reused by later blocks.
 - Taps come from a generated package, `hw/rtl/gen/rx_front_rom_pkg.sv` (`rvec rx-front-rom`,
@@ -610,9 +610,13 @@ Mutation check (each restored with `cp` + `touch`):
 | out_valid one sample early | 6467 |
 | window shifts every clock instead of on in_valid | 6458 |
 
-Not covered: the saturation branch of `round_sat` is unreachable here (|c| < 2^26, so the
-narrowed value stays below 2^18 < 2^19); it is exercised by the later blocks that do saturate
-(DC blocker output).
+`round_sat` has its own gate (pre-PR review): `make -C hw round_sat` drives every 12-bit input
+through eight parameter sets (`hw/tb/round_sat_bank.sv`: SHIFT 1/4/8/11, OUT_W at its bound
+IN_W − SHIFT + 1 and below, saturating and not) against `requantize(HalfEven, Saturate)`
+(`hw/vectors/round_sat.txt`, `rvec round_sat`): 4096 inputs, 32 768 checks, 0 mismatches.
+Mutations: no positive / no negative saturation 3714 mismatches each, ties up 1833, ties down
+1829, sticky missing bit 0 1829; an out-of-range OUT_W stops elaboration (`$error`). In
+`ltf_corr` itself the saturation branch is unreachable (|c| < 2^26, narrowed < 2^18).
 
 ### Open questions
 13. **Acquisition decision in RTL (PHY architecture, risk point — independent review and

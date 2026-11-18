@@ -15,6 +15,7 @@ use radio_phy::channel::{
     awgn, fractional_delay, frequency_offset, mean_power, tgn_taps, Doppler, Multipath, Rng,
     TgnModel,
 };
+use radio_phy::fixed::{requantize, Overflow, QFormat, Rounding};
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, IfftConfig};
@@ -368,6 +369,55 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "endpackage\n\n`default_nettype wire")
 }
 
+/// (SHIFT, OUT_W) of the round_sat instances in `hw/tb/round_sat_bank.sv`, 12-bit input.
+const ROUND_SAT_SETS: [(u32, u32); 8] = [
+    (1, 12),
+    (1, 10),
+    (4, 9),
+    (4, 8),
+    (4, 6),
+    (8, 4),
+    (11, 2),
+    (11, 1),
+];
+
+/// Vectors for `hw/rtl/round_sat.sv` (gate G3: `make -C hw round_sat`): every 12-bit input,
+/// narrowed by `requantize(HalfEven, Saturate)` from `SHIFT + OUT_W − 1` to `OUT_W − 1`
+/// fractional bits: drop SHIFT bits, keep OUT_W (`rx_front_fixed::narrow` with a value that may
+/// exceed its nominal width, as the DC blocker's does).
+fn round_sat_vectors(out: &mut impl Write) -> io::Result<()> {
+    const IN_W: u32 = 12;
+    writeln!(
+        out,
+        "# rvec round_sat — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    let sets: Vec<String> = ROUND_SAT_SETS
+        .iter()
+        .map(|(s, w)| format!("s{s}w{w}"))
+        .collect();
+    writeln!(
+        out,
+        "# <12-bit input> then one output per set: {}",
+        sets.join(" ")
+    )?;
+    for x in -(1i64 << (IN_W - 1))..(1i64 << (IN_W - 1)) {
+        let mut fields = vec![x.to_string()];
+        for (shift, w) in ROUND_SAT_SETS {
+            let q = QFormat::new(w, w - 1).map_err(io::Error::other)?;
+            let v = requantize(
+                x,
+                shift + (w - 1),
+                q,
+                Rounding::HalfEven,
+                Overflow::Saturate,
+            );
+            fields.push(v.to_string());
+        }
+        writeln!(out, "{}", fields.join(" "))?;
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let stdout = io::stdout();
@@ -377,10 +427,11 @@ fn main() -> ExitCode {
         "ofdm-symbols" => ofdm_symbols(&mut out),
         "ppdu-frames" => ppdu_frames(&mut out),
         "ltf_corr" => ltf_corr_vectors(&mut out),
+        "round_sat" => round_sat_vectors(&mut out),
         "rx-front-rom" => rx_front_rom(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, ltf_corr, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
