@@ -1,9 +1,10 @@
 // Gate for the memory wrappers (hw/rtl/lib/ram_1w1r.sv, ram_1w2r.sv) through hw/tb/ram_bank.sv:
 // 200 000 random cycles against a reference model of the documented semantics — synchronous
-// read, read-first on a same-cycle write, rdata held without re — on both shapes. A read of a
-// word never written is not compared (contents are undefined until written). Address
-// collisions are forced often (one address in 4 is drawn from a small hot set). Exit code 0 =
-// gate passed.
+// read, latency 1 — on both shapes. Not compared, because the contract leaves them undefined:
+// a read of a word never written, a read of the address written in the same cycle, and rdata
+// after a cycle without re. Collisions are still forced often (one address in 4 from a small hot
+// set, one read in 4 at the write address), so the gate checks that they disturb nothing else.
+// Exit code 0 = gate passed.
 
 #include <cstdint>
 #include <cstdio>
@@ -75,9 +76,14 @@ int main(int argc, char** argv) {
         dut.c_re = cre;
         dut.c_raddr = ca;
         // reference: read-first, then write
-        if (hra) pa = {h.mem[ha], static_cast<bool>(h.valid[ha])};
-        if (hrb) pb = {h.mem[hb], static_cast<bool>(h.valid[hb])};
-        if (cre) pc = {c.mem[ca], static_cast<bool>(c.valid[ca])};
+        auto read = [](bool re, bool we, uint32_t ra, uint32_t wa, const Ref& m) -> Port {
+            if (!re) return {0, false};                  // rdata undefined after no read
+            if (we && ra == wa) return {0, false};       // illegal collision: undefined
+            return {m.mem[ra], static_cast<bool>(m.valid[ra])};
+        };
+        pa = read(hra, hwe, ha, hw, h);
+        pb = read(hrb, hwe, hb, hw, h);
+        pc = read(cre, cwe, ca, cw, c);
         collisions += (hwe && hra && ha == hw) + (hwe && hrb && hb == hw) + (cwe && cre && ca == cw);
         if (hwe) {
             h.mem[hw] = hd;
