@@ -118,7 +118,8 @@ Command: `cargo test --release -p radio-phy --test g1_rx_front --test g1_rx_fron
 (rustc 1.98.1, base 2ad2f79). Test-first: the gate was written against the planned API and
 failed to compile; the first run of the model then failed 9 of 14 tests (findings below).
 
-### Decision (founder delegated "pick by data")
+### Decision (founder delegated "pick by data"; confirmed 2026-11-18: "берем А", with a follow-up
+to tune it to the maximum — BACKLOG R0-08c)
 **Detector A — normalised lag-16 autocorrelation, L = 48, θ = 0.575, 4 consecutive samples.**
 Pd within 4 µs, CFO uniform ±235 kHz, 4000 frames per point:
 
