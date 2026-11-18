@@ -865,3 +865,110 @@ mtime gotcha in CLAUDE.md). Survivors are therefore re-run before they are trust
 
 **Not yet:** a Vivado OOC timing run. The NCO's 13 × 11 products and the CORDIC's 18-bit adders
 are each registered, so they are not expected to be critical; it will be run with the top level.
+
+## 2026-11-18 · G3 · R0-08b part 3d: DC blocker and detector A RTL; corrected mutation records
+
+**Blocks**
+- **`hw/rtl/dc_block.sv`** is the causal DC blocker (golden `DcFixed`).
+  - Accumulator M = m·2^10 in 24 bits; e = x·2^F − M; M += e >>> k.
+  - k = min(⌊log2(n + 1)⌋, 7), from a sample counter that stops once k = 7.
+  - y = e·2^−F through `round_sat` to 13 bits. Saturation is unreachable: |e|·2^−F < 4095.5.
+  - y is registered at the edge that takes x (latency 0 in the testbench's count).
+- **`hw/rtl/det_a.sv`** is detector A with its run counter (golden `DetFixed` and the counter of
+  the new public `detector_trace_fixed`, which `detections_fixed` now uses).
+  - A 64-deep history and exact running sums: C 32 bits, P1 and P2 31 bits.
+  - The comparison 2^16·|C|² ≥ 21668·P1·P2 is done in 80 bits, with no normalisation.
+  - The model's add (n ≥ 16), subtract (n ≥ 64) and full-window (n ≥ 63) rules are
+    reproduced by a saturating sample counter, so the history needs no reset.
+  - Run counter to 4, with a `clear` input for the top level's acquisition.
+  - 4 pipeline stages; fire/event come 4 edges after the sample's x edge.
+- `hw/tb/det_chain.sv` wires the two as the top level will.
+
+**Vectors** (`rvec det`): x, y, fire and event per sample.
+- Four received frames.
+- Noise alone at −30 dBFS: no events.
+- A CW tone at the noise level and at +10 dB.
+- A −20 dB AGC step before a frame.
+- A DC offset of (+1500, −1200) under a frame.
+- 2000 full-scale random samples.
+- Full-scale steps.
+- Totals: 18 943 samples, 5302 fires, 1306 events.
+
+**Evidence**
+- `make -C hw det`: 0 mismatches in y, fire and event.
+- Exact latencies: y 0, fire/event 4.
+- Junk samples in flight at each reset never come out.
+- Idle cycles carry garbage inputs.
+- The stub fails with 67 024 mismatches.
+
+**Mutations, `det`** (each built from scratch)
+| Mutation | Mismatches |
+|---|---|
+| no start-up gear | 6686 |
+| logical shift in the M update | 32 071 |
+| sample counter wraps | 16 563 |
+| y off by one LSB of e | 23 |
+| subtract one sample early | 4226 |
+| add one sample early | 5094 |
+| threshold halved | 3294 |
+| no P > 0 check | 103 |
+| run length 3 | 1315 |
+| conjugate on the wrong factor | 9930 |
+| first window one sample late | 1469 |
+
+- "P2 subtracts the wrong term" is stopped by lint, because a term becomes unused.
+- `clear` is driven 0 here, so its gate is the top level's.
+
+**Correction to parts 3a and 3c: stale builds.** Two mutations in a row reported the same count
+(713/713 and 8545/8545 in 3c, 6475/6475 in 3a). Verilator's incremental build had reused the
+model of the previous mutation after the file was restored, so a result could belong to the
+previous mutation. Rerun with clean builds:
+- **3c, CORDIC:**
+
+  | Mutation | Mismatches |
+  |---|---|
+  | `y ≥ 0` | 554 |
+  | no half turn | 2208 |
+  | logical shift, y ≤ 0 branch | 6170 |
+  | normalise to 14 bits | 1321 |
+  | right shift one too far | 2397 |
+  | zero not special | 4 |
+  | valid not cleared | 5877 |
+  | out_valid early | 11 856 |
+
+- **3c, NCO:**
+
+  | Mutation | Mismatches |
+  |---|---|
+  | one bit too few dropped | 8545 |
+  | table address bit 0 | 5900 |
+  | quadrants 1/3 | 1698 |
+  | phase every clock | 6487 |
+  | conjugate | 8430 |
+  | valid not cleared | 700 |
+
+- **3a, `ltf_corr`:** tap index (pair 31 uses tap 1) 6458; re/im swap 6418.
+
+Every mutation is still caught; the counts in the 3a and 3c tables above are superseded.
+
+**Pre-PR review (fresh agent, code only), 2026-11-18:** nothing blocking.
+- Its stress harness ran ≈ 4.9 M samples with 0 mismatches. The streams covered:
+  - a 300 k-sample segment;
+  - cuts at n = 15, 16, 62, 63 and 64;
+  - P1 and P2 returning to 0 after being positive;
+  - the largest DC step;
+  - period-16 full-scale patterns.
+- The harness bites: with no P > 0 check it gives 15 132 mismatches, and with CMP_W = 72
+  135 941.
+- `clear` aligned to stage 4 matched the model's reset at `apply_pending` (0 mismatches), and
+  misaligned versions failed. The header now states this contract; its gate is the top level's.
+- Fixed after the review:
+  - the counter width is derived from the parameters;
+  - the stage-3 multiplies use natural widths;
+  - idle garbage is on both inputs.
+- Open:
+  - the `g_narrow` path (DET_BITS < Y_BITS) has no G3 evidence while D = Y_BITS;
+  - the top bits of C, P and M are unreachable through the DC blocker (by analysis), so a
+    mutation that shrinks them by one bit is not caught.
+`hw/Makefile` now builds every gate from scratch, so the hazard is gone for gates and mutation
+runs alike.

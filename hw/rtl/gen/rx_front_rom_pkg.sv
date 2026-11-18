@@ -16,6 +16,14 @@ package rx_front_rom_pkg;
     localparam int NCO_PHASE_BITS = 22;
     localparam int NCO_LUT_BITS   = 9;
     localparam int NCO_AMP_BITS   = 11;
+    localparam int DET_BITS       = 13;
+    localparam int DC_FRAC        = 10;
+    localparam int DC_SHIFT       = 7;
+    localparam int STF_PERIOD     = 16;
+    localparam int AUTOCORR_LEN   = 48;
+    localparam int DET_RUN        = 4;
+    localparam int THETA_NUM      = 21668;
+    localparam int THETA_SHIFT    = 16;
 
     // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().
     function automatic logic signed [7:0] ltf_tap_re(input int k);
