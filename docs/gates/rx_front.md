@@ -563,3 +563,71 @@ after them, on the final model.)
     needs 33-bit squares/products (or per-term normalisation, modelled first).
 12. The 128-tap complex correlator (12 × 8-bit products) is the largest block; 4-bit taps cost
     6/1200 timing disagreements alone — revisit with an area estimate.
+
+## 2026-11-18 · G3 · R0-08b part 3a: LTF search correlator RTL (open question 12)
+
+The receiver front's RTL is split into blocks, one PR each, all bit-exact with `RxFrontFixed`:
+(a) the LTF search correlator (this entry); (b) CORDIC and NCO; (c) DC blocker, detector A
+and run counter; (d) the top level: provisional latch, |c|², energy window, search control and
+the acquisition decision. The model now exposes the correlator as `ltf_corr` (used by
+`RxFrontFixed::push`) and a per-sample trace (`push_traced`: y, z, correlator output) for the
+vectors of later blocks.
+
+### Design (`hw/rtl/ltf_corr.sv`)
+- One sample per `in_valid`, never stalls; output 5 clocks after the clock edge that takes the
+  sample, from the 128th sample after reset on. Window = 128 × 2 × 12-bit flops (all 128 taps
+  are read every sample, so a memory would not save the storage).
+- Two exact folds (open question 12): T1 = T2 gives u(k) = z(k) + z(k+64); the LTF is real in
+  frequency, so the quantised taps are Hermitian, t(64−k) = conj(t(k)), t(0) and t(32) real
+  (unit test `ltf_taps_are_hermitian` for T = 2…16; `rvec` refuses non-Hermitian taps). Pairs
+  (k, 64−k) then need 4 real products instead of 8: **128 constant 14 × 8-bit multiplications
+  instead of 512 general 12 × 8** (plus 128 + 124 adders before them), all exact integer sums.
+- Narrowing to K = 20 by `hw/rtl/round_sat.sv` (half to even, saturating), the generic form of
+  the model's `narrow`, reused by later blocks.
+- Taps come from a generated package, `hw/rtl/gen/rx_front_rom_pkg.sv` (`rvec rx-front-rom`,
+  `make -C hw vectors`); `scripts/check.sh` now diffs `hw/rtl/gen` as it does `hw/vectors`.
+  Later blocks add the CORDIC and NCO tables to it.
+
+### Evidence
+Command: `make -C hw ltf_corr` (Verilator 5.054, `-Wall` clean via `make -C hw lint`).
+Vectors `hw/vectors/ltf_corr.txt` (`rvec ltf_corr`): four received frames through
+`RxFrontFixed` (its own z and correlator trace: AWGN 25 and 4 dB, TGn D 9 dB, a −3 dBFS frame),
+2000 uniformly random full-scale samples, and extremes (z matched to the tap signs at full scale,
+its negation, all −2048, alternating corners). The testbench inserts idle cycles (after every
+5th and 13th sample) so the window must advance on `in_valid` only.
+Result: 9 segments, 7618 samples, 6475 outputs, **0 mismatches**. Stub RTL first: 6475/6475
+mismatches.
+
+Mutation check (each restored with `cp` + `touch`):
+| Mutation | Mismatches |
+|---|---|
+| Hermitian fold: sign of the b·(ur_m − ur_k) term | 6371 |
+| T1/T2 fold index off by one | 6425 |
+| tap index off by one | 6475 |
+| tap re/im swapped | 6475 |
+| rounding ties up (half-up) | 25 |
+| rounding ties down | 34 |
+| out_valid one sample early | 6467 |
+| window shifts every clock instead of on in_valid | 6458 |
+
+`round_sat` has its own gate (pre-PR review): `make -C hw round_sat` drives every 12-bit input
+through eight parameter sets (`hw/tb/round_sat_bank.sv`: SHIFT 1/4/8/11, OUT_W at its bound
+IN_W − SHIFT + 1 and below, saturating and not) against `requantize(HalfEven, Saturate)`
+(`hw/vectors/round_sat.txt`, `rvec round_sat`): 4096 inputs, 32 768 checks, 0 mismatches.
+Mutations: no positive / no negative saturation 3714 mismatches each, ties up 1833, ties down
+1829, sticky missing bit 0 1829; an out-of-range OUT_W stops elaboration (`$error`). In
+`ltf_corr` itself the saturation branch is unreachable (|c| < 2^26, narrowed < 2^18).
+
+### Open questions
+13. **Acquisition decision in RTL (PHY architecture, risk point — independent review and
+    founder decision before part d).** `decide()` re-reads the history at the decision sample:
+    final coarse sum (96 products), rotation of 128 + w samples, 2·w 64-tap correlations and the
+    fine sum (88) — about 1900 complex MACs — and its result feeds back at once (search closed
+    or restarted, run counter reset). Either the hardware does it within one sample (≈ 240
+    MACs per clock at 8 clocks/sample), or the model gains an explicit decision latency
+    (search frozen for L samples, result applied at n + L) and G1/G2 are rerun. The latter is
+    the likely choice; measure the Pd/timing effect first.
+14. The provisional latch at an event is C(n − 24) + C(n − 72) of the detector's own lag-16
+    sum (windows [n−87, n−40] and [n−135, n−88]): a 72-deep delay line of C instead of a second
+    accumulator. The CORDIC latency then delays the NCO path: run NCO/correlator/search a fixed
+    L samples behind the detector (bit-exact, a delay line on y), part b/d.

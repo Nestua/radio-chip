@@ -14,14 +14,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 step "rust tests (golden model, G1)"
 cargo test --workspace -q
 
-step "vectors are up to date (regenerate + diff)"
+step "vectors and generated RTL are up to date (regenerate + diff)"
 make -C hw vectors >/dev/null
-if ! git diff --quiet -- hw/vectors; then
-    git --no-pager diff --stat -- hw/vectors
-    echo "hw/vectors changed after regeneration: commit the regenerated files" >&2
+if ! git diff --quiet -- hw/vectors hw/rtl/gen; then
+    git --no-pager diff --stat -- hw/vectors hw/rtl/gen
+    echo "hw/vectors or hw/rtl/gen changed after regeneration: commit the regenerated files" >&2
     exit 1
 fi
-untracked=$(git ls-files --others --exclude-standard -- hw/vectors)
+untracked=$(git ls-files --others --exclude-standard -- hw/vectors hw/rtl/gen)
 if [ -n "$untracked" ]; then
     echo "untracked vector files: $untracked — commit them" >&2
     exit 1
