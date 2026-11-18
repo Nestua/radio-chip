@@ -24,6 +24,9 @@ package rx_front_rom_pkg;
     localparam int DET_RUN        = 4;
     localparam int THETA_NUM      = 21668;
     localparam int THETA_SHIFT    = 16;
+    // Provisional latch: COARSE_LEN lag-16 products ending LATCH_LAG samples back.
+    localparam int LATCH_LAG      = 24;
+    localparam int COARSE_LEN     = 96;
 
     // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().
     function automatic logic signed [7:0] ltf_tap_re(input int k);

@@ -972,3 +972,119 @@ Every mutation is still caught; the counts in the 3a and 3c tables above are sup
     mutation that shrinks them by one bit is not caught.
 `hw/Makefile` now builds every gate from scratch, so the hazard is gone for gates and mutation
 runs alike.
+
+## 2026-11-19 · G3 · R0-08b part d, step 1: provisional latch and the delayed NCO path
+
+**Blocks**
+- **`hw/rtl/rx_latch.sv`** (golden: `RxFrontFixed::push` steps 1–2, `SampleTrace.step`).
+  - The latch sum is C(n − 24) + C(n − 72) from a 73-deep delay line of `det_a`'s C
+    (`ram_1w2r`, 2 × 32 bits; written with C(n) and read at n − 24 and n − 72 in the same
+    cycle, never the written address). ADR 0006 said "72-deep"; reading n − 72 while writing n
+    needs 73.
+  - Events before sample 135 do not latch (a saturating sample counter, the model's
+    `checked_sub`).
+  - CORDIC, then the step: angle·2^(P−A−S). The model's rounding in `per_sample` is a no-op at
+    P − A ≥ S (an elaboration check), so the RTL has no rounding adder; the "no rounding"
+    mutation was equivalent, which is how this was found.
+  - The NCO path runs `D_SAMPLES` behind: sample k leaves when sample k + D enters, with the
+    step in effect at k. Latch results carry the tag of their sample and wait in a small FIFO,
+    so the output does not depend on when the CORDIC answers, only on the contract: the
+    result is back within D samples. Measured: 23 clocks from the sample's x edge, so
+    D·R ≥ 23: D = 3 at R = 8, 4 at R = 6, 5 at R = 5. These are ADR 0006's examples, but its
+    formula "⌈23/R⌉ + 1" has one sample more than they do; the examples are right, and the
+    margin is 1–2 clocks, not a sample. A register added on the CORDIC path (step 3's
+    arbiter) makes D = 4 at R = 8.
+  - A simulation check (`CHECK_TIMING`) stops the run when the contract is broken. Hardware
+    has no guard: a late result is applied late, and one later than its sample blocks the
+    following latches for up to 256 samples (the module header says so).
+- **`det_a`** now exports C of the sample in stage 2 (`c_valid`, `c_re`, `c_im`).
+- `hw/tb/latch_chain.sv` wires dc_block → det_a → rx_latch → nco as the top level will. `clear`
+  comes from the vectors (the sample an acquisition is applied at) until the decision engine
+  exists, delayed to det_a's stage 4.
+- Model: `SampleTrace.event` added (trace only). The ROM package gains `LATCH_LAG` and
+  `COARSE_LEN`.
+
+**Vectors** (`rvec latch`): x, acq, event, step and z per sample from `push_traced`; 11 segments,
+14 787 samples, 1794 events (75 before the latch start), 1641 step changes, 7 acquisitions.
+- The four frames of `det`.
+- A tone 10 dB over the noise from sample 0.
+- Clean tones with an event exactly at sample 135 (the first that latches) and at 134.
+- Two frames under a weak tone.
+- A frame under a tone 3 dB above it: the acquisition falls inside a run of fires, so the
+  counter reset moves later events. `rvec` refuses to write the file unless it does.
+- Full-scale random samples and full-scale steps.
+
+**Evidence** (`make -C hw latch`: three builds, four runs; branch commit 3e17fc9 and its review
+fixes, squashed into the PR of this entry)
+| Build | Run | Mismatches (event, step, z) |
+|---|---|---|
+| D = 3 | R = 8 | 0 |
+| D = 3 | R = 16 | 0 |
+| D = 4 | R = 6 | 0 |
+| D = 5 | R = 5 | 0 |
+
+- Samples come every R clocks plus an idle clock after every 5th and two after every 13th; idle
+  inputs carry garbage (including `in_clear` = 1).
+- Exact latencies: event 4 edges after its sample; step 1 and z 5 edges after sample k + D.
+- Before each segment: a one-clock reset with a latch in flight (the segment up to its first
+  latching event, then 8 clocks: the CORDIC is mid-way and the FIFO holds the entry). 10 such
+  resets per run. Nothing may reach the run that follows.
+- Three junk samples in the detector's pipeline at each segment's end reset: nothing comes out.
+- Registers without a reset and the delay line start from random values
+  (`+verilator+rand+reset+2`).
+- D = 3 at R = 6 (contract broken) stops with the `CHECK_TIMING` error.
+- The first run failed as expected for a wrong assumption of mine: z latency is 5, not 4.
+
+**Mutations** (each built from scratch, three builds each; the counts were equal across builds)
+| Mutation | Mismatches |
+|---|---|
+| old window read at n − 73 | 16 185 |
+| lag window read at n − 25 | 16 556 |
+| no start gate | 6979 |
+| start gate one sample early | 6146 |
+| start gate one sample late | 268 |
+| one window only | 19 999 |
+| im of the old window replaced by its re | 20 389 |
+| step shifted one bit too far | 20 018 |
+| step one sample late | 11 013 |
+| step one sample early | stopped by `CHECK_TIMING` |
+| NCO path delay D − 1 | 14 531 |
+| result written at the issue pointer | 19 694 |
+| step register not updated | 18 344 |
+| `clear` one stage early | 111 |
+| `clear` never | 111 |
+| C tapped one stage late | 16 825 |
+| CORDIC valid chain not reset | 18 711 |
+| FIFO pointers not reset | stopped by `CHECK_TIMING` ("a latch result was skipped") |
+| step register not reset | 19 075 |
+| emission tag not reset | stopped by `CHECK_TIMING` |
+
+Three mutations survived the first vector set and each led to a change:
+- "start gate one sample late": no event fell on sample 135. Added the two clean-tone segments.
+- "`clear` early" and "`clear` never": no acquisition fell inside a run of fires. Added the
+  strong-tone segment. This is the gate of the `clear` contract left open in part 3d.
+- "no rounding in `per_sample`": equivalent; the adder was removed.
+
+**Pre-PR review (fresh agent, code only), 2026-11-19:** no RTL bug.
+- Its stress harness: 3 × 40 segments of ≈ 42 000 samples from `push_traced` (tones at the ±π
+  angle edge and at zero CFO, hops, bursts, DC), random idle gaps, resets after random prefixes;
+  D/R from 3/8 to 30/1, including back-to-back samples. 0 mismatches. D = 22 at R = 1 and
+  D = 3 at R = 7 trip the check, D = 23 at R = 1 passes: the bound is exactly D·R ≥ 23.
+- Fixed after the review:
+  - a reset with a latch in flight was not exercised (the old run drained 40 clocks first):
+    "CORDIC valid chain not reset" passed. The in-flight reset above was added; the four reset
+    mutations in the table are its evidence;
+  - the contract in the module header (the formula, the zero margin, the silent failure in
+    hardware);
+  - random initial values in the gate's runs.
+- Noted, not changed: the resets of the delay line's write address and of the read-valid flag
+  are redundant (removing either changes nothing: the start gate covers stale contents). They
+  stay, for a defined state after reset.
+- Not covered by the gate: R < 5, and jitter that removes clocks (the pattern only adds them).
+  The reviewer's harness covered both.
+
+**Open**
+- The CORDIC is inside `rx_latch`. Sharing it with the decision engine (ADR 0006, latch
+  priority) moves it out; that is step 3's change and step 3's gate.
+- With events at least `DET_RUN` = 4 samples apart, the FIFO holds two results only at D = 5;
+  D ≤ 4 never has more than one.

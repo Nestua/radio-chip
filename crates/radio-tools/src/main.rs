@@ -20,7 +20,9 @@ use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, IfftConfig};
 use radio_phy::ppdu::{build_ppdu, frame_hash, Rate};
-use radio_phy::rx_front::{RxConfig, AUTOCORR_LEN, LTF_SYMBOL_LEN, PAIR_LEN, STF_PERIOD};
+use radio_phy::rx_front::{
+    RxConfig, AUTOCORR_LEN, COARSE_LEN, LATCH_LAG, LTF_SYMBOL_LEN, PAIR_LEN, STF_PERIOD,
+};
 use radio_phy::rx_front_fixed::{
     cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
     to_adc, FixedRxConfig, RxFrontFixed, ADC_FULL_SCALE, IQ, Y_BITS,
@@ -364,6 +366,9 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   localparam int DET_RUN        = {det_run};\n\
          \x20   localparam int THETA_NUM      = {};\n\
          \x20   localparam int THETA_SHIFT    = {};\n\
+         \x20   // Provisional latch: COARSE_LEN lag-16 products ending LATCH_LAG samples back.\n\
+         \x20   localparam int LATCH_LAG      = {LATCH_LAG};\n\
+         \x20   localparam int COARSE_LEN     = {COARSE_LEN};\n\
          \n\
          \x20   // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().",
         fx.z_bits,
@@ -775,6 +780,203 @@ fn det_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// One latch segment: `reset <label>`, then per sample
+/// `<x re> <x im> <acq> <event> <step> <z re> <z im>` from `RxFrontFixed::push_traced`. `acq` is
+/// 1 at the sample an acquisition is applied (the RTL drives `det_a.clear` from it until the
+/// decision engine exists, part d step 3). Returns (events, latched events, acquisitions).
+fn latch_segment(
+    out: &mut dyn Write,
+    label: &str,
+    x: &[(i16, i16)],
+) -> io::Result<(usize, usize, usize)> {
+    let mut rx = RxFrontFixed::new(RxConfig::new(20e6), FixedRxConfig::default());
+    let gate = LATCH_LAG + STF_PERIOD + COARSE_LEN;
+    let (mut events, mut latched, mut acqs) = (0, 0, 0);
+    writeln!(out, "reset {label}")?;
+    for (n, s) in x.iter().enumerate() {
+        let (acq, t) = rx.push_traced(*s);
+        events += usize::from(t.event);
+        latched += usize::from(t.event && n + 1 >= gate);
+        acqs += usize::from(acq.is_some());
+        writeln!(
+            out,
+            "{} {} {} {} {} {} {}",
+            s.0,
+            s.1,
+            u8::from(acq.is_some()),
+            u8::from(t.event),
+            t.step,
+            t.z.0,
+            t.z.1
+        )?;
+    }
+    Ok((events, latched, acqs))
+}
+
+/// Vectors for the provisional latch and the NCO path (gate G3: `make -C hw latch`):
+/// `dc_block` → `det_a` → `rx_latch` → `nco` against `RxFrontFixed` sample by sample (the
+/// NCO step after each sample's latch, and the rotated sample z). Segments: the four received
+/// frames of `det`; a CW tone 10 dB over the noise from sample 0 (events before the latch's
+/// first sample 135, which must not latch, and a step that keeps changing); clean tones timed to
+/// put an event exactly at sample 135 (the first that latches) and at 134 (the last that does
+/// not); two frames under a tone (acquisitions, then events again on the tone); a frame under a
+/// tone 3 dB above it (an acquisition inside a run of fires: the counter reset moves the events
+/// after it); full-scale random samples and full-scale steps (the widest C).
+fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    writeln!(
+        out,
+        "# rvec latch — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# RxFrontFixed (default widths, D = {}, A = {}, P = {}, Z = {}) per sample.",
+        fx.det_bits, fx.angle_bits, fx.nco_phase_bits, fx.z_bits
+    )?;
+    writeln!(
+        out,
+        "# reset <label> starts a segment; then <x re> <x im> <acq> <event> <step> <z re> <z im>"
+    )?;
+    let mut total = (0, 0, 0);
+    let mut early = 0;
+    let mut seg = |out: &mut dyn Write, label: &str, x: &[(i16, i16)]| -> io::Result<()> {
+        let (e, l, a) = latch_segment(out, label, x)?;
+        total = (total.0 + e, total.1 + l, total.2 + a);
+        early += e - l;
+        Ok(())
+    };
+    let scenes = [
+        ("frame_awgn_25dB", 25.0, -15.0, false, 0x6301u64),
+        ("frame_awgn_4dB", 4.0, -15.0, false, 0x6302),
+        ("frame_tgn_d_9dB", 9.0, -15.0, true, 0x6303),
+        ("frame_hot_-3dBFS", 30.0, -3.0, false, 0x6304),
+    ];
+    for (label, snr, dbfs, tgn, seed) in scenes {
+        seg(out, label, &rx_scene(snr, dbfs, tgn, seed)?)?;
+    }
+    let fs = 20e6;
+    let full = f64::from(ADC_FULL_SCALE);
+    let mut rng = Rng::new(0x1A7C_0001);
+    let pn = (full * 10f64.powf(-30.0 / 20.0)).powi(2);
+    let noise = awgn(&vec![(0.0, 0.0); 3000], 0.0, pn, &mut rng);
+    seg(
+        out,
+        "tone_10dB_from_0",
+        &to_adc(&add_tone(&noise, 10.0 * pn, 0.9e6, fs, 0.3), 1.0),
+    )?;
+    // An event at exactly the first latching sample (n = gate − 1) and one just before it. A
+    // clean tone fires from the first full window whatever its start, with events every
+    // DET_RUN samples; eight full-scale samples break the run, and their position sets the
+    // phase of the events after them.
+    let gate = LATCH_LAG + STF_PERIOD + COARSE_LEN;
+    let burst = [
+        (2047i16, -2048i16),
+        (-2048, 2047),
+        (2047, 2047),
+        (-2048, -2048),
+    ];
+    for (label, at) in [
+        ("event_at_first_latch", gate - 1),
+        ("event_before_first_latch", gate - 2),
+    ] {
+        let tone = to_adc(
+            &add_tone(&vec![(0.0, 0.0); 400], 0.01 * full * full, 0.9e6, fs, 0.3),
+            1.0,
+        );
+        let scene = (20..20 + 2 * STF_PERIOD).find_map(|pos| {
+            let mut x = tone.clone();
+            for (k, v) in x.iter_mut().skip(pos).take(8).enumerate() {
+                *v = burst[(k / 2) % 4];
+            }
+            let mut rx = RxFrontFixed::new(RxConfig::new(fs), fx);
+            let mut hit = false;
+            for (n, s) in x.iter().enumerate() {
+                hit |= rx.push_traced(*s).1.event && n == at;
+            }
+            hit.then_some(x)
+        });
+        let x = scene
+            .ok_or_else(|| io::Error::other(format!("no burst position puts an event at {at}")))?;
+        seg(out, label, &x)?;
+    }
+    let mut two: Vec<(f64, f64)> = Vec::new();
+    for seed in [0x1A7C_0002u64, 0x1A7C_0003] {
+        two.extend(
+            rx_scene(20.0, -20.0, false, seed)?
+                .iter()
+                .map(|&(a, b)| (f64::from(a), f64::from(b))),
+        );
+    }
+    let p_two = mean_power(&two);
+    seg(
+        out,
+        "two_frames_under_tone",
+        &to_adc(&add_tone(&two, 0.05 * p_two, -1.7e6, fs, 2.0), 1.0),
+    )?;
+    // An acquisition in the middle of a run of fires: a tone 3 dB over the frame keeps detector
+    // A firing through the preamble (5.1 MHz is near a multiple of fs/16, so the search still
+    // finds the LTF). The counter reset at the acquisition then moves the later events: this
+    // is the gate of `det_a.clear` and its alignment.
+    {
+        let cfg = IfftConfig::tx_default();
+        let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+        let frame: Vec<(f64, f64)> = build_ppdu(&[0x5a; 3], Rate::R6, 0x5d, &cfg)
+            .map_err(io::Error::other)?
+            .iter()
+            .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+            .collect();
+        let p = mean_power(&frame);
+        let mut x = vec![(0.0, 0.0); 300];
+        x.extend_from_slice(&frame);
+        x.extend(vec![(0.0, 0.0); 300]);
+        let mut rng = Rng::new(0x1A7C_0005);
+        let x = awgn(&add_tone(&x, 2.0 * p, 5.1e6, fs, 0.7), 25.0, p, &mut rng);
+        let x = to_adc(&x, 0.1 * full / (3.0 * p).sqrt());
+        let mut rx = RxFrontFixed::new(RxConfig::new(fs), fx);
+        let with_clear: Vec<bool> = x.iter().map(|s| rx.push_traced(*s).1.event).collect();
+        let without = detector_trace_fixed(&x, &RxConfig::new(fs), &fx);
+        if with_clear.iter().zip(&without).all(|(a, b)| *a == b.event) {
+            return Err(io::Error::other(
+                "the acquisition's counter reset changes no event in frame_under_strong_tone",
+            ));
+        }
+        seg(out, "frame_under_strong_tone", &x)?;
+    }
+    let mut bits = XorShift32(0x1A7C_0004);
+    let mut word = || (0..32).fold(0u32, |acc, _| (acc << 1) | u32::from(bits.next_bit()));
+    let lo = -ADC_FULL_SCALE;
+    let random: Vec<(i16, i16)> = (0..2000)
+        .map(|_| {
+            let v = |w: u32| (i64::from(w % 4096) + i64::from(lo)) as i16;
+            (v(word()), v(word()))
+        })
+        .collect();
+    seg(out, "random_full_scale", &random)?;
+    let hi = (ADC_FULL_SCALE - 1) as i16;
+    let steps: Vec<(i16, i16)> = (0..1200)
+        .map(|k| match (k / 150) % 4 {
+            0 => (hi, -hi - 1),
+            1 => (-hi - 1, hi),
+            2 => (hi, hi),
+            _ => (-hi - 1, -hi - 1),
+        })
+        .collect();
+    seg(out, "full_scale_steps", &steps)?;
+    // The gate needs every case it claims to cover.
+    if total.1 == 0 || early == 0 || total.2 == 0 {
+        return Err(io::Error::other(format!(
+            "latch vectors miss a case: {} events, {} latched, {early} before the latch start, {} acquisitions",
+            total.0, total.1, total.2
+        )));
+    }
+    writeln!(
+        out,
+        "# totals: {} events, {} latched, {early} before the latch start, {} acquisitions",
+        total.0, total.1, total.2
+    )?;
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let stdout = io::stdout();
@@ -789,9 +991,10 @@ fn main() -> ExitCode {
         "cordic" => cordic_vectors(&mut out),
         "nco" => nco_vectors(&mut out),
         "det" => det_vectors(&mut out),
+        "latch" => latch_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, cordic, nco, det, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, cordic, nco, det, latch, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
