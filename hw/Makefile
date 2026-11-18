@@ -15,16 +15,20 @@
 VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
-BLOCKS    := scrambler round_sat ltf_corr cordic nco det
+# Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
+VEC_BLOCKS := scrambler round_sat ltf_corr cordic nco det
+BLOCKS    := ram $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
 GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
 # Sources and top module per block, packages first.
+TOP_ram       := ram_bank
 TOP_scrambler := scrambler
 TOP_round_sat := round_sat_bank
 TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
 TOP_nco       := nco
 TOP_det       := det_chain
+SRC_ram       := rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv tb/ram_bank.sv
 SRC_scrambler := rtl/scrambler.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
 SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
@@ -40,8 +44,14 @@ lint:
 	$(foreach b,$(BLOCKS),$(VERILATOR) --lint-only -Wall lint.vlt --top-module $(TOP_$(b)) $(SRC_$(b)) &&) true
 
 vectors:
-	cd .. && for b in $(BLOCKS); do $(RVEC) $$b > hw/vectors/$$b.txt || exit 1; done
+	cd .. && for b in $(VEC_BLOCKS); do $(RVEC) $$b > hw/vectors/$$b.txt || exit 1; done
 	cd .. && mkdir -p hw/rtl/gen && $(RVEC) rx-front-rom > hw/$(GEN_RTL)
+
+ram:
+	rm -rf obj_dir/ram && mkdir -p obj_dir/ram
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/ram --top-module ram_bank \
+		$(SRC_ram) tb/tb_ram.cpp -o sim_ram
+	./obj_dir/ram/sim_ram
 
 scrambler: vectors/scrambler.txt
 	rm -rf obj_dir/scrambler && mkdir -p obj_dir/scrambler
