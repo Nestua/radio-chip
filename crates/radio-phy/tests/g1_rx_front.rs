@@ -29,7 +29,8 @@ use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{
     acquire, acquisitions, autocorrelation_metric, backoff_samples, cfo_from_correlation, correct,
     dc_block, detect, detections, lag_correlation, long_training_symbol, short_training_period,
-    Detector, RxConfig, RxFront, COARSE_LEN, FINE_LEN, FINE_WEIGHT, GI_LEN, LTF_SYMBOL_LEN,
+    Acquisition, Detector, RxConfig, RxFront, COARSE_LEN, DECISION_LATENCY, FINE_LEN, FINE_WEIGHT,
+    GI_LEN, LTF_SYMBOL_LEN,
 };
 use std::f64::consts::PI;
 
@@ -758,14 +759,14 @@ fn streaming_decisions_are_causal_and_bounded() {
     // decision, or replacing everything after it, gives the same acquisition. The decision rule
     // (running maximum of the energy metric, accepted once 64 + (GI − B) later positions are no
     // larger) bounds the delay: the energy at position i needs samples to i + (GI − B) − 1 + 127,
-    // and the maximum sits at most GI − B before T1, so the decision is made by
-    // T1 + 64 + 2·(GI − B) + 127 at the latest.
+    // and the maximum sits at most GI − B before T1, so the candidate is accepted by
+    // T1 + 64 + 2·(GI − B) + 127 at the latest, and its result applied decision_latency later.
     let mut rng = Rng::new(0x08b3);
     let f = preamble();
     for (fs, snr) in [(FS, 4.0), (FS, 10.0), (FS, 25.0), (10e6, 10.0), (5e6, 10.0)] {
         let cfg = RxConfig::new(fs);
         let w = GI_LEN - backoff_samples(&cfg);
-        let bound = LTF_SYMBOL_LEN + 2 * w + 2 * LTF_SYMBOL_LEN - 1;
+        let bound = LTF_SYMBOL_LEN + 2 * w + 2 * LTF_SYMBOL_LEN - 1 + cfg.decision_latency;
         let max_cfo = if fs < 10e6 { 25e3 } else { 235e3 };
         for _ in 0..100 {
             let lead = 200 + (rng.uniform() * 300.0) as usize;
@@ -787,6 +788,124 @@ fn streaming_decisions_are_causal_and_bounded() {
             assert_eq!(acquire(&y, 0, &cfg), Some(a), "tail replaced");
         }
     }
+}
+
+/// Streams that exercise the decision path: clean packets, a CW spur at and above the noise
+/// (candidates failing confirmation before the packet), an AGC step down before the packet
+/// (the DC transient), and two packets 0–40 samples apart (re-arm after an acquisition).
+fn decision_scenes(rng: &mut Rng) -> Vec<Vec<C>> {
+    let f = preamble();
+    let p = mean_power(&f);
+    let mut out = Vec::new();
+    for k in 0..150 {
+        let lead = 250 + (rng.uniform() * 300.0) as usize;
+        let snr = if k % 2 == 0 { 4.0 } else { 10.0 };
+        let cfo = (rng.uniform() * 2.0 - 1.0) * 235e3;
+        let mut f2 = f.clone();
+        if k % 5 == 4 {
+            // 0–40 samples: down to RIFS (2 µs), so the second packet's detections come while
+            // the first packet's search window is still open.
+            f2.extend(vec![(0.0, 0.0); (rng.uniform() * 40.0) as usize]);
+            f2.extend_from_slice(&f);
+        }
+        let x = scene(&f2, lead, 400, rng.uniform(), cfo, FS, snr, rng);
+        let noise_p = p * 10f64.powf(-snr / 10.0);
+        let x = match k % 5 {
+            1 => add_tone(&x, noise_p, (rng.uniform() * 2.0 - 1.0) * 5e6, FS, 0.3),
+            2 => add_tone(
+                &x,
+                4.0 * noise_p,
+                (rng.uniform() * 2.0 - 1.0) * 5e6,
+                FS,
+                0.3,
+            ),
+            3 => gain_step(&x, lead - 40 - (rng.uniform() * 150.0) as usize, -20.0),
+            _ => x,
+        };
+        out.push(x);
+    }
+    out
+}
+
+#[test]
+fn decision_latency_only_delays_the_result() {
+    // Open question 13: the decision is computed from the history as of the acceptance and
+    // applied decision_latency samples later while the search keeps a fresh running maximum.
+    // Up to 63 + (GI − B) the acquisitions are those of latency 0, each decided exactly L
+    // samples later.
+    let mut rng = Rng::new(0x0d13);
+    let base = RxConfig {
+        decision_latency: 0,
+        ..RxConfig::new(FS)
+    };
+    let w = GI_LEN - backoff_samples(&base);
+    let mut acquired = 0;
+    for (k, x) in decision_scenes(&mut rng).into_iter().enumerate() {
+        let a0 = acquisitions(&x, &base);
+        acquired += a0.len();
+        if k % 5 == 4 && k % 2 == 1 {
+            // Two packets at 10 dB: an acquisition closes its search and re-arms the detector,
+            // so the second packet opens a search of its own.
+            assert_eq!(a0.len(), 2, "scene {k}: {a0:?}");
+            assert!(a0[1].detected_at > a0[0].decided_at, "scene {k}: {a0:?}");
+        }
+        for l in [1, 17, DECISION_LATENCY, LTF_SYMBOL_LEN - 1 + w] {
+            let cfg = RxConfig {
+                decision_latency: l,
+                ..base.clone()
+            };
+            let shifted: Vec<_> = a0
+                .iter()
+                .map(|a| Acquisition {
+                    decided_at: a.decided_at + l,
+                    ..*a
+                })
+                .collect();
+            assert_eq!(acquisitions(&x, &cfg), shifted, "L = {l}");
+        }
+    }
+    assert!(acquired >= 150, "{acquired} acquisitions in 150 scenes");
+
+    // A CW tone near the signal level keeps the detector firing after an acquisition. The run
+    // counter is reset when the result is applied, L samples after the acceptance, so a search
+    // opened in between may start at another sample, with another provisional latch (the
+    // independent review's counterexample). The first acquisition of each stream is unchanged.
+    let f = preamble();
+    let p = mean_power(&f);
+    let (mut moved, mut later) = (0, 0);
+    for _ in 0..60 {
+        let mut f2 = f.clone();
+        f2.extend(vec![(0.0, 0.0); (rng.uniform() * 200.0) as usize]);
+        f2.extend_from_slice(&f);
+        let lead = 250 + (rng.uniform() * 300.0) as usize;
+        let cfo = (rng.uniform() * 2.0 - 1.0) * 235e3;
+        let x = scene(&f2, lead, 400, rng.uniform(), cfo, FS, 20.0, &mut rng);
+        let x = add_tone(&x, p, (rng.uniform() * 2.0 - 1.0) * 5e6, FS, 0.3);
+        let a0 = acquisitions(&x, &base);
+        for l in [DECISION_LATENCY, LTF_SYMBOL_LEN - 1 + w] {
+            let cfg = RxConfig {
+                decision_latency: l,
+                ..base.clone()
+            };
+            let al = acquisitions(&x, &cfg);
+            if let (Some(a), Some(b)) = (al.first(), a0.first()) {
+                let shifted = Acquisition {
+                    decided_at: b.decided_at + l,
+                    ..*b
+                };
+                assert_eq!(*a, shifted, "first acquisition, L = {l}");
+            }
+            later += a0.len().saturating_sub(1);
+            moved += al
+                .iter()
+                .zip(&a0)
+                .skip(1)
+                .filter(|(a, b)| a.detected_at != b.detected_at)
+                .count();
+        }
+    }
+    assert!(later >= 20, "{later} later acquisitions");
+    assert!(moved < later, "{moved} of {later} moved");
 }
 
 #[test]

@@ -17,6 +17,9 @@
 //! - `g2joint <frames per case>`: the chosen widths and a generous set on many paired frames,
 //!   listing every FFT-start disagreement.
 //! - `tailfx <million>`: false alarms of the fixed detector on noise at five input levels.
+//! - `latency <streams per kind>`: open question 13, the acquisition decision applied L samples
+//!   after acceptance — differences from L = 0 on clean, CW-tone, AGC-step, two-packet and
+//!   noise-only streams, float and fixed.
 //!
 //! The output goes into the gate journal / `docs/gates/reports/`; it is not a generated file.
 
@@ -34,7 +37,7 @@ use radio_phy::rx_front::{
     RxConfig,
 };
 use radio_phy::rx_front_fixed::{
-    acquire_fixed, detections_fixed, to_adc, FixedRxConfig, ADC_FULL_SCALE,
+    acquire_fixed, acquisitions_fixed, detections_fixed, to_adc, FixedRxConfig, ADC_FULL_SCALE,
 };
 
 type C = (f64, f64);
@@ -718,6 +721,244 @@ fn g2joint(per_case: usize) {
     }
 }
 
+/// Decision latencies swept by `latency` (samples at 20 MHz).
+const LATENCIES: [usize; 8] = [0, 16, 32, 48, 63, 64, 79, 128];
+
+/// One `latency` trial: a stream exercising the decision path. Kinds: 0 a clean packet
+/// (AWGN or static TGn D), 1 a CW tone over the whole stream (failing candidates before the
+/// packet), 2 an AGC gain step down before the packet (the DC transient), 3 two packets with
+/// a gap of 0–400 samples (re-arm after an acquisition), 4 noise only (false acquisitions),
+/// 5 two packets at 20 dB under a CW tone at −6…+6 dB relative to the signal (the detector
+/// keeps firing after an acquisition).
+fn latency_stream(kind: usize, t: u64) -> Vec<C> {
+    let mut rng = Rng::new(0x1a7e_0000 + 1_000_000 * kind as u64 + t);
+    let snr = if kind == 5 {
+        20.0
+    } else {
+        [0.0, 3.0, 6.0, 12.0][(rng.next_u64() % 4) as usize]
+    };
+    let packet = |rng: &mut Rng| -> Vec<C> {
+        let psdu: Vec<u8> = (0..20).map(|_| (rng.next_u64() & 0xff) as u8).collect();
+        let seed = 1 + (rng.next_u64() % 127) as u8;
+        let cfg = IfftConfig::tx_default();
+        let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+        build_ppdu(&psdu, Rate::R6, seed, &cfg)
+            .map(|f| {
+                f.iter()
+                    .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let f = packet(&mut rng);
+    let p = mean_power(&f);
+    let lead = 300 + (rng.next_u64() % 300) as usize;
+    let mut x = vec![(0.0, 0.0); lead];
+    if kind != 4 {
+        x.extend_from_slice(&f);
+    }
+    if kind == 3 || kind == 5 {
+        let gap = (rng.next_u64() % 401) as usize;
+        x.extend(vec![(0.0, 0.0); gap]);
+        x.extend(packet(&mut rng));
+    }
+    x.extend(vec![(0.0, 0.0); 400]);
+    if kind == 4 {
+        x.extend(vec![(0.0, 0.0); 4000]);
+    }
+    let x = if kind == 0 && rng.next_u64() % 2 == 1 {
+        Multipath::new(
+            tgn_taps(TgnModel::D, false),
+            Doppler::Static,
+            1,
+            FS,
+            &mut rng,
+        )
+        .apply(&x)
+    } else {
+        fractional_delay(&x, rng.uniform())
+    };
+    let cfo = (rng.uniform() * 2.0 - 1.0) * 235e3;
+    let x = frequency_offset(&x, cfo, FS, 2.0 * PI * rng.uniform());
+    let x = awgn(&x, snr, p, &mut rng);
+    match kind {
+        1 => {
+            let noise_p = p * 10f64.powf(-snr / 10.0);
+            let rel = [0.0, 6.0, 12.0][(rng.next_u64() % 3) as usize];
+            let fhz = (rng.uniform() * 2.0 - 1.0) * 5e6;
+            add_tone(
+                &x,
+                noise_p * 10f64.powf(rel / 10.0),
+                fhz,
+                FS,
+                2.0 * PI * rng.uniform(),
+            )
+        }
+        5 => {
+            let rel = [-6.0, 0.0, 6.0][(rng.next_u64() % 3) as usize];
+            let fhz = (rng.uniform() * 2.0 - 1.0) * 5e6;
+            add_tone(
+                &x,
+                p * 10f64.powf(rel / 10.0),
+                fhz,
+                FS,
+                2.0 * PI * rng.uniform(),
+            )
+        }
+        2 => gain_step(
+            &x,
+            lead.saturating_sub(40 + (rng.next_u64() % 200) as usize),
+            -20.0,
+        ),
+        _ => x,
+    }
+}
+
+/// `latency <trials per kind>`: the explicit decision latency of open question 13. Each
+/// stream runs through the float and the fixed receiver at every latency in [`LATENCIES`].
+/// Counted per stream and model against latency 0: `grid` — the acquisitions differ in
+/// anything but `detected_at` and `decided_at` (count, timing, CFO, metric); `det` — they
+/// differ in `detected_at` only; `late` — the decision comes more than L after the latency-0
+/// one (most extra samples in brackets).
+fn latency(trials: usize) {
+    const KINDS: [&str; 6] = [
+        "clean",
+        "CW tone",
+        "AGC step",
+        "two packets",
+        "noise only",
+        "tone+2 pkts",
+    ];
+    let per_thread = trials.div_ceil(threads());
+    let fx = FixedRxConfig::default();
+    println!(
+        "# rxfront latency: {} streams per kind, SNR 0/3/6/12 dB (tone+2 pkts: 20 dB), CFO ±235 kHz, 20 MHz",
+        per_thread * threads()
+    );
+    println!("# per L, float / fixed: streams whose acquisitions differ from L = 0 in timing/CFO/");
+    println!("# metric/count (grid), in detected_at only (det), decided more than L later (late,");
+    println!("# most extra samples). Last column: acquisitions at L = 0, float / fixed.");
+    print!("# {:<14}", "kind");
+    for l in LATENCIES.iter().skip(1) {
+        print!(" {:>13}", format!("L={l}"));
+    }
+    println!(" {:>13}", "acq at L=0");
+    // [model][latency] -> (grid, det, late, max extra)
+    type Cell = (usize, usize, usize, usize);
+    type Tally = [[Cell; LATENCIES.len()]; 2];
+    for (kind, name) in KINDS.iter().enumerate() {
+        let res = par(|t| {
+            let mut tally: Tally = [[(0, 0, 0, 0); LATENCIES.len()]; 2];
+            let mut acq = [0usize; 2];
+            for k in 0..per_thread {
+                let x = latency_stream(kind, (t * per_thread + k) as u64);
+                let rms = mean_power(&x).sqrt().max(1e-12);
+                let adc = to_adc(
+                    &x,
+                    f64::from(ADC_FULL_SCALE) * 10f64.powf(-15.0 / 20.0) / rms,
+                );
+                let xf: Vec<C> = adc
+                    .iter()
+                    .map(|&(a, b)| (f64::from(a), f64::from(b)))
+                    .collect();
+                // (key without detected_at/decided_at, detected_at, decided_at) per acquisition
+                type Row = (Vec<u64>, usize, usize);
+                let run = |l: usize| -> [Vec<Row>; 2] {
+                    let cfg = RxConfig {
+                        decision_latency: l,
+                        ..RxConfig::new(FS)
+                    };
+                    let f = acquisitions(&xf, &cfg)
+                        .iter()
+                        .map(|a| {
+                            let key = vec![
+                                a.ltf_start as u64,
+                                a.fft_start as u64,
+                                a.cfo_hz.to_bits(),
+                                a.coarse_cfo_hz.to_bits(),
+                                a.fine_cfo_hz.to_bits(),
+                                a.ltf_metric.to_bits(),
+                            ];
+                            (key, a.detected_at, a.decided_at)
+                        })
+                        .collect();
+                    let x = acquisitions_fixed(&adc, &cfg, &fx)
+                        .iter()
+                        .map(|a| {
+                            let key = vec![
+                                a.ltf_start as u64,
+                                a.fft_start as u64,
+                                a.cfo_phase as u64,
+                                a.coarse_phase as u64,
+                                a.fine_phase as u64,
+                            ];
+                            (key, a.detected_at, a.decided_at)
+                        })
+                        .collect();
+                    [f, x]
+                };
+                let base = run(0);
+                acq[0] += base[0].len();
+                acq[1] += base[1].len();
+                for (li, &l) in LATENCIES.iter().enumerate().skip(1) {
+                    let got = run(l);
+                    for m in 0..2 {
+                        let (g, b) = (&got[m], &base[m]);
+                        let tl = &mut tally[m][li];
+                        if g.len() != b.len() || g.iter().zip(b).any(|(x, y)| x.0 != y.0) {
+                            tl.0 += 1;
+                            continue;
+                        }
+                        if g.iter().zip(b).any(|(x, y)| x.1 != y.1) {
+                            tl.1 += 1;
+                        }
+                        let extra = g
+                            .iter()
+                            .zip(b)
+                            .map(|(x, y)| x.2 as i64 - y.2 as i64 - l as i64)
+                            .max()
+                            .unwrap_or(0);
+                        if extra > 0 {
+                            tl.2 += 1;
+                            tl.3 = tl.3.max(extra as usize);
+                        }
+                    }
+                }
+            }
+            (tally, acq)
+        });
+        let mut tally: Tally = [[(0, 0, 0, 0); LATENCIES.len()]; 2];
+        let mut acq = [0usize; 2];
+        for (tr, ar) in &res {
+            for m in 0..2 {
+                acq[m] += ar[m];
+                for (d, v) in tally[m].iter_mut().zip(&tr[m]) {
+                    *d = (d.0 + v.0, d.1 + v.1, d.2 + v.2, d.3.max(v.3));
+                }
+            }
+        }
+        let row = |label: &str, f: &dyn Fn(&Cell) -> String| {
+            print!("  {label:<14}");
+            for (a, b) in tally[0].iter().zip(&tally[1]).skip(1) {
+                print!(" {:>13}", format!("{}/{}", f(a), f(b)));
+            }
+        };
+        println!("  {name}");
+        row("   grid", &|t| t.0.to_string());
+        println!(" {:>13}", format!("{}/{}", acq[0], acq[1]));
+        row("   det", &|t| t.1.to_string());
+        println!();
+        row("   late", &|t| {
+            if t.2 == 0 {
+                "0".into()
+            } else {
+                format!("{}({})", t.2, t.3)
+            }
+        });
+        println!();
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
@@ -730,8 +971,9 @@ fn main() -> ExitCode {
         "g2" => g2(n.unwrap_or(300)),
         "tailfx" => tailfx(n.unwrap_or(100)),
         "g2joint" => g2joint(n.unwrap_or(3000)),
+        "latency" => latency(n.unwrap_or(500)),
         _ => {
-            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx [n]");
+            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency [n]");
             return ExitCode::from(2);
         }
     }

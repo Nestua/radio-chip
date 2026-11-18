@@ -631,3 +631,111 @@ Mutations: no positive / no negative saturation 3714 mismatches each, ties up 18
     sum (windows [n−87, n−40] and [n−135, n−88]): a 72-deep delay line of C instead of a second
     accumulator. The CORDIC latency then delays the NCO path: run NCO/correlator/search a fixed
     L samples behind the detector (bit-exact, a delay line on y), part b/d.
+
+## 2026-11-18 · G1/G2 · R0-08b part 3b: explicit decision latency (open question 13)
+
+**Founder decision (2026-11-18):** the model gains an explicit decision latency, fixed once its
+effect is measured. **Risk point (PHY architecture):** independent review done (below); founder
+approval before merge.
+
+### Change
+- `RxConfig::decision_latency` (default `DECISION_LATENCY` = 64, clamped to
+  `MAX_DECISION_LATENCY` = 128) applies to the float and the fixed model alike.
+  - At the acceptance sample n, `decide()` runs on the history as of n.
+  - Its result is applied at n + L (`Pending`, `apply_pending`).
+- While a decision is pending:
+  - the search keeps a fresh running maximum, which now restarts on every acceptance;
+  - the detector keeps counting;
+  - a second acceptance waits for the first result.
+- An acquisition closes the search and resets the run counter when it is applied.
+- **What L ≤ 63 + (GI − B) leaves unchanged (75 samples at 20 MHz, 200 ns back-off):** every
+  acquisition except `decided_at`, unless its search opened within L samples after the previous
+  acquisition. The next acceptance needs 64 + (GI − B) positions after the restarted maximum, so
+  it cannot come before the pending result.
+- **What can change:** a search opened in that interval. This needs the detector to keep firing
+  after an acquisition, e.g. under a tone near the signal level. The run counter is reset at the
+  result rather than at the acceptance, so the search can open at another sample with another
+  provisional latch:
+  - its `detected_at` differs in ≈ 5 % of such streams;
+  - rarely its grid or CFO as well: in the fixed model, 1 or 2 streams in 2000, with the same
+    acquisition count.
+- **Clock budget:** a decision is ≈ 2000 complex operations at GI − B = 12 and ≈ 2400 at B = 0.
+  - The 2000 break down as: final coarse sum 96, 2·(GI − B) 64-tap correlations 1536, fine
+    sum 88, energy 128, 140 rotations.
+  - The chain is partly serial: coarse sum → angle → rotation → correlations → angle.
+  - At an assumed 8 clocks per sample at 20 MHz, 64 samples are 512 clocks: 4 complex
+    multipliers leave no slack, 5–6 do. The clock rate is not a decided target yet.
+  - At 10 and 5 MHz the budget doubles and quadruples.
+- **History:** the `y` ring (`HISTORY` = 512) covers reading until the result is due
+  (T1 − 160 … T1 + 223 + 64, 448 samples).
+  - The energy ring (81 positions) does not. The w + 1 energies that choose the grid are already
+    63 + w old at acceptance, so the hardware must choose the grid, or latch those energies,
+    within a few samples of acceptance.
+  - Part d must respect this; the `HISTORY` doc comment says so.
+
+### Evidence
+- **Float** (`g1_rx_front::decision_latency_only_delays_the_result`):
+  - 150 scenes: clean packets at 4 and 10 dB, CW spur at the noise level and +6 dB, an AGC step
+    of −20 dB, two packets 0–40 samples apart.
+  - At L ∈ {1, 17, 64, 75} the acquisitions equal those at L = 0, with `decided_at` + L.
+  - Two packets at 10 dB are both acquired, each from its own detection.
+  - 60 scenes of a tone at the signal level with two packets at 20 dB: the first acquisition is
+    unchanged, and `detected_at` of later ones moves in fewer than all.
+- **Fixed** (`g2_rx_front::fixed_decision_latency_only_delays_the_result`): 80 ADC scenes, bit
+  for bit at L ∈ {1, 64, 75}.
+- **Measurement** (`rxfront latency 2000`, report `reports/rx_front_latency.txt`):
+  - 2000 streams per kind, float and fixed counted separately.
+  - Kinds: clean, CW tone, AGC step, two packets, noise only, and tone + two packets
+    (20 dB, tone −6…+6 dB relative to the signal).
+  - Up to L = 64 the first five kinds show no difference of any sort.
+  - L = 79: one CW-tone stream decides 4 samples later.
+  - L = 128: one CW-tone stream differs.
+  - Tone + two packets at L = 64: `detected_at` differs in 99 / 98 streams (float / fixed) of
+    2000. The grid differs in 0 / 1.
+- **Equivalence at L = 0, side by side with main** (independent reviewer, harness outside the
+  repo): 1500 streams, SNR 0–30 dB, tones, AGC steps, two packets, 1295 acquisitions. No
+  difference in the full output, float and fixed.
+- **Existing gates at the new default:**
+  - The causality and bound test has its bound raised by L.
+  - The G2 report does not involve `decided_at`.
+  - `hw/vectors` regenerate identically.
+
+### Mutations
+| Mutation | Result |
+|---|---|
+| `decided_at` not moved to the apply sample | caught (2 tests) |
+| result applied one sample early | caught |
+| search not closed at apply | survives, equivalent on legal streams |
+| run counter not reset at apply | survives |
+| pending dropped when the search window closes | survives, unreachable |
+| running maximum not restarted after acceptance | survives (open question 15) |
+
+- **Search not closed at apply.** The window ends ≈ T1 + 392 samples, before the first detection
+  of the shortest legal next packet.
+- **Pending dropped when the window closes.** Acceptance comes ≈ 180 positions before the window
+  ends.
+- **Why the survivors survive.** Each of these mutations changes L = 0 and L > 0 alike, so the
+  latency tests cannot see them. They test the pre-existing acquisition semantics.
+
+### Independent review (fresh agent, code only), 2026-11-18
+- **HIGH:** "only `decided_at` changes" was false. The run-counter reset moves `detected_at` of a
+  search opened after an acquisition under a tone (counterexample at 20 dB with a tone at the
+  signal level). Fixed by restating the claim, adding the tone + two-packet scenes to G1 and to
+  `rxfront latency`, and measuring it (above).
+- **MEDIUM:** the energy ring does not last the latency → documented (History, above).
+- **LOW–MEDIUM:** the MAC budget was undercounted (≈ 1700) → restated as ≈ 2000–2400 with the
+  clock assumption.
+- **LOW:** the latency was unbounded → `MAX_DECISION_LATENCY` = 128, and the sweep stops at 128.
+- **Minor:**
+  - The tool counts float and fixed separately, with full keys and a signed extra delay.
+  - The `push` and `RxFront` docs now describe the latency.
+- **Confirmed:** L = 0 is bit-identical to main, and the fixed model is the exact counterpart.
+
+### Open questions
+13. *Resolved, pending founder approval:* a decision latency of 64 samples, with the caveat
+    above for searches opened within L after an acquisition.
+15. No gate covers the restart of the running maximum after a failed confirmation (the block
+    model retried from the next detection instead). Needed: a scene where a strong candidate
+    fails and a weaker true T1 follows within the window. Before part d.
+16. The number of multipliers and the clock rate for `decide()` in part d: 5–6 complex
+    multipliers at 160 MHz, or a faster clock.

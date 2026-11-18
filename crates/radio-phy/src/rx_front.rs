@@ -109,11 +109,17 @@ pub struct RxConfig {
     pub dc_shift: Option<u32>,
     /// FFT window back-off into the cyclic prefix, in ns.
     pub backoff_ns: f64,
+    /// Samples between accepting an LTF candidate and its result (open question 13): the
+    /// decision is computed from the history as of the acceptance sample n and applied at
+    /// n + this (at most [`MAX_DECISION_LATENCY`]). Meanwhile the search keeps a fresh running
+    /// maximum and the detector keeps counting; an acquisition closes the search and resets
+    /// the run counter when it is applied. See [`DECISION_LATENCY`] for what changes.
+    pub decision_latency: usize,
 }
 
 impl RxConfig {
     /// Defaults: detector A (chosen by measurement, `docs/gates/rx_front.md`), DC blocker 2^−7 (−3 dB at ≈ 25 kHz at 20 MHz), 200 ns
-    /// back-off.
+    /// back-off, decision latency [`DECISION_LATENCY`].
     pub fn new(sample_rate_hz: f64) -> Self {
         Self {
             sample_rate_hz,
@@ -122,6 +128,7 @@ impl RxConfig {
             run: AUTOCORR_RUN,
             dc_shift: Some(7),
             backoff_ns: 200.0,
+            decision_latency: DECISION_LATENCY,
         }
     }
 
@@ -559,9 +566,30 @@ pub fn acquisitions(x: &[Sample], cfg: &RxConfig) -> Vec<Acquisition> {
 }
 
 /// Samples of the DC-blocked stream the receiver keeps. The oldest one a decision reads is
-/// the start of the final coarse window, T1 − 160, and the decision is made by
-/// T1 + 64 + 2·(GI − B) + 127 ≤ T1 + 223 (see [`RxFront`]): 384 samples, rounded up to 512.
+/// the start of the final coarse window, T1 − 160; the candidate is accepted by
+/// T1 + 64 + 2·(GI − B) + 127 ≤ T1 + 223 (see [`RxFront`]) and the hardware may read the
+/// history until the result is due, [`DECISION_LATENCY`] later: 448 samples, rounded up to 512.
+/// Only `y` lasts that long: the energy ring keeps 81 positions and the w + 1 energies that
+/// choose the grid are already 63 + w old at acceptance, so the hardware picks the grid (or
+/// latches those energies) within a few samples of acceptance.
 pub const HISTORY: usize = 512;
+/// The default [`RxConfig::decision_latency`]: samples the hardware has for one decision.
+/// A decision is ≈ 2000 complex operations at GI − B = 12 (final coarse sum 96, 2·(GI − B)
+/// 64-tap correlations on the rotated history 1536, fine sum 88, energy 128, 140 rotations;
+/// ≈ 2400 at B = 0), partly serial (coarse sum → angle → rotation → correlations). At an
+/// assumed 8 clocks per sample at 20 MHz (not yet a decided clock) 64 samples are 512 clocks:
+/// 4 complex multipliers leave no slack, 5–6 do; at 10 and 5 MHz the budget doubles and
+/// quadruples. Up to 63 + (GI − B) an acquisition is unchanged but for `decided_at` unless
+/// its search opened within L samples after the previous acquisition: the next acceptance
+/// needs 64 + (GI − B) positions after the restarted maximum, so it cannot come before the
+/// pending result. A search opened in that interval (only while the detector keeps firing,
+/// e.g. under a tone near the signal level) sees the run counter reset at the result rather
+/// than at the acceptance, so its `detected_at` and provisional latch can differ, and rarely
+/// its grid or CFO (open question 13, `rxfront latency`).
+pub const DECISION_LATENCY: usize = 64;
+/// The largest decision latency [`RxFront`] honours (larger values are clamped): a decision
+/// reads back to n − 373 at acceptance n, and the history must still hold that at n + L.
+pub const MAX_DECISION_LATENCY: usize = 128;
 /// The provisional latch at a detection event at n uses the lag-16 products whose later sample
 /// is at most n − this: the last event on a packet falls ≈ 10–25 samples into GI2 (the
 /// detector window is still mostly STF), so without the lag the latch would include GI2.
@@ -581,6 +609,15 @@ struct Search {
     deadline: usize,
     /// Running maximum of the energy metric: (position, energy).
     best: Option<(usize, f64)>,
+}
+
+/// An accepted candidate whose result is not applied yet.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pending<A> {
+    /// Sample at which the result is applied.
+    pub(crate) due: usize,
+    /// The decision (computed at acceptance), `None` if confirmation failed.
+    pub(crate) result: Option<A>,
 }
 
 /// The streaming receiver front: one sample in, at most one acquisition out, every decision
@@ -608,6 +645,10 @@ struct Search {
 ///    lag-64 estimate over GI2 + T1 against T1 + T2 (less the guard), both read from the
 ///    history buffer; fine resolved against coarse, combined with [`FINE_WEIGHT`].
 ///
+/// 5. **Decision latency**: the result of an accepted candidate is applied
+///    [`RxConfig::decision_latency`] samples later; an acquisition then closes the search and
+///    resets the run counter.
+///
 /// A search with no accepted candidate by its deadline closes; after an acquisition the
 /// detector re-arms. No sample is processed twice and no search runs in parallel.
 #[derive(Debug, Clone)]
@@ -628,6 +669,7 @@ pub struct RxFront {
     template: [Sample; PAIR_LEN],
     template_energy: f64,
     search: Option<Search>,
+    pending: Option<Pending<Acquisition>>,
 }
 
 impl RxFront {
@@ -659,6 +701,7 @@ impl RxFront {
             template_energy: 2.0 * ltf.iter().map(|s| abs2(*s)).sum::<f64>(),
             template,
             search: None,
+            pending: None,
         }
     }
 
@@ -668,7 +711,7 @@ impl RxFront {
         self.search.is_some()
     }
 
-    /// Processes the next input sample; returns the acquisition decided at it, if any.
+    /// Processes the next input sample; returns the acquisition applied at it, if any.
     pub fn push(&mut self, x: Sample) -> Option<Acquisition> {
         let n = self.n;
         self.n += 1;
@@ -715,7 +758,26 @@ impl RxFront {
         self.z.put(n, mul(yv, (cos, sin)));
         self.phase = (self.phase + self.step).rem_euclid(2.0 * PI);
 
-        // 3. LTF search: correlator output for position n − 127, energy for n − 126 − w.
+        // 3. LTF search; 4. the result of an accepted candidate, `decision_latency` later.
+        self.search_step(n);
+        self.apply_pending(n)
+    }
+
+    /// Applies the pending decision when it is due: an acquisition closes the search and
+    /// re-arms the detector; a failed confirmation leaves the search running.
+    fn apply_pending(&mut self, n: usize) -> Option<Acquisition> {
+        let p = self.pending.filter(|p| p.due == n)?;
+        self.pending = None;
+        let mut a = p.result?;
+        a.decided_at = n;
+        self.search = None;
+        self.count = 0;
+        Some(a)
+    }
+
+    /// The LTF search at sample n: correlator output for position n − 127, energy for
+    /// n − 126 − w, the running maximum and its acceptance.
+    fn search_step(&mut self, n: usize) -> Option<()> {
         let i = n.checked_sub(PAIR_LEN - 1)?;
         let c = self
             .template
@@ -740,35 +802,34 @@ impl RxFront {
         if s.best.is_none_or(|(_, emax)| e > emax) {
             s.best = Some((j, e));
         }
-        let mut result = None;
         if let Some((imax, _)) = s.best {
             // Accepted once 64 + (GI − B) later positions, all inside the window, are no larger:
             // the grid may move up to GI − B past the maximum (latest start), and the position
             // 64 before the true T1 matches GI2 partly, so T1 must have had its chance relative
-            // to the latest start too.
-            if j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
-                result = self.decide(&s, imax, n);
-                if result.is_none() {
-                    // Drop the candidate; the running maximum restarts at the next position. A
-                    // true T1 weaker (in absolute energy) than a failing candidate within the
-                    // 63 + w positions after it is lost — a strong burst ending just before a
-                    // packet; the block model retried from the next detection instead. Accepted:
-                    // not observed in any gate or `rxfront` case (journal, R0-08b).
-                    s.best = None;
-                }
+            // to the latest start too. One decision at a time.
+            if self.pending.is_none() && j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
+                self.pending = Some(Pending {
+                    due: n + self.cfg.decision_latency.min(MAX_DECISION_LATENCY),
+                    result: self.decide(&s, imax, n),
+                });
+                // The running maximum restarts at the next position, whatever the result: if
+                // confirmation fails the search goes on from there. A true T1 weaker (in
+                // absolute energy) than a failing candidate within the 63 + w positions after
+                // it is lost — a strong burst ending just before a packet; the block model
+                // retried from the next detection instead. Accepted: not observed in any gate
+                // or `rxfront` case (journal, R0-08b).
+                s.best = None;
             }
         }
-        if result.is_some() {
-            self.search = None;
-            self.count = 0;
-        } else if j + 1 >= s.deadline {
+        if j + 1 >= s.deadline {
             // Every position of the window considered; a maximum too close to its end to be
-            // accepted is not trusted (the true T1 may lie 64 later, beyond it).
+            // accepted is not trusted (the true T1 may lie 64 later, beyond it). A decision
+            // already pending is still applied.
             self.search = None;
         } else {
             self.search = Some(s);
         }
-        result
+        None
     }
 
     /// Σ_{k<len} y(start+k)·y*(start+k+lag) from the history buffer.

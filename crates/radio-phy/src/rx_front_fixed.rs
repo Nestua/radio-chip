@@ -14,9 +14,9 @@
 
 use crate::fixed::{requantize, Overflow, QFormat, Rounding};
 use crate::rx_front::{
-    backoff_samples, long_training_symbol, Ring, RxConfig, AUTOCORR_LEN, COARSE_END_BEFORE_T1,
-    COARSE_LEN, FINE_GUARD, FINE_LEN, GI2_LEN, GI_LEN, HISTORY, LATCH_LAG, LTF_SYMBOL_LEN,
-    PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET, STF_PERIOD,
+    backoff_samples, long_training_symbol, Pending, Ring, RxConfig, AUTOCORR_LEN,
+    COARSE_END_BEFORE_T1, COARSE_LEN, FINE_GUARD, FINE_LEN, GI2_LEN, GI_LEN, HISTORY, LATCH_LAG,
+    LTF_SYMBOL_LEN, MAX_DECISION_LATENCY, PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET, STF_PERIOD,
 };
 use std::f64::consts::PI;
 
@@ -487,6 +487,7 @@ pub struct RxFrontFixed {
     cordic: Vec<i64>,
     nco: Vec<IQ>,
     search: Option<Search>,
+    pending: Option<Pending<FixedAcquisition>>,
     trace: SampleTrace,
 }
 
@@ -528,6 +529,7 @@ impl RxFrontFixed {
             cordic: cordic_table(&fx),
             nco: nco_table(&fx),
             search: None,
+            pending: None,
             trace: SampleTrace::default(),
         }
     }
@@ -618,7 +620,24 @@ impl RxFrontFixed {
         };
         self.phase = (self.phase + self.step).rem_euclid(1i64 << fx.nco_phase_bits);
 
-        // 3. LTF search.
+        // 3. LTF search; 4. the result of an accepted candidate, `decision_latency` later.
+        self.search_step(n);
+        self.apply_pending(n)
+    }
+
+    /// See [`crate::rx_front::RxFront`]: the same pending decision, bit for bit.
+    fn apply_pending(&mut self, n: usize) -> Option<FixedAcquisition> {
+        let p = self.pending.filter(|p| p.due == n)?;
+        self.pending = None;
+        let mut a = p.result?;
+        a.decided_at = n;
+        self.search = None;
+        self.count = 0;
+        Some(a)
+    }
+
+    fn search_step(&mut self, n: usize) -> Option<()> {
+        let fx = self.fx;
         let i = n.checked_sub(PAIR_LEN - 1)?;
         let window: [IQ; PAIR_LEN] = std::array::from_fn(|k| self.z.get(i + k));
         let cq = ltf_corr_with(&window, &fx, &self.taps);
@@ -641,24 +660,21 @@ impl RxFrontFixed {
         if s.best.is_none_or(|(_, emax)| e > emax) {
             s.best = Some((j, e));
         }
-        let mut result = None;
         if let Some((imax, _)) = s.best {
-            if j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
-                result = self.decide(&s, imax, n);
-                if result.is_none() {
-                    s.best = None;
-                }
+            if self.pending.is_none() && j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
+                self.pending = Some(Pending {
+                    due: n + self.cfg.decision_latency.min(MAX_DECISION_LATENCY),
+                    result: self.decide(&s, imax, n),
+                });
+                s.best = None;
             }
         }
-        if result.is_some() {
-            self.search = None;
-            self.count = 0;
-        } else if j + 1 >= s.deadline {
+        if j + 1 >= s.deadline {
             self.search = None;
         } else {
             self.search = Some(s);
         }
-        result
+        None
     }
 
     fn decide(&self, s: &Search, imax: usize, n: usize) -> Option<FixedAcquisition> {
