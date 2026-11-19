@@ -95,7 +95,25 @@ impl Default for MinSumConfig {
     }
 }
 
+/// Width of the hardware decoder's input, sign included (G2, `docs/gates/ldpc.md`).
+pub const LDPC_SOFT_BITS: u32 = 6;
+
+/// The input's clip level relative to the signal amplitude: a soft value is
+/// round(y·31/2) saturated to ±31, y the matched-filter output with amplitude 1.
+pub const LDPC_SOFT_CLIP: f64 = 2.0;
+
 impl MinSumConfig {
+    /// The hardware decoder (G2, `docs/gates/ldpc.md`): 6-bit messages, 8-bit totals,
+    /// ⌊7·min/8⌋, at most 20 iterations, for an input of [`LDPC_SOFT_BITS`] bits.
+    pub const HARDWARE: MinSumConfig = MinSumConfig {
+        max_iter: 20,
+        scale_num: 7,
+        scale_shift: 3,
+        scale_round: false,
+        msg_bits: 6,
+        app_bits: 8,
+    };
+
     /// Whether the parameters describe a decoder: widths of 2 to 24 bits, the total at
     /// least as wide as a message, a factor in (0, 1] (below 1 if it is rounded).
     pub fn is_valid(&self) -> bool {

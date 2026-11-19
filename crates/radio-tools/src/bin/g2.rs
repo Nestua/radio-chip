@@ -15,7 +15,9 @@ use radio_phy::channel::Rng;
 use radio_phy::convolutional::{encode, CodeRate};
 use radio_phy::fixed::sqnr_db;
 use radio_phy::ldpc::{LdpcCode, LdpcLength, LdpcRate};
-use radio_phy::ldpc_decoder::{CheckRule, LdpcDecoder, MinSumConfig, Schedule};
+use radio_phy::ldpc_decoder::{
+    CheckRule, LdpcDecoder, MinSumConfig, Schedule, LDPC_SOFT_BITS, LDPC_SOFT_CLIP,
+};
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, modulate_symbol_f64, IfftConfig};
@@ -298,18 +300,8 @@ impl LdpcCfg {
 
 /// The chosen integer decoder (docs/gates/ldpc.md); the sweep moves one parameter at a time
 /// around it.
-const LDPC_CHOICE: (u32, f64, MinSumConfig) = (
-    6,
-    2.0,
-    MinSumConfig {
-        max_iter: 20,
-        scale_num: 7,
-        scale_shift: 3,
-        scale_round: false,
-        msg_bits: 6,
-        app_bits: 8,
-    },
-);
+const LDPC_CHOICE: (u32, f64, MinSumConfig) =
+    (LDPC_SOFT_BITS, LDPC_SOFT_CLIP, MinSumConfig::HARDWARE);
 
 fn ldpc_configs() -> Vec<LdpcCfg> {
     let (in_bits, clip, cfg) = LDPC_CHOICE;
@@ -349,7 +341,8 @@ fn ldpc_configs() -> Vec<LdpcCfg> {
             }
         }
     }
-    // The same with one bit less at the input: narrower messages may then do.
+    // The same with one bit less at the input, at the clip that suits it at the high rates
+    // (1.5): narrower messages may then do.
     for msg_bits in [4, 5, 6] {
         for extra in [1, 2, 3] {
             let c = MinSumConfig {
@@ -357,7 +350,7 @@ fn ldpc_configs() -> Vec<LdpcCfg> {
                 app_bits: msg_bits + extra,
                 ..cfg
             };
-            v.push(fixed(in_bits - 1, clip, c));
+            v.push(fixed(in_bits - 1, 1.5, c));
         }
     }
     // The factor, rounded down and to nearest.
