@@ -201,7 +201,9 @@ module rx_latch
         end
     end
 
-    // ---- simulation checks of the contract
+    // ---- simulation checks of the contract (procedural $error: not for synthesis, see
+    // ram_1w1r)
+`ifndef SYNTHESIS
     if (CHECK_TIMING) begin : g_check
         always_ff @(posedge clk) if (rst_n) begin
             if (emit && head_due && !head_done)
@@ -212,6 +214,7 @@ module rx_latch
                 $error("rx_latch: result FIFO overflow");
         end
     end
+`endif
 endmodule
 
 `default_nettype wire
