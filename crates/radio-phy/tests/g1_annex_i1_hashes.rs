@@ -80,7 +80,9 @@ fn bits_text(bits: &[u8]) -> String {
     text(bits.iter().enumerate().map(|(i, b)| (i, b.to_string())))
 }
 
-/// Three decimals as the annex prints them; a value that rounds to zero has no sign.
+/// Three decimals as the annex prints them; a value that rounds to zero has no sign. A
+/// value exactly between two prints (odd/16) goes to the even digit, as `{:.3}` does on the
+/// exact binary value: the annex's hashes hold with that rule (12 such values).
 fn f3(v: f64) -> String {
     let s = format!("{v:.3}");
     if s == "-0.000" {
@@ -229,11 +231,10 @@ fn waveform(a: &Annex) -> Vec<(f64, f64)> {
     windowed(&frame)
 }
 
-#[test]
-fn whole_ppdu_is_the_printed_waveform() {
-    let a = load();
-    let ours = waveform(&a);
-    let (mut covered, mut nearest) = (0usize, f64::MAX);
+/// The model's 881 samples, after their hashes are found to be those of Tables I-22 … I-30.
+fn printed_waveform(a: &Annex) -> Vec<(f64, f64)> {
+    let ours = waveform(a);
+    let mut covered = 0usize;
     for n in 22..=30 {
         let name = format!("I-{n}");
         let t = &a.tables[&name];
@@ -245,15 +246,23 @@ fn whole_ppdu_is_the_printed_waveform() {
             .iter()
             .map(|&v| Some(v))
             .collect();
-        check(&a, &name, &iq_text(t.first, &part));
+        check(a, &name, &iq_text(t.first, &part));
         covered += t.entries;
     }
     assert_eq!(covered, 881);
+    ours
+}
+
+#[test]
+fn whole_ppdu_is_the_printed_waveform() {
+    let a = load();
+    let ours = printed_waveform(&a);
     // How far the values are from a rounding boundary of the print (…5 in the fourth
     // decimal). The transmitter is integer arithmetic, so the same on every machine; the
     // margin says how much a change of that arithmetic may move a sample before the hash
-    // notices (the local value-by-value gate then says whether the print still holds). Values exactly on a boundary are dyadic (such as 1/16 = 0.0625).
-    let mut on_boundary = 0;
+    // notices (the local value-by-value gate then says whether the print still holds).
+    // Values exactly on a boundary are dyadic (odd multiples of 1/16, such as 0.0625).
+    let (mut on_boundary, mut nearest) = (0, f64::MAX);
     for v in &ours {
         for x in [v.0, v.1] {
             let d = ((x * 1000.0).rem_euclid(1.0) - 0.5).abs() / 1000.0;
@@ -266,14 +275,16 @@ fn whole_ppdu_is_the_printed_waveform() {
     }
     println!("{on_boundary} of 1762 values exactly on a rounding boundary of the print");
     println!("nearest other value to a boundary: {nearest:.2e}");
+    assert_eq!(on_boundary, 12);
+    assert!(nearest > 2e-7, "{nearest:e}");
 }
 
-/// The receive half: the printed waveform (the model's, shown above to be the annex's in
-/// every printed digit, rounded to those digits) decodes to the annex's PSDU.
+/// The receive half: the printed waveform (the model's, checked here against the hashes of
+/// Tables I-22 … I-30 and rounded to the printed digits) decodes to the annex's PSDU.
 #[test]
 fn printed_waveform_decodes() {
     let a = load();
-    let y: Vec<(f64, f64)> = waveform(&a)
+    let y: Vec<(f64, f64)> = printed_waveform(&a)
         .iter()
         .map(|v| (f3(v.0).parse().unwrap(), f3(v.1).parse().unwrap()))
         .collect();

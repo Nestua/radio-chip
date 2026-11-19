@@ -34,8 +34,9 @@ def num(s):
 
 def main(src, dst):
     pairs, octets, headers, iq = defaultdict(list), defaultdict(list), {}, defaultdict(dict)
-    for line in open(src, encoding="utf-8"):
-        f = line.split()
+    with open(src, encoding="utf-8") as fixture:
+        rows = [line.split() for line in fixture if line.strip()]
+    for f in rows:
         if f[1] == "pair":
             pairs[f[0]].append((int(f[2]), int(f[3])))
         elif f[1] == "octet":
@@ -74,7 +75,8 @@ def main(src, dst):
         out.write("# IEEE Std 802.11-2024 Annex I.1 (Example 1 - BCC encoding): SHA-512 of each table's\n")
         out.write("# canonical text (see tools/ref/annex_i1_hash.py), not the tables. Tool: CPython hashlib.\n")
         out.write("# Command: python3 -I tools/ref/annex_i1_hash.py target/ext/annex_i1.fixture <this file>\n")
-        out.write("# <table> <entries> <first index> <sha512>; psdu = the example's input, Table I-1, in hex.\n")
+        out.write("# <table> <entries> <first index> <sha512>; psdu = the example's input (Table I-1, taken\n")
+        out.write("# from the DATA bits of Table I-13), in hex.\n")
         out.write(f"psdu {psdu.hex()}\n")
         for t, entries in texts.items():
             text = "".join(" ".join(str(v) for v in e) + "\n" for e in entries)
@@ -83,4 +85,6 @@ def main(src, dst):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
     main(sys.argv[1], sys.argv[2])

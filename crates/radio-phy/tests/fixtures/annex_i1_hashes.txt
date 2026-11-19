@@ -1,7 +1,8 @@
 # IEEE Std 802.11-2024 Annex I.1 (Example 1 - BCC encoding): SHA-512 of each table's
 # canonical text (see tools/ref/annex_i1_hash.py), not the tables. Tool: CPython hashlib.
 # Command: python3 -I tools/ref/annex_i1_hash.py target/ext/annex_i1.fixture <this file>
-# <table> <entries> <first index> <sha512>; psdu = the example's input, Table I-1, in hex.
+# <table> <entries> <first index> <sha512>; psdu = the example's input (Table I-1, taken
+# from the DATA bits of Table I-13), in hex.
 psdu 0402002e006008cd37a60020d6013cf1006008ad3baf00004a6f792c2062726967687420737061726b206f6620646976696e6974792c0a4461756768746572206f6620456c797369756d2c0a466972652d696e73697265642077652074726561673321b6
 I-7 24 0 ba5b2100ed443e77a496393e4450db5f12f0d3fbadd132b7e85a20e2ad5608490a1e89736f4793a0c1b0f19490c34ee101901b17e69c0c6ab882890b497e6289
 I-8 48 0 d4818612c6535b52522eb20f450b3574b16dca33c4344278c40ef8428208c51083a95fc06816015889be8277f57b769b14ccdbdf6c0677cab084f137212f69ed
