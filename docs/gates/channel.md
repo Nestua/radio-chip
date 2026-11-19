@@ -185,49 +185,67 @@ the gain steps in `rxfront agc` were placed by hand. This model places them as a
 would: from the samples. It is simulation only (the gain control of R1 is the AD9361's own;
 ours comes with R3).
 
-**Outside reference: the published behaviour of the AD9361's fast-attack mode** (Analog
-Devices UG-570 Rev. A, "Fast Attack AGC Mode", pp. 42–46, Fig. 25 and Table 20; register
-reset values from UG-672 Rev. 0; read on 2026-11-19 by a research agent from archive copies,
-the numbers below still to be checked against the printed pages by a second reading). What
-the documents state and the model takes over:
+**Reference: the published behaviour of the AD9361's fast-attack mode** (Analog Devices
+UG-570 Rev. A, "Fast Attack AGC Mode", pp. 42–46, Fig. 25, Tables 20 and 23–26; register
+reset values from UG-672 Rev. 0, the AD9364's register map; archive copies, read twice on
+2026-11-19: by a research agent and, independently, by the pre-PR reviewer, who decoded the
+reset values from the register table). What the documents state and the model takes over:
 
 | Published | In the model |
 |---|---|
-| State 1, peak overload detect: an overload decreases the gain; the detectors are held in reset for the Peak Overload Wait Time after each change (reset value 4 ClkRF); the state ends when no overload occurs for the Energy Detect Count (8 ClkRF) | `peak_wait`, `energy_detect`, in samples |
-| Decrement by case (Table 20, reset values, gain indices of 1 dB): large ADC overload and large LMT overload 5; one of them 2; small ADC overload 2 | `step_both`, `step_large`, `step_small` |
-| State 2: after the Settling Delay (20 ClkRF, counted from the last change) the average power is measured (16·2ⁿ samples, "16 or more") and the gain makes one change to bring it to the Lock Level (reset value −10 dBFS, 1 dB steps); an overload returns to State 1 | `settling_delay`, `power_samples`, `lock_dbfs` |
-| State 5, gain lock: left when the power rises (stronger signal) or falls (energy lost) by a threshold (10 dB each) for twice the Gain Lock Exit Count (8), or, if enabled, on a large overload; the gain then goes to its maximum, or stays | `stronger_db`, `lost_db`, `exit_count`, `lock_window`, `unlock_on_overload`, `unlock_to_max` |
+| State 1, peak overload detect: an overload decreases the gain; the detectors are held in reset for the Peak Overload Wait Time after each change (reset 4 ClkRF); the state ends when no overload occurs for the Energy Detect Count (8 ClkRF) | `peak_wait`, `energy_detect`, in samples |
+| Decrement by case (Table 20, reset values, gain indices of 1 dB): large ADC overload and (large LMT overload or digital saturation) 5; one of them 2; small ADC overload 2 | `step_both`, `step_large`, `step_small` |
+| State 2: Settling Delay (20 ClkRF "based on 30.72 MHz", from the last change; the document's "Settling Delay minus Energy Detect Count" after State 1) then the average power over 16·2ⁿ samples (reset n = 5: **512**; "16 or more") and one gain change to the Lock Level (reset −10 dBFS, 1 dB steps); an overload returns to State 1 | `settling_delay`, `power_samples`, `lock_dbfs` |
+| State 5, gain lock: the power measured at the lock is the reference; each time the power value updates (every 64 samples at reset) it is compared; a rise (stronger signal) or a fall (energy lost) by a threshold (10 dB each) that lasts twice the Gain Lock Exit Count (8) unlocks; so does a single large overload, if enabled | `lock_window` (updates in blocks counted from the lock), `stronger_db`, `lost_db`, `exit_count`, `unlock_on_overload` |
 | Gain range 0 to about 73 dB at 2.3 GHz in 1 dB indices | `min_gain_db`, `max_gain_db` |
 
-**What the documents do not state, and the model therefore defines** (each a parameter or a
-stated simplification, to be replaced by R1's captures):
-- One signal for all detectors. The chip has an analogue peak detector before its filter (LMT)
-  and one on the ADC's output; the model compares the peak of the sample after the gain,
-  max(|I|, |Q|) with 1.0 the ADC's full scale, with three thresholds (`both_peak` ≥
-  `large_peak` ≥ `small_peak`). The split of the gain between the stages is not modelled.
+`FastAttackAgc::ad9361_reset(clocks per sample)` holds these reset values.
+
+**Where the model departs from the documents or defines what they leave open** (each a
+parameter or a stated simplification, to be replaced by R1's captures):
+- One signal for all detectors. The chip has an analogue peak detector before its filter (LMT),
+  one on the ADC's output and a digital saturation flag; the model compares the peak of the
+  sample after the gain, max(|I|, |Q|) with 1.0 the ADC's full scale, with three thresholds
+  (`both_peak` ≥ `large_peak` ≥ `small_peak`: 6 dB above full scale, full scale, 1 dB below:
+  the model's own numbers). The split of the gain between the stages is not modelled.
 - Exact sample timing: a decision at sample n acts from sample n + 1; the samples
-  n + 1 … n + `peak_wait` are not examined; the quiet count runs from the change.
-- The lock change is round(lock level − measured level) dB, limited to the gain range.
+  n + 1 … n + `peak_wait` are not examined; the quiet count runs from the change. After an
+  unlock that changes the gain the detectors are not held off.
+- The settling delay's reset value is used as 20 clocks whatever the clock; the document says
+  it should scale with ClkRF (about 13 samples instead of 10 at 40 MHz: the reviewer's probe
+  moved the latest change by 5 samples).
+- The lock change is round(lock level − measured level) dB, limited to the gain range
+  (the chip's limit on an increase, AGCLL Max Increase, reset 63, never binds here).
   0 dBFS is a mean |v|² of 1 (the convention of `rxfront`: a packet "at −15 dBFS").
-- In lock the power is the mean of the last `lock_window` samples, compared with the level
-  the lock change aimed at, once a whole window has passed since the lock.
+- The reference in lock is the measured power moved by the lock change, not a new
+  measurement. A lock on no signal at all is left by any power and never by less.
+- On any unlock the gain goes to its maximum or stays (`unlock_to_max`). The document
+  (Table 24) lets the stronger-signal and overload exits keep the index and only the lost
+  signal return it; the gain idles at its maximum in every run here, so it makes no
+  difference yet.
+- **Whether a large overload unlocks at reset is not clear from the documents:** register
+  0x110 resets with "don't unlock on a large overload" set, but UG-570's Table 26 makes that
+  depend on a second bit (0x0FB[D6]) that resets clear, and its text calls the overload exit
+  "recommended for a typical fast AGC configuration". `ad9361_reset` has it off; the
+  measurements run both.
 - States 3 and 4 (a 1 dB decrease on an overload after the lock change, before the final
-  lock) are not modelled: the lock is final at once. The 3 → 5 condition is not published.
+  lock) and State 2A (an increase at low power) are not modelled: the lock is final at once.
+  The 3 → 5 condition is not published.
 - **Phase and DC at a gain change are not published at all** (the only statement found: the
   LNA's output turns by about 180° when it is bypassed, UG-672 register 0x022). They stay the
   assumptions of `agc_transient`: `AgcTrace::gain_states` hands the model's gain changes to
   it with a phase jump per change drawn from a stated range.
 - Noise figure against gain, the filters' transients, the attack delay after entering
-  receive: not modelled.
+  receive: not modelled. A sample that is not a number counts as no signal.
 
 **Gates (G1):** `tests/g1_agc.rs`. The state machine on inputs whose answer is worked by
 hand from the table above (every change's sample and size); dB definitions (a constant
 envelope locks within half a step of the lock level); then the two requirements of ADR 0007
-measured on 802.11 preambles over the input range, as a report and as gates where they hold.
+measured on 802.11 packets over the input range.
 
 ## 2026-11-19 · G1 · R0-07e: `FastAttackAgc`
 
-Command: `cargo test -p radio-phy --test g1_agc` — 11 pass.
+Command: `cargo test -p radio-phy --test g1_agc` — 13 pass.
 
 **Reference:** the published state machine (the G0 table above), worked by hand in the
 tests' comments on inputs of constant level, every gain change at its sample:
@@ -235,77 +253,117 @@ tests' comments on inputs of constant level, every gain change at its sample:
   delay, 16 samples of power, the lock change of −7 dB at sample 45;
 - a weak one: no change, or one lock change; the gain's upper end;
 - a packet after noise: the lock left on an overload (sample 200) and, with that exit off,
-  on the power (eight samples in a row, sample 207); the locked power not looked at before
-  a whole window has passed;
-- the end of a packet: 58 empty samples take the window's mean 10 dB down, eight in a row,
-  the gain back at its maximum or staying;
+  on the power at its third update (sample 217, standing eight samples); the power not
+  compared before a whole window has passed since the lock;
+- the end of a packet: a window 2 dB down does not unlock, an empty one does; the gain back
+  at its maximum or staying; a lock on silence stays;
 - an overload during the power measurement returns to peak detection;
+- details: a settling delay shorter than the energy-detect count; a decision at the last
+  sample; separate thresholds for stronger and lost; the overload exit is the large
+  overload's; a comparison that does not stand long enough, once and twice; a gain range
+  given the wrong way round and samples that are not numbers;
+- the reset value of the power measurement (512 samples) reaches no lock inside a preamble;
 - dB definitions: 115 levels from −105 to −25 dB end within half a step of −10 dBFS (or at
   the largest gain), the gain never rising before the lock change; the gain's lower end;
 - `AgcTrace::gain_states` against the trace applied sample by sample through `agc_transient`.
 
-This is our reading of a published description, as the plan cases of R0-12 are of a clause:
-it holds the model to the document, not to a chip. A capture of the AD9361 (R1) replaces it.
+**What kind of reference this is.** The states, steps, counts and thresholds are the
+document's; the sample each event falls on is our reading where the document gives none
+(G0's list). The reviewer redid five of the cases by hand from G0 and got the same samples.
+It holds the model to the description, not to a chip: there is no reference we did not
+write for the timing until the AD9361 is captured (R1).
 
-**The two requirements of ADR 0007** (`packets_are_still_by_the_end_of_the_stf_and_inside_the_level_window`,
-and `rxfront agcmodel 400` → `docs/gates/reports/rx_front_agcmodel.txt`): 802.11 packets
-5 to 60 dB above a noise that sits at −30 dBFS at the largest gain, CFO up to ±235 kHz, the
-register reset values at two detector clocks per sample, a phase jump within ±30° at each
-gain change (assumed), the fixed receiver behind the 12-bit ADC.
+**The two requirements of ADR 0007** (`rxfront agcmodel 400` →
+`docs/gates/reports/rx_front_agcmodel.txt`): a packet of 1000 octets at 54 Mb/s, 5 to 60 dB
+above a noise that sits at −30 dBFS at the largest gain, CFO up to ±235 kHz, two detector
+clocks per sample, a phase jump within ±30° at each gain change (assumed), the fixed
+receiver behind the 12-bit ADC. Below 30 dB the gain does not move in any variant (it is at
+or near its maximum and the packet at −30 dBFS + SNR, −10 dBFS at 20 dB); 400 of 400 frames
+are acquired there. From 30 to 60 dB:
 
-| SNR | Gain moved | Last change, STF sample (median / 95 % / latest) | Level after it | Acquired, timing exact | Fine CFO RMS |
+| Variant | Latest gain change, STF sample (30 / 40 / 50 / 60 dB) | Frames still by sample 159 | Gain moved in the data | Acquired with exact timing | Fine CFO RMS |
 |---|---|---|---|---|---|
-| 5 dB | 0 of 400 | — | −25 dBFS | 400, 400 | 3.0 kHz |
-| 10 dB | 0 | — | −20 dBFS | 400, 400 | 1.5 kHz |
-| 15 dB | 0 | — | −15 dBFS | 400, 400 | 800 Hz |
-| 20 dB | 0 | — | −10 dBFS | 400, 400 | 478 Hz |
-| 30 dB | 400 | 40 / 54 / 62 | −10 dBFS | 400, 400 | 149 Hz |
-| 40 dB | 400 | 54 / 72 / 78 | −10 dBFS | 400, 400 | 58 Hz |
-| 50 dB | 400 | 62 / 78 / 88 | −10 dBFS | 400, 400 | 46 Hz |
-| 60 dB | 400 | 70 / 86 / 94 | −10 dBFS | 400, 400 | 50 Hz |
+| reset values (power over 512 samples, unlock by power) | 977 / 1595 / 1595 / 1595 | 0 | all | 400, 396, 393, 381 | 2.6 to 6.5 kHz |
+| power over 16 samples, unlock by power | 118 / 142 / 150 / 152 | all | 0 | 400, 388, 371, 355 | 159 to 65 Hz |
+| **power over 16 samples, unlock on a large overload** | **62 / 78 / 78 / 88** | **all** | **0** | **400 at each** | **144 to 42 Hz** |
+| power over 32, overload | 94 / 110 / 110 / 118 | all | 0 | 400 at each | 143 to 49 Hz |
+| power over 64, overload | 150 / 166 / 174 / 174 | 400, 397, 392, 391 | 0 | 400 at each | 151, 62, 105, 247 Hz |
+| power over 16, overload, 1 clock per sample | 82 / 114 / 122 / 128 | all | 0 | 400 at each | 144 to 43 Hz |
+| power over 16, overload, lock level −14 dBFS | 64 / 78 / 78 / 88 | all | 0 | 400 at each | 147 to 65 Hz |
 
-- **Still from the end of the STF: yes, in this model, with room.** The latest change is at
-  STF sample 94 (4.7 µs) at 60 dB; each 5 dB step costs three samples, then 10 of settling
-  and 16 of power. With the lock left on a large overload the changes come four to eight
-  samples earlier; a shorter lock window (16) and exit count (2) change little (the report's
-  other three sections). Analog Devices' own note on 802.11a with this chip speaks of about
-  3 µs available for the lock and of that being hard to meet (the tuning page and a 2014
-  EngineerZone answer, cited in G0's sources): the same order as these 2 to 4.7 µs, which is
-  as much agreement as a description without measured times allows.
-- **Every gain change falls inside the coarse CFO window** (STF samples 32 to 144), which
-  ADR 0007 gave up for this reason: the fine estimate is what is handed on, and its RMS
-  here is that of a clean channel at the same SNR.
+- **With the reset values the requirement fails outright:** 512 samples of power outlast the
+  preamble, the gain is still searching when the data symbols arrive and moves inside them
+  in every frame.
+- **"Still from the end of the STF" holds under two conditions that are settings, not
+  defaults:** the power measured over at most 32 samples, and the lock left on a large
+  overload. Then the latest change is at STF sample 88 (16 samples) to 118 (32). At 64
+  samples 3 to 9 of 400 frames are late and the fine CFO estimate shows it (247 Hz at
+  60 dB against 44).
+- **Leaving the lock by the power alone loses frames** even with the short measurement: the
+  power updates every 64 samples, so a strong packet clips for up to 72 samples before the
+  gain moves; at 60 dB 45 of 400 frames miss exact timing. Not a question of the deadline
+  (the latest change is at 152) but of what the detector sees before it.
+- Every gain change of the working variants falls inside the coarse CFO window (STF samples
+  32 to 144), which ADR 0007 gave up for this reason; the fine estimate's RMS is that of a
+  clean channel at the same SNR.
 - **The level window holds from 15 dB up; below it the gain is at its maximum and the packet
   lies at −30 dBFS + SNR.** That is not a failure of the control: the window's lower edge
   came from the fixed receiver's quantisation (`rx_front_level.txt`), and a packet 5 dB
   above the noise is limited by that noise: at −30 dBFS and 4 dB SNR that report shows
-  1 % on the CFO error, and quantisation costs in earnest only from −45 dBFS down. The requirement is restated: inside −15 to −3 dBFS, or at the largest gain
-  with the noise at or above the level the ADC needs (−65 dBFS, R0-08b). Where the noise
-  sits at the largest gain is a property of the radio (R1).
-- No gain change in the 400 samples of noise before any packet (the control stays locked on
-  the noise), and none after the lock inside the packet.
+  1 % on the CFO error, and quantisation costs in earnest only from −45 dBFS down. The
+  requirement is restated: inside −15 to −3 dBFS, or at the largest gain with the noise at
+  or above the level the ADC needs (−65 dBFS, R0-08b). Where the noise sits at the largest
+  gain is a property of the radio (R1).
+- No gain change in the 400 samples of noise before any packet. After the lock, none in
+  these packets (3 400 samples); the reviewer saw otherwise on longer ones with the overload
+  exit on: 1000 octets at 6 Mb/s (27 000 samples) at 20 dB, 22 of 100 frames unlocked inside
+  the packet on a peak of the data and 7 changed gain. The overload exit that the start of
+  a packet needs is a hazard for the rest of it: the gain must be held once the packet is
+  acquired (the chip has a pin for it; Analog Devices' tuning page recommends the same).
+  A requirement on our own control (R3) and on R1's configuration.
+- Analog Devices' own statements on 802.11a with this chip (the tuning page; a 2014
+  EngineerZone answer) are a budget of about 3 µs for the lock, called hard to meet. The
+  2 to 4.4 µs here (samples 38 to 88) are not a confirmation of anything: no measured lock
+  time is published.
+- Sensitivities probed by the reviewer on the first version (latest change, baseline 94):
+  the noise at −45 or −20 dBFS 94 and 104; thresholds 3 dB lower 102; settling 13 samples 99.
 
-**Mutations** (17; each fails the tests named or, for two, a test added for it): the
-detectors' hold-off one sample short; the large step taken for the small; the small
-threshold ignored; the measurement started at the energy-detect count; one power sample
-fewer; the lock change truncated instead of rounded; not limited to the range; the exit
-count one short; the energy-lost threshold ignored; the overload exit ignored; the gain kept
-on unlock; the lower end ignored; `gain_states` not relative — all caught by the hand-worked
-cases. The locked window looked at one sample early and the peak taken on I only survived
-at first: `the_locked_power_waits_for_a_whole_window`, `the_peak_is_taken_on_both_rails`.
-The requirement gate: 160 samples of power measurement (the last change at sample 505) and
-a lock level of −20 dBFS (a packet at −21 dBFS with gain to spare) both fail it.
+**The gate** (`packets_are_still_by_the_end_of_the_stf_and_inside_the_level_window`): the
+working variant (16 samples, overload exit), a short packet, 40 frames at each of six SNRs:
+no change in the noise, the last change by STF sample 159, the level inside the window or
+the gain at its maximum, the fixed receiver's timing exact.
+
+**Mutations** (24, each fails the tests named in the run's log; `cp` + `touch` to
+restore): the detectors' hold-off one sample short; the large step taken for the small; the
+small threshold ignored; the measurement started at the energy-detect count; the larger of
+settling delay and count not taken; one power sample fewer; the lock change truncated; not
+limited to the range; the power update one sample early; the standing count one short; the
+standing count not reset; the lost threshold taken from the stronger one; the lost
+threshold ignored; the guard against a lock on silence removed; the overload exit ignored;
+the overload exit on the small threshold; the gain kept on unlock; the lower end ignored;
+the peak on I only; either trimming of the trace's end removed; `gain_states` not relative;
+non-finite samples kept. Nine of them survived a first time (two of mine, six of the
+reviewer's, one after the rework) and have tests now. The requirement gate: 160 samples of
+power measurement and a lock level of −20 dBFS both fail it.
+
+**Pre-PR review (fresh agent), 2026-11-19**, on the first version, which claimed "still by
+STF sample 94, with room" for "the reset values". It read UG-570 and UG-672 itself. Found
+and corrected: the power measurement's reset value is 512 samples, not 16 (the claim held
+for a setting, and the journal now says under which settings); the lock exit is documented
+(a stored reference, compared once per update) and the model had a sliding window: reworked
+to block updates, which changed two hand-worked cases and showed the frames lost above;
+the overload exit's reset state (recorded as unclear); "four to eight samples earlier" and
+"none after the lock" did not hold in general; "agreement" with Analog Devices' 3 µs was
+overstated; `f64::clamp` could panic on a reversed range; silence unlocked the gain every
+97 samples; six surviving mutations; the test header's "reference we did not write".
 
 **Not done here / open**
 1. The DC offset per gain state (the model's states carry none) and the DC blocker's hold
    or rescale at a gain step: the backlog item's second half, next.
-2. R0-09's packet error rate through the model (the data symbols at −10 dBFS with their
-   peaks: the window's upper edge), with R0-09's fixed receiver.
-3. The numbers taken from UG-570 and UG-672 were read by a research agent from archive
-   copies; a second reading against the printed pages before anything is built on a
-   particular value. The thresholds, the single detector point and the sample timing are
-   the model's own (G0).
-4. A packet within 10 dB of a previous lock level does not unlock the gain (a weak packet
-   after a strong one's lock, a strong one arriving on a weak one): the two-packet scenes of
-   R0-08 through this model.
-5. Phase and DC at a gain change remain assumptions until R1's captures.
+2. R0-09's packet error rate through the model (the data symbols at −10 or −14 dBFS with
+   their peaks: the window's upper edge), with R0-09's fixed receiver.
+3. Holding the gain after acquisition (above): who tells the gain control, and when.
+4. A packet within 10 dB of a previous lock level does not unlock the gain by the power (a
+   weak packet after a strong one's lock): the two-packet scenes of R0-08 through this model.
+5. Phase and DC at a gain change remain assumptions until R1's captures; so do the
+   detector thresholds, the single detector point and the sample timing.
