@@ -794,3 +794,124 @@ fn slope_and_phase_on_unequal_pilots() {
         assert!((v.0 - f64::from(p.i)).abs() < 0.02 && (v.1 - f64::from(p.q)).abs() < 0.02);
     }
 }
+
+#[test]
+fn clock_offset_and_carrier_offset_have_one_sign() {
+    // The rule the timing loop's start rests on, from physics rather than from our own
+    // scenario: `resample(x, p)` scales every frequency of x by 1 + p·1e-6 (a tone at f comes
+    // out at f·(1 + p·1e-6)). A transmitter whose one oscillator is p ppm fast therefore also
+    // sends its carrier p·1e-6·fc high: the CFO the front measures is +p·1e-6·fc, and
+    // `Tracking::from_clock_offset` takes p = +CFO/carrier·1e6. (The first version of this
+    // receiver and of `rxper` had the opposite sign on both sides, which no test could see.)
+    let (f, p) = (1.0e6, 1000.0);
+    let x: Vec<C> = (0..4000)
+        .map(|n| {
+            let a = 2.0 * PI * f * n as f64 / FS;
+            (a.cos(), a.sin())
+        })
+        .collect();
+    let y = resample(&x, p);
+    // Mean phase advance per sample over the middle of the stream.
+    let adv: f64 = (1000..3000)
+        .map(|n| {
+            let (a, b) = (y[n], y[n + 1]);
+            (b.1 * a.0 - b.0 * a.1).atan2(b.0 * a.0 + b.1 * a.1)
+        })
+        .sum::<f64>()
+        / 2000.0;
+    let measured = adv * FS / (2.0 * PI);
+    println!("1 MHz through resample(+1000 ppm): {measured:.1} Hz");
+    assert!((measured - f * (1.0 + p * 1e-6)).abs() < 1.0, "{measured}");
+    // And the loop's start for +p is the drift that resample(+p) makes: a 54 Mb/s frame whose
+    // loop is frozen (gains 0) decodes only if the start has the right sign.
+    let frozen = RxOfdmConfig {
+        timing_gain: 0.0,
+        timing_rate_gain: 0.0,
+        ..RxOfdmConfig::default()
+    };
+    let psdu = random_psdu(1500, &mut Rng::new(0x0f09_000d));
+    let mut x = frame(&psdu, Rate::R54, 0x47);
+    x.extend(vec![(0.0, 0.0); 16]);
+    let y = resample(&x, 40.0);
+    let right = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::from_clock_offset(40.0));
+    let wrong = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::from_clock_offset(-40.0));
+    assert_eq!(right.map(|d| d.psdu), Ok(psdu.clone()));
+    assert!(wrong.map(|d| d.psdu) != Ok(psdu));
+}
+
+#[test]
+fn hostile_arguments_do_not_panic() {
+    let cfg = RxOfdmConfig::default();
+    let y = frame(&[1, 2, 3], Rate::R6, 0x11);
+    let h = estimate_channel(&y[T1..T1 + 128]).unwrap();
+    // Starts and shifts beyond any stream.
+    for start in [usize::MAX, usize::MAX - 100, y.len(), y.len() - 1] {
+        assert!(matches!(
+            decode_ppdu(&y, start, &cfg),
+            Err(RxOfdmError::Truncated { .. })
+        ));
+        assert!(matches!(
+            decode_signal(&y, start, &h, &cfg),
+            Err(RxOfdmError::Truncated { .. })
+        ));
+    }
+    for shift in [i64::MAX, i64::MIN, -100_000, 100_000] {
+        let t = Tracking {
+            shift,
+            ..Tracking::default()
+        };
+        assert!(matches!(
+            decode_ppdu_from(&y, T1, &cfg, t),
+            Err(RxOfdmError::Truncated { .. })
+        ));
+    }
+    // A window the loop has moved: `needed` names the window actually read.
+    let t = Tracking {
+        shift: 5000,
+        ..Tracking::default()
+    };
+    assert_eq!(
+        decode_ppdu_from(&y, T1, &cfg, t),
+        Err(RxOfdmError::Truncated {
+            needed: T1 + 128 + 16 + 5000 + 64,
+            have: y.len()
+        })
+    );
+    // A length no SIGNAL can carry.
+    for length in [0, 4096, usize::MAX / 8, usize::MAX] {
+        let r = decode_data_bits(
+            &y,
+            T1,
+            &h,
+            Signal {
+                rate: Rate::R54,
+                length,
+            },
+            &cfg,
+            &mut Tracking::default(),
+            &mut SymbolLog::default(),
+        );
+        assert_eq!(r, Err(RxOfdmError::SignalLength), "{length}");
+    }
+    // Soft values from a symbol of the wrong size, and with a senseless configuration.
+    let short = Equalised {
+        points: vec![(1.0, 0.0); 7],
+        weights: vec![1.0; 3],
+        common_phase: 0.0,
+    };
+    assert_eq!(soft_bits(&short, Modulation::Qam64, &cfg).len(), 18);
+    for (soft_max, clip) in [
+        (-1, 1.5),
+        (0, 1.5),
+        (7, 0.0),
+        (7, f64::NAN),
+        (i32::MAX, 1e-300),
+    ] {
+        let c = RxOfdmConfig {
+            soft_max,
+            clip,
+            ..cfg
+        };
+        let _ = decode_ppdu(&y, T1, &c);
+    }
+}
