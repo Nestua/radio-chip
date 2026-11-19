@@ -79,11 +79,12 @@ pub struct Tracking {
 }
 
 impl Tracking {
-    /// The loop's state before SIGNAL for a receiver whose sample clock is `ppm` fast against
-    /// the transmitter's: the drift per symbol and the drift since the middle of the long
-    /// training field. A transmitter derives its carrier and its symbol clock from one
-    /// oscillator (IEEE 802.11-2020 §17.3.9.5–6), and so does this receiver, so the front's CFO
-    /// gives it: ppm = −CFO / carrier · 10⁶.
+    /// The loop's state before SIGNAL when the transmitter's clock is `ppm` fast against the
+    /// receiver's ([`crate::channel::resample`]'s parameter): the drift per symbol and the
+    /// drift since the middle of the long training field. A transmitter derives its carrier
+    /// and its symbol clock from one oscillator (IEEE 802.11-2020 §17.3.9.5–6), and so does
+    /// this receiver, so a fast transmitter is also high in frequency and the front's CFO
+    /// gives the offset: ppm = +CFO / carrier · 10⁶.
     pub fn from_clock_offset(ppm: f64) -> Self {
         let per_sample = 2.0 * PI / FFT_SIZE as f64 * ppm * 1e-6;
         let rate = per_sample * SYMBOL_LEN as f64;
@@ -117,7 +118,7 @@ pub enum RxOfdmError {
     SignalParity,
     /// SIGNAL's RATE bits are none of the eight rates.
     SignalRate([u8; 4]),
-    /// SIGNAL's LENGTH is 0.
+    /// SIGNAL's LENGTH is 0 (or a [`Signal`] handed in has a length outside 1…4095).
     SignalLength,
     /// The Viterbi decoder rejected the stream (cannot happen for whole symbols).
     Viterbi(ViterbiError),
@@ -351,8 +352,9 @@ pub fn equalise(
 /// weight × metric × soft_max / clip, rounded half away from zero and saturated to ±soft_max.
 /// This scaling is the demapper's contract with the Viterbi decoder (`docs/gates/viterbi.md`).
 pub fn soft_bits(eq: &Equalised, modulation: Modulation, cfg: &RxOfdmConfig) -> Vec<i32> {
-    let scale = f64::from(cfg.soft_max) / cfg.clip;
-    let limit = f64::from(cfg.soft_max);
+    // A negative `soft_max` would make an empty range to clamp to.
+    let limit = f64::from(cfg.soft_max.max(0));
+    let scale = limit / cfg.clip;
     let on_air: Vec<i32> = eq
         .points
         .iter()
@@ -363,16 +365,25 @@ pub fn soft_bits(eq: &Equalised, modulation: Modulation, cfg: &RxOfdmConfig) -> 
                 .map(move |m| (m * w * scale).round().clamp(-limit, limit) as i32)
         })
         .collect();
-    // The interleaver sends coded bit k to position interleaved_index(k).
+    // The interleaver sends coded bit k to position interleaved_index(k). (A symbol with
+    // fewer than 48 points has no such position: an erasure.)
     (0..on_air.len())
-        .map(|k| on_air[interleaved_index(k, modulation)])
+        .map(|k| {
+            on_air
+                .get(interleaved_index(k, modulation))
+                .copied()
+                .unwrap_or(0)
+        })
         .collect()
 }
 
 /// First sample of the FFT window of symbol `i` after the long training field (0 = SIGNAL),
 /// keeping the back-off `fft_start` has inside the cyclic prefix.
 fn symbol_start(fft_start: usize, i: usize) -> usize {
-    fft_start + 2 * FFT_SIZE + CP_LEN + SYMBOL_LEN * i
+    // Saturating: a start beyond any stream is reported as truncation, not as an overflow.
+    fft_start
+        .saturating_add(2 * FFT_SIZE + CP_LEN)
+        .saturating_add(SYMBOL_LEN.saturating_mul(i))
 }
 
 fn symbol_soft(
@@ -385,12 +396,20 @@ fn symbol_soft(
     tracking: &mut Tracking,
 ) -> Result<(Vec<i32>, f64), RxOfdmError> {
     let nominal = symbol_start(fft_start, i);
+    // The window as the timing loop has moved it.
+    let start = i64::try_from(nominal)
+        .ok()
+        .and_then(|n| n.checked_add(tracking.shift))
+        .and_then(|n| usize::try_from(n).ok());
+    let end = start.and_then(|s| s.checked_add(FFT_SIZE));
     let truncated = RxOfdmError::Truncated {
-        needed: nominal + FFT_SIZE,
+        needed: end.unwrap_or(usize::MAX),
         have: y.len(),
     };
-    let start = usize::try_from(nominal as i64 + tracking.shift).map_err(|_| truncated)?;
-    let window = y.get(start..start + FFT_SIZE).ok_or(truncated)?;
+    let window = start
+        .zip(end)
+        .and_then(|(s, e)| y.get(s..e))
+        .ok_or(truncated)?;
     let eq = equalise(window, h, i, modulation, cfg, tracking).ok_or(truncated)?;
     Ok((soft_bits(&eq, modulation, cfg), eq.common_phase))
 }
@@ -456,8 +475,11 @@ pub fn decode_data_bits(
     log: &mut SymbolLog,
 ) -> Result<Vec<u8>, RxOfdmError> {
     let Signal { rate, length } = signal;
+    if !(1..=MAX_PSDU_LEN).contains(&length) {
+        return Err(RxOfdmError::SignalLength);
+    }
     let symbols = data_symbols(rate, length);
-    let needed = symbol_start(fft_start, symbols) + FFT_SIZE;
+    let needed = symbol_start(fft_start, symbols).saturating_add(FFT_SIZE);
     if y.len() < needed {
         return Err(RxOfdmError::Truncated {
             needed,
@@ -541,7 +563,7 @@ pub fn decode_ppdu_from(
     cfg: &RxOfdmConfig,
     tracking: Tracking,
 ) -> Result<Decoded, RxOfdmError> {
-    let needed = fft_start + 2 * FFT_SIZE;
+    let needed = fft_start.saturating_add(2 * FFT_SIZE);
     let h = y
         .get(fft_start..needed)
         .and_then(estimate_channel)

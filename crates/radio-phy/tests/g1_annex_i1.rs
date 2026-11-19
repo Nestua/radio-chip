@@ -320,12 +320,23 @@ fn annex_waveform_decodes() {
         })
         .collect();
     let want = psdu(&a);
+    // The seed whose sequence is the annex's Table I-14.
+    let seed = {
+        let seq = bit_table(&a, "I-14");
+        (1..=0x7fu8)
+            .find(|&s| {
+                let mut sc = Scrambler::new(s).unwrap();
+                (0..127).map(|_| sc.next_bit()).collect::<Vec<_>>() == seq
+            })
+            .unwrap()
+    };
     // T1 starts at sample 192; every window start inside the guard interval must do.
     for backoff in [0usize, 2, 4, 8, 15] {
         let d = decode_ppdu(&y, 192 - backoff, &RxOfdmConfig::default()).unwrap();
         assert_eq!(d.signal.rate, Rate::R36);
         assert_eq!(d.signal.length, 100);
         assert_eq!(d.psdu, want, "back-off {backoff}");
+        assert_eq!(d.scrambler_seed, seed, "back-off {backoff}");
     }
     println!(
         "Annex I.1 waveform: {} octets decoded, \"{}…\"",

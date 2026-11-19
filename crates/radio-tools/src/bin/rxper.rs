@@ -124,11 +124,11 @@ fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<
                     Multipath::new(tgn_taps(m, false), Doppler::Static, 1, FS, &mut rng).apply(&x)
                 }
             };
-            // A receiver clock fast by p ppm: its samples run ahead by p·1e-6 per sample and
-            // its local oscillator is high, so the signal appears at −p·1e-6·carrier.
+            // The transmitter's oscillator fast by p ppm against ours: its symbols come p·1e-6
+            // faster and its carrier is p·1e-6·carrier above our local oscillator.
             let p = ppm.unwrap_or_else(|| (rng.uniform() * 2.0 - 1.0) * 40.0);
             let x = resample(&x, p);
-            let x = frequency_offset(&x, -p * 1e-6 * CARRIER_HZ, FS, 2.0 * PI * rng.uniform());
+            let x = frequency_offset(&x, p * 1e-6 * CARRIER_HZ, FS, 2.0 * PI * rng.uniform());
             let x = awgn(&x, snr_db, mean_power(&f), &mut rng);
             let Some(a) = acquire(&x, 0, &rx) else {
                 lost.iter_mut().for_each(|l| *l += 1);
@@ -137,7 +137,7 @@ fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<
             let y = correct(&x, a.cfo_hz, FS);
             for (k, r) in receivers.iter().enumerate() {
                 let start = if r.hint {
-                    Tracking::from_clock_offset(-a.cfo_hz / CARRIER_HZ * 1e6)
+                    Tracking::from_clock_offset(a.cfo_hz / CARRIER_HZ * 1e6)
                 } else {
                     Tracking::default()
                 };
@@ -263,13 +263,14 @@ fn standard() -> Vec<Receiver> {
     ]
 }
 
-/// Timing-loop candidates at a few operating points near 10 % PER, against a receiver that
-/// knows the clock offset exactly is not available: the yardstick is zero offset without a loop.
+/// Timing-loop candidates at a few operating points near 10 % PER. Two runs per point, each
+/// with every receiver on the same frames: with the clock offset drawn per frame, and at 0 ppm
+/// against a receiver without the loop (what the loop itself costs).
 fn timing(frames: usize) {
     let candidates = [
         ("1/8, 1/250", 0.125, 0.004),
         ("1/16, 1/1000", 0.0625, 0.001),
-        ("1/32, 1/4000", 0.03125, 0.00025),
+        ("1/32, 1/4096", 1.0 / 32.0, 1.0 / 4096.0),
         ("1/64, 1/16000", 0.015625, 0.0000625),
     ];
     let mut rx = Vec::new();
@@ -280,10 +281,16 @@ fn timing(frames: usize) {
     for (name, g, r) in candidates {
         rx.push(receiver(name, false, gains(g, r)));
     }
-    println!("\n## timing loop: frames lost of {frames} (rounded up), 1000 octets, clock offset uniform in ±40 ppm");
-    println!("# columns: gains (proportional, integral) started from the CFO's clock offset | the same started from zero | at 0 ppm: no loop, the slowest loop, no pilot tracking at all");
-    let names: Vec<&str> = rx.iter().take(n).map(|r| r.name).collect();
-    println!("# gains: {}", names.join(" ; "));
+    let mut zero = vec![receiver("no loop", false, no_loop())];
+    for (name, g, r) in candidates {
+        zero.push(receiver(name, false, gains(g, r)));
+    }
+    println!("\n## timing loop: frames lost of {frames} (rounded up), 1000 octets");
+    println!(
+        "# gains (proportional, integral): {}",
+        candidates.map(|c| c.0).join(" ; ")
+    );
+    println!("# columns: clock offset uniform in ±40 ppm, loop started from the CFO | the same frames, started from zero || 0 ppm: no loop | 0 ppm, the four gains (same frames as no loop)");
     for (label, rate, snr, ch) in [
         ("AWGN  6 Mb/s  3.5 dB", Rate::R6, 3.5, Channel::Awgn),
         ("AWGN 54 Mb/s 20.0 dB", Rate::R54, 20.0, Channel::Awgn),
@@ -314,42 +321,15 @@ fn timing(frames: usize) {
         ),
     ] {
         let seed = 7000 + rate.mbps() as u64 + snr as u64;
-        let (l, total) = lost(
-            Scene {
-                rate,
-                octets: 1000,
-                snr_db: snr,
-                ch,
-                ppm: None,
-            },
-            &rx,
-            frames,
-            seed,
-        );
-        let slow = gains(0.015625, 0.0000625);
-        let (y, _) = lost(
-            Scene {
-                rate,
-                octets: 1000,
-                snr_db: snr,
-                ch,
-                ppm: Some(0.0),
-            },
-            &[
-                receiver("no loop", false, no_loop()),
-                receiver("slowest loop", false, slow),
-                receiver(
-                    "no pilots at all",
-                    false,
-                    RxOfdmConfig {
-                        pilot_tracking: false,
-                        ..no_loop()
-                    },
-                ),
-            ],
-            frames,
-            seed,
-        );
+        let scene = |ppm| Scene {
+            rate,
+            octets: 1000,
+            snr_db: snr,
+            ch,
+            ppm,
+        };
+        let (l, total) = lost(scene(None), &rx, frames, seed);
+        let (y, _) = lost(scene(Some(0.0)), &zero, frames, seed);
         let f = |v: &[usize]| {
             v.iter()
                 .map(|x| format!("{x:>4}"))
@@ -357,10 +337,11 @@ fn timing(frames: usize) {
                 .join(" ")
         };
         println!(
-            "{label:<22} | {} | {} | {}  of {total}",
+            "{label:<22} | {} | {} || {:>4} | {}  of {total}",
             f(&l[..n]),
             f(&l[n..]),
-            f(&y)
+            y[0],
+            f(&y[1..])
         );
     }
 }
