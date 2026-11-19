@@ -15,6 +15,7 @@ use radio_phy::channel::{
     add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, tgn_taps, Doppler,
     Multipath, Rng, TgnModel,
 };
+use radio_phy::convolutional::ConvolutionalEncoder;
 use radio_phy::fixed::{requantize, Overflow, QFormat, Rounding};
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
@@ -977,12 +978,55 @@ fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// Vectors for `hw/rtl/conv_encoder.sv` (gate G3: `make -C hw conv_encoder`): frames of input
+/// bits with the encoder's A and B outputs (`ConvolutionalEncoder::encode_bit`), each frame
+/// from the all-zero state. Frames: all zeros, all ones, a single one (the impulse response:
+/// the generators themselves), alternating bits, and random frames of 1 to 600 bits.
+fn conv_encoder_vectors(out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "# rvec conv_encoder — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# K = 7, g0 = 133, g1 = 171 (octal), rate 1/2, each line from state 0."
+    )?;
+    writeln!(out, "# <input bits> <A bits> <B bits>")?;
+    let mut rng = XorShift32(0xc0de_0001);
+    let mut frames: Vec<Vec<u8>> = vec![
+        vec![0; 40],
+        vec![1; 40],
+        std::iter::once(1)
+            .chain(std::iter::repeat_n(0, 15))
+            .collect(),
+        (0..64).map(|i| (i % 2) as u8).collect(),
+        vec![1],
+    ];
+    for k in 0..60usize {
+        let len = 1 + (k * k * 7 + k * 13) % 600;
+        frames.push((0..len).map(|_| rng.next_bit()).collect());
+    }
+    for bits in frames {
+        let mut enc = ConvolutionalEncoder::new();
+        let (a, b): (Vec<u8>, Vec<u8>) = bits.iter().map(|&x| enc.encode_bit(x)).unzip();
+        writeln!(
+            out,
+            "{} {} {}",
+            bits_to_string(&bits),
+            bits_to_string(&a),
+            bits_to_string(&b)
+        )?;
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let result = match block.as_str() {
         "scrambler" => scrambler_vectors(&mut out),
+        "conv_encoder" => conv_encoder_vectors(&mut out),
         "ofdm-symbols" => ofdm_symbols(&mut out),
         "ppdu-frames" => ppdu_frames(&mut out),
         "ltf_corr" => ltf_corr_vectors(&mut out),
@@ -994,7 +1038,7 @@ fn main() -> ExitCode {
         "latch" => latch_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, round_sat, ltf_corr, cordic, nco, det, latch, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

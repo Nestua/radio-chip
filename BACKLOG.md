@@ -11,7 +11,7 @@ written from memory for 802.11-2020; confirm each one against the edition we use
 | ID | Block | Reference for G1 | Gates | Status |
 |---|---|---|---|---|
 | R0-01 | Scrambler, S(x) = x^7+x^4+1 (§17.3.5.5) | 127-bit sequence printed in §17.3.5.5 + Annex I.1 (Tables I-14, I-15) | G1, G3 | done — `docs/gates/scrambler.md` |
-| R0-02 | Convolutional encoder K=7, (133, 171)₈, puncturing for rates 2/3, 3/4 (§17.3.5.6) | CommPy black box + UBC worked example on Fig. 17-8 + 802.11-2024 Annex I.1 (Tables I-8, I-16) | G1 | done — `docs/gates/convolutional_encoder.md` (patterns confirmed by OpenOFDM's receiver, R0-06) |
+| R0-02 | Convolutional encoder K=7, (133, 171)₈, puncturing for rates 2/3, 3/4 (§17.3.5.6) | CommPy black box + UBC worked example on Fig. 17-8 + 802.11-2024 Annex I.1 (Tables I-8, I-16) | G1, G3 | done — `docs/gates/convolutional_encoder.md` (patterns confirmed by OpenOFDM's receiver, R0-06; RTL of the rate-1/2 encoder at G3 for R0-14a) |
 | R0-03 | Interleaver, two permutations per symbol (§17.3.5.7) | OpenOFDM black box (all 8 rates) + §17.3.5.7 design properties + Annex I.1 (Tables I-9, I-17…I-19) | G1 | done — `docs/gates/interleaver.md` |
 | R0-04 | Subcarrier mapping BPSK…64-QAM, Gray, normalisation (§17.3.5.8) | OpenOFDM black box on every point + Gray/energy properties + Annex I.1 (Tables I-10, I-11, I-20) | G1 | done — `docs/gates/mapper.md` (unnormalised grid; K_MOD in fixed point with R0-05/R0-11) |
 | R0-05 | OFDM modulation: 64-point IFFT, pilots and polarity, cyclic prefix (§17.3.5.10) | OpenOFDM tables + OpenOFDM receiver decoding our symbols + textbook DFT + Annex I.1 samples | G1, G2 | done — `docs/gates/ofdm.md` (W = 13, approved by the founder) |
