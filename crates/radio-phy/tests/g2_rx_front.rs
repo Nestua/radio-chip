@@ -501,3 +501,42 @@ fn fixed_failed_candidate_does_not_block_a_weaker_packet_after_it() {
         "{ok}/40 packets acquired after a failed candidate"
     );
 }
+
+/// ADR 0007, decision 1, in the fixed model: the CFO handed on is the fine estimate, bit for
+/// bit; the coarse weight (in 64ths) stays a parameter and at 15 gives the old 49/64 rule.
+#[test]
+fn fixed_acquisition_hands_on_the_fine_estimate() {
+    let fs = 20e6;
+    let cfg = RxConfig::new(fs);
+    let fx = FixedRxConfig::default();
+    assert_eq!(fx.coarse_weight_64, 0);
+    let old = FixedRxConfig {
+        coarse_weight_64: 15,
+        ..fx
+    };
+    for w in [-1, 65] {
+        let bad = FixedRxConfig {
+            coarse_weight_64: w,
+            ..fx
+        };
+        assert!(!bad.is_valid(), "a weight of {w}/64");
+    }
+    assert!(old.is_valid());
+    let f = preamble();
+    let mut rng = Rng::new(0x08d2);
+    let mut differ = 0;
+    for _ in 0..200 {
+        let (adc, _, _) = adc_scene(&f, None, 12.0, fs, &mut rng);
+        let a = acquire_fixed(&adc, &cfg, &fx).unwrap();
+        assert_eq!(a.cfo_phase, a.fine_phase);
+        let b = acquire_fixed(&adc, &cfg, &old).unwrap();
+        assert_eq!(
+            (b.coarse_phase, b.fine_phase),
+            (a.coarse_phase, a.fine_phase)
+        );
+        let d = b.fine_phase - b.coarse_phase;
+        assert_eq!(b.cfo_phase, b.coarse_phase + ((49 * d + 32) >> 6));
+        differ += usize::from(d != 0);
+    }
+    assert!(differ > 150, "coarse and fine hardly ever differ: {differ}");
+}

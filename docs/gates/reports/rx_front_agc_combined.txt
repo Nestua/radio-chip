@@ -1,0 +1,64 @@
+# The run before ADR 0007 (commit a40c7b2): the CFO handed on was the combination
+# coarse + 0.771·(fine − coarse), column "combined". Kept because ADR 0007 and the phase
+# review cite these figures; the current rule is in rx_front_agc.txt.
+# rxfront agc: RxFrontFixed, 500 frames per case, SNR 20 dB, CFO uniform in ±235 kHz.
+# Steps are offsets from the STF's first sample (STF 0…159, GI2 160…191, T1 192…255, T2
+# 256…319); the gain before a step is that many dB above the settled gain. Settled at
+# −15 dBFS unless stated. The phase jumps are assumed, not measured on a real AGC.
+# timing = FFT start exact; ±64 = off by one whole long training symbol.
+# RMS errors in Hz over the frames with exact timing; slips = of those, fine estimate off
+# by more than fs/256 (its lag-64 ambiguity resolved wrongly), left out of the fine RMS.
+
+## causes apart, one event at STF sample 48
+# case                                          acquired  timing    ±64   combined     coarse       fine  slips
+no gain change                                        500     500      0        422        866        477      0
+no gain change, settled at −40 dBFS                   500     500      0        463        972        507      0
+−6 dB, no clipping, no jump                           500     500      0        444       1202        461      0
+−20 dB, no clipping (−40 dBFS), no jump               500     500      0        923       3531        520      0
+−20 dB, clipping before, no jump                      500     500      0       3155      13367        448      0
+no gain change, jump ±10°                             500     500      0        928       3453        457      0
+no gain change, jump ±30°                             500     500      0       2290       9795        454      0
+no gain change, jump ±90°                             500     500      0       6065      25860        467      0
+
+## causes together
+# case                                          acquired  timing    ±64   combined     coarse       fine  slips
+−20 dB at 48, clipping, jump ±10°                     500     500      0       3937      16780        432      0
+−20 dB at 48, clipping, jump ±30°                     500     500      0       8133      34603        478      0
+−20 dB at 48, clipping, jump ±90°                     316     277     39      13541      57736        462      0
+−20, −10 dB at 32, 64, DC −30 dBFS, jump ±0°          500     500      0        818       3064        502      0
+−20, −10 dB at 48, 96, DC −30 dBFS, jump ±0°          500     500      0       5033      21489        540      0
+−20, −10 dB at 32, 64, DC −30 dBFS, jump ±30°         500     500      0       2765      11598        514      0
+−20, −10 dB at 48, 96, DC −30 dBFS, jump ±30°         500     500      0       8507      36241        523      0
+
+## position of a −20 dB step
+# case                                          acquired  timing    ±64   combined     coarse       fine  slips
+−20 dB at 16, clipping, jump ±30°                     500     500      0        407        900        431      0
+−20 dB at 32, clipping, jump ±30°                     500     500      0        458       1011        484      0
+−20 dB at 48, clipping, jump ±30°                     500     500      0       8374      35701        441      0
+−20 dB at 64, clipping, jump ±30°                     500     500      0       5678      24112        485      0
+−20 dB at 80, clipping, jump ±30°                     500     500      0       3066      13032        474      0
+−20 dB at 96, clipping, jump ±30°                     500     500      0       2374       9831        468      0
+−20 dB at 112, clipping, jump ±30°                    500     500      0       1969       8284        490      0
+−20 dB at 128, clipping, jump ±30°                    500     500      0       1660       6821        474      0
+−20 dB at 144, clipping, jump ±30°                    500     286    214       1762       7366        475      0
+−20 dB at 176, clipping, jump ±30°                    500      81    419       5990       8103       7686      0
+−20 dB at 208, clipping, jump ±30°                    500       1    347       2783       2717       2802      0
+−20 dB at 272, clipping, jump ±30°                    500       0    500          0          0          0      0
+
+## position of a −2 dB trim
+# case                                          acquired  timing    ±64   combined     coarse       fine  slips
+−2 dB trim at 100, jump ±0°                           500     500      0        404        799        468      0
+−2 dB trim at 100, jump ±10°                          500     500      0        781       3067        434      0
+−2 dB trim at 100, jump ±30°                          500     500      0       2154       9061        455      0
+−2 dB trim at 144, jump ±0°                           500     500      0        391        813        452      0
+−2 dB trim at 144, jump ±10°                          500     500      0        408        843        476      0
+−2 dB trim at 144, jump ±30°                          500     500      0        380        844        439      0
+−2 dB trim at 176, jump ±0°                           500     500      0        416        826        461      0
+−2 dB trim at 176, jump ±10°                          500     500      0        730        807        915      0
+−2 dB trim at 176, jump ±30°                          500     500      0       1853        846       2402      0
+−2 dB trim at 208, jump ±0°                           500     500      0        389        828        464      0
+−2 dB trim at 208, jump ±10°                          500     500      0       2096        836       2722      0
+−2 dB trim at 208, jump ±30°                          500     500      0       6360        792       8311      0
+−2 dB trim at 272, jump ±0°                           500     500      0        430        882        478      0
+−2 dB trim at 272, jump ±10°                          500     500      0       1795        875       2330      0
+−2 dB trim at 272, jump ±30°                          500     500      0       5345        822       6978      0

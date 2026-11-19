@@ -21,8 +21,8 @@
 #![allow(clippy::unwrap_used)]
 
 use radio_phy::channel::{
-    add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, resample, tgn_taps,
-    Doppler, Multipath, Rng, TgnModel,
+    add_tone, agc_transient, awgn, fractional_delay, frequency_offset, gain_step, mean_power,
+    resample, tgn_taps, Doppler, GainState, Multipath, Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
@@ -329,6 +329,75 @@ fn chosen_detector_meets_the_standard_at_9_db() {
 // Acquisition against ground truth
 // ---------------------------------------------------------------------------------------------
 
+/// Standard deviation (Hz) of the fine (LTF, lag 64) CFO estimate alone: the estimate the
+/// acquisition hands on (ADR 0007).
+fn fine_cfo_std(snr: f64, fs: f64) -> f64 {
+    let (d, l) = (64.0, FINE_LEN as f64);
+    ((d * snr + l / 2.0) / (l * l * snr * snr)).sqrt() * fs / (2.0 * PI * d)
+}
+
+/// ADR 0007, decision 1. The acquisition hands on the fine estimate; the coarse one only
+/// resolves its ambiguity. The weight of the coarse estimate stays a parameter.
+#[test]
+fn the_acquisition_hands_on_the_fine_estimate() {
+    let f = preamble();
+    let mut rng = Rng::new(0x08d1);
+    let cfg = RxConfig::new(FS);
+    let mut awgn_weight = cfg.clone();
+    awgn_weight.coarse_weight = 1.0 - FINE_WEIGHT;
+    assert_eq!(cfg.coarse_weight, 0.0);
+
+    // By construction, on any scene.
+    let x = scene(&f, 300, 0, 0.3, 77e3, FS, 15.0, &mut rng);
+    let a = acquire(&x, 0, &cfg).unwrap();
+    assert_eq!(a.cfo_hz, a.fine_cfo_hz);
+    assert!(
+        (a.coarse_cfo_hz - a.fine_cfo_hz).abs() > 1.0,
+        "a degenerate scene"
+    );
+    let b = acquire(&x, 0, &awgn_weight).unwrap();
+    assert_eq!(
+        (b.coarse_cfo_hz, b.fine_cfo_hz),
+        (a.coarse_cfo_hz, a.fine_cfo_hz)
+    );
+    let want = b.fine_cfo_hz + (1.0 - FINE_WEIGHT) * (b.coarse_cfo_hz - b.fine_cfo_hz);
+    assert!((b.cfo_hz - want).abs() < 1e-6, "{} vs {want}", b.cfo_hz);
+
+    // What the decision buys: a gain stage switching 16 samples into the coarse window (STF
+    // sample 48) turns the carrier by 30°. Over the 96 lag-16 products, 16 see the jump: the
+    // coarse estimate moves by about (16/96)·30°/(2π·16) of the sample rate ≈ 17 kHz (less,
+    // as a vector sum); the fine window is untouched.
+    let (mut fine2, mut comb2, trials) = (0.0, 0.0, 300);
+    for _ in 0..trials {
+        let lead = 200 + (rng.uniform() * 300.0) as usize;
+        let cfo = (rng.uniform() * 2.0 - 1.0) * 100e3;
+        let x = scene(&f, lead, 0, 0.0, cfo, FS, 20.0, &mut rng);
+        let jump = [GainState {
+            until: lead + 48,
+            gain_db: 0.0,
+            phase: 30f64.to_radians(),
+            dc: (0.0, 0.0),
+        }];
+        let x = agc_transient(&x, &jump);
+        fine2 += (acquire(&x, 0, &cfg).unwrap().cfo_hz - cfo).powi(2);
+        comb2 += (acquire(&x, 0, &awgn_weight).unwrap().cfo_hz - cfo).powi(2);
+    }
+    let (fine, comb) = (
+        (fine2 / trials as f64).sqrt(),
+        (comb2 / trials as f64).sqrt(),
+    );
+    let theory = fine_cfo_std(100.0, FS);
+    println!("30° at STF sample 48, 20 dB: fine {fine:.0} Hz (theory {theory:.0}), AWGN weight {comb:.0} Hz");
+    assert!(
+        (0.85..1.15).contains(&(fine / theory)),
+        "fine {fine} vs {theory}"
+    );
+    assert!(
+        comb > 4.0 * fine,
+        "the combination should be damaged: {comb} vs {fine}"
+    );
+}
+
 /// Combined CFO standard deviation (Hz) predicted from the coarse (STF) and fine (LTF)
 /// variances combined by inverse variance, at the high-SNR limit D/(L²·SNR).
 fn combined_cfo_std(snr: f64, fs: f64) -> f64 {
@@ -353,12 +422,15 @@ fn acquires_timing_and_cfo_in_awgn() {
     let mut rng = Rng::new(0x08a6);
     for &fs in &[20e6, 10e6, 5e6] {
         let cfg = RxConfig::new(fs);
+        let mut cfg_w = cfg.clone();
+        cfg_w.coarse_weight = 1.0 - FINE_WEIGHT;
         let b = backoff_samples(&cfg);
         assert_eq!(b, (200e-9 * fs).round() as usize);
         let max_cfo = if fs < 10e6 { 25e3 } else { 235e3 }; // TCXO ±2 ppm pair at 5 MHz
         for snr_db in [10.0, 20.0] {
             let trials = 1000;
             let mut errs = Vec::with_capacity(trials);
+            let mut errs_w = Vec::with_capacity(trials);
             for _ in 0..trials {
                 // ≥ 2^7 samples ahead: the DC blocker has settled (its start-up average sees only noise).
                 let lead = 200 + (rng.uniform() * 300.0) as usize;
@@ -376,9 +448,17 @@ fn acquires_timing_and_cfo_in_awgn() {
                 );
                 assert_eq!(acq.ltf_start + 32, acq.fft_start + b);
                 errs.push(acq.cfo_hz - cfo);
+                errs_w.push(acquire(&x, 0, &cfg_w).unwrap().cfo_hz - cfo);
             }
+            // The coarse weight that is optimal in AWGN still meets its own theory.
+            let (_, var_w) = mean_var(&errs_w);
+            let ratio_w = var_w.sqrt() / combined_cfo_std(10f64.powf(snr_db / 10.0), fs);
+            assert!(
+                (0.92..1.08).contains(&ratio_w),
+                "combined rms/theory {ratio_w:.3}"
+            );
             let (m, var) = mean_var(&errs);
-            let theory = combined_cfo_std(10f64.powf(snr_db / 10.0), fs);
+            let theory = fine_cfo_std(10f64.powf(snr_db / 10.0), fs);
             println!(
                 "fs {:>4.0} MHz {snr_db} dB: CFO error mean {m:+.1} Hz, rms {:.1} Hz, theory {theory:.1}",
                 fs / 1e6,
