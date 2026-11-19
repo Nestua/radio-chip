@@ -76,8 +76,25 @@ fn replay_finds_the_annotated_frames() {
     }
     assert!(listed.contains("6 acquisitions"));
 
+    // Arguments that are not numbers in range are refused, not replaced by defaults.
+    for args in [
+        vec!["replay", p, "32"],
+        vec!["replay", p, "-1"],
+        vec!["replay", p, "abc"],
+        vec!["synth", p, "abc"],
+        vec!["synth", p, "3", "xyz"],
+        vec!["synth", "plain-name", "3"],
+    ] {
+        let out = Command::new(rcap).args(&args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}");
+    }
+    assert!(
+        Recording::read(&path).is_ok(),
+        "a refused command must not touch the capture"
+    );
+
     // A damaged capture is refused by the tool.
-    let data = radio_capture::sigmf::data_path(&path);
+    let data = radio_capture::sigmf::data_path(&path).unwrap();
     let mut bytes = std::fs::read(&data).unwrap();
     bytes[100] ^= 1;
     std::fs::write(&data, bytes).unwrap();

@@ -25,9 +25,8 @@ const FS: f64 = 20e6;
 fn info(path: &Path) -> Result<(), String> {
     let reader = Reader::open(path).map_err(|e| e.to_string())?;
     let m = &reader.meta;
-    let bytes = std::fs::metadata(radio_capture::sigmf::data_path(path))
-        .map_err(|e| e.to_string())?
-        .len();
+    let data = radio_capture::sigmf::data_path(path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::metadata(data).map_err(|e| e.to_string())?.len();
     let samples = bytes / m.datatype.sample_bytes() as u64;
     println!("datatype     {}", m.datatype.name());
     println!("sample rate  {} Hz", m.sample_rate_hz);
@@ -181,12 +180,24 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let path = Path::new(file);
-    let arg = |k: usize| args.get(k).and_then(|v| v.parse::<f64>().ok());
+    // An argument that is given must be a number in range: no silent defaults.
+    let arg = |k: usize, name: &str, default: f64, range: std::ops::RangeInclusive<f64>| match args
+        .get(k)
+    {
+        None => Ok(default),
+        Some(t) => t
+            .parse::<f64>()
+            .ok()
+            .filter(|v| range.contains(v) && v.fract() == 0.0 || name == "snr" && range.contains(v))
+            .ok_or(format!("{name} must be a number in {range:?}, not {t:?}")),
+    };
     let result = match cmd.as_str() {
         "info" => info(path),
         "verify" => verify(path),
-        "synth" => synth(path, arg(2).unwrap_or(3.0) as usize, arg(3).unwrap_or(20.0)),
-        "replay" => replay(path, arg(2).unwrap_or(0.0) as u32),
+        "synth" => arg(2, "frames", 3.0, 1.0..=10_000.0).and_then(|frames| {
+            arg(3, "snr", 20.0, -20.0..=100.0).and_then(|snr| synth(path, frames as usize, snr))
+        }),
+        "replay" => arg(2, "shift", 0.0, 0.0..=15.0).and_then(|shift| replay(path, shift as u32)),
         _ => Err("unknown command".into()),
     };
     match result {

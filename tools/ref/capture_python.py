@@ -134,6 +134,11 @@ def check(out):
         f"first_samples {' '.join(str(v) for v in struct.unpack('<8h', data[:16]))}",
         f"captures {len(meta['captures'])} frequency {meta['captures'][0]['core:frequency']!r}",
         f"annotations {len(meta['annotations'])}",
+        f"global_keys {' '.join(sorted(g))}",
+        f"capture_keys {' '.join(sorted(meta['captures'][0]))}",
+        f"annotation_keys {' '.join(sorted(meta['annotations'][0]))}",
+        f"datetime {meta['captures'][0]['core:datetime']}",
+        f"annotation {meta['annotations'][0]['core:sample_start']} {meta['annotations'][0]['core:sample_count']} {meta['annotations'][0]['core:label']}",
         f"description {json.dumps(g['core:description'], ensure_ascii=True)}",
         f"canonical_sha512 {hashlib.sha512(json.dumps(meta, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()}",
     ]

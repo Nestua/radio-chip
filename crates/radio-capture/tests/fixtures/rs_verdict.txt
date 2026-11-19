@@ -11,5 +11,10 @@ samples 500
 first_samples -2000 -1999 -1999 -1962 -1996 -1925 -1991 -1888
 captures 1 frequency 5805000000
 annotations 1
+global_keys core:author core:datatype core:description core:hw core:sample_rate core:sha512 core:version nestua:adc_bits
+capture_keys core:datetime core:frequency core:sample_start
+annotation_keys core:label core:sample_count core:sample_start
+datetime 2026-11-19T00:00:00Z
+annotation 16 320 preamble
 description "written by radio-capture: \"quotes\", a tab\t, \u041a\u0438\u0457\u0432, \ud83d\udce1"
 canonical_sha512 56a3c57a6c8688592ef82c79b5b3f2cf8e28fb45e033bb9292ad6423eed91bfadcbe0cb42828bc1fc09e8d079539de634409b987878ea90414e5d7aaa641c085

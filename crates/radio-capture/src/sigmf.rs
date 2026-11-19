@@ -82,6 +82,12 @@ pub enum SigmfError {
     },
     /// The dataset's length is not a whole number of samples.
     Length(u64),
+    /// The recording uses a part of SigMF this crate does not read (several channels, header
+    /// or trailing bytes, a dataset under another name, metadata without a dataset). Reading
+    /// on would give wrong samples.
+    Unsupported(&'static str),
+    /// The metadata file's name does not end in `.sigmf-meta`.
+    Name(String),
 }
 
 impl std::fmt::Display for SigmfError {
@@ -99,6 +105,8 @@ impl std::fmt::Display for SigmfError {
                 )
             }
             SigmfError::Length(n) => write!(f, "dataset of {n} bytes is not whole samples"),
+            SigmfError::Unsupported(k) => write!(f, "{k} is not supported"),
+            SigmfError::Name(n) => write!(f, "{n} does not end in .sigmf-meta"),
         }
     }
 }
@@ -194,9 +202,16 @@ fn real(v: &Value, what: &'static str) -> Result<f64, SigmfError> {
 }
 
 fn number(v: f64) -> Value {
-    // Finite by construction (checked when read, and by `Meta::new`); integers print without
-    // a point, so 20 MHz stays "20000000".
+    // Integers print without a point, so 20 MHz stays "20000000". Not finite gives null, which
+    // no reader accepts: `Meta::validate` refuses such metadata before it is written.
     Value::from_f64(v).unwrap_or(Value::Null)
+}
+
+/// Whether a member name occurs twice.
+fn duplicate(m: &[(String, Value)]) -> bool {
+    m.iter()
+        .enumerate()
+        .any(|(i, (k, _))| m[..i].iter().any(|(e, _)| e == k))
 }
 
 impl Meta {
@@ -224,6 +239,9 @@ impl Meta {
     pub fn from_json(json: &str) -> Result<Meta, SigmfError> {
         let top = parse(json)?;
         let global = top.get("global").ok_or(SigmfError::Missing("global"))?;
+        if duplicate(members(&top, "top level")?) || duplicate(members(global, "global")?) {
+            return Err(SigmfError::Field("duplicate member name"));
+        }
         let mut meta = Meta::new(Datatype::Ci16Le, 0.0, None);
         meta.captures.clear();
         let (mut datatype, mut rate, mut version) = (None, None, None);
@@ -239,6 +257,17 @@ impl Meta {
                 "core:description" => meta.description = Some(text(v, "core:description")?),
                 "core:hw" => meta.hw = Some(text(v, "core:hw")?),
                 "core:author" => meta.author = Some(text(v, "core:author")?),
+                // Parts of SigMF that change where the samples are: refused, not ignored.
+                "core:num_channels" if v.as_u64() != Some(1) => {
+                    return Err(SigmfError::Unsupported("core:num_channels other than 1"));
+                }
+                "core:dataset" => return Err(SigmfError::Unsupported("core:dataset")),
+                "core:trailing_bytes" if v.as_u64() != Some(0) => {
+                    return Err(SigmfError::Unsupported("core:trailing_bytes"));
+                }
+                "core:metadata_only" if *v != Value::Bool(false) => {
+                    return Err(SigmfError::Unsupported("core:metadata_only"));
+                }
                 _ => meta.other.push((name.clone(), v.clone())),
             }
         }
@@ -246,9 +275,7 @@ impl Meta {
         // The specification makes the rate optional; a receiver cannot use a recording
         // without it.
         meta.sample_rate_hz = rate.ok_or(SigmfError::Missing("core:sample_rate"))?;
-        if meta.sample_rate_hz <= 0.0 {
-            return Err(SigmfError::Field("core:sample_rate"));
-        }
+
         meta.version = version.ok_or(SigmfError::Missing("core:version"))?;
         for (name, v) in members(&top, "top level")? {
             match (name.as_str(), v) {
@@ -264,6 +291,9 @@ impl Meta {
                                     s.frequency_hz = Some(real(f, "core:frequency")?)
                                 }
                                 "core:datetime" => s.datetime = Some(text(f, "core:datetime")?),
+                                "core:header_bytes" if f.as_u64() != Some(0) => {
+                                    return Err(SigmfError::Unsupported("core:header_bytes"));
+                                }
                                 _ => s.other.push((k.clone(), f.clone())),
                             }
                         }
@@ -295,7 +325,24 @@ impl Meta {
                 _ => meta.other_top.push((name.clone(), v.clone())),
             }
         }
-        if meta
+        meta.validate()?;
+        Ok(meta)
+    }
+
+    /// Whether the metadata can be written and read back: a finite, positive sample rate,
+    /// finite frequencies, capture segments in order of `sample_start`.
+    pub fn validate(&self) -> Result<(), SigmfError> {
+        if !(self.sample_rate_hz.is_finite() && self.sample_rate_hz > 0.0) {
+            return Err(SigmfError::Field("core:sample_rate"));
+        }
+        if self
+            .captures
+            .iter()
+            .any(|s| s.frequency_hz.is_some_and(|f| !f.is_finite()))
+        {
+            return Err(SigmfError::Field("core:frequency"));
+        }
+        if self
             .captures
             .windows(2)
             .any(|w| w[0].sample_start > w[1].sample_start)
@@ -304,7 +351,7 @@ impl Meta {
                 "captures (not in order of core:sample_start)",
             ));
         }
-        Ok(meta)
+        Ok(())
     }
 
     /// The text of the `.sigmf-meta` file: typed fields first, in a fixed order, then the
@@ -379,9 +426,17 @@ impl Meta {
     }
 }
 
-/// The dataset file that belongs to a metadata file: the same name with `.sigmf-data`.
-pub fn data_path(meta_path: &Path) -> PathBuf {
-    meta_path.with_extension("sigmf-data")
+/// The dataset file that belongs to a metadata file: `<name>.sigmf-data` beside
+/// `<name>.sigmf-meta`. Refuses any other metadata name (so that the dataset can never be the
+/// metadata file itself, and a dotted name is not cut short).
+pub fn data_path(meta_path: &Path) -> Result<PathBuf, SigmfError> {
+    let name = meta_path.to_string_lossy();
+    match name.strip_suffix(".sigmf-meta") {
+        Some(stem) if !stem.is_empty() && !stem.ends_with(['/', '\\']) => {
+            Ok(PathBuf::from(format!("{stem}.sigmf-data")))
+        }
+        _ => Err(SigmfError::Name(name.into_owned())),
+    }
 }
 
 /// A recording held in memory: metadata and the dataset's bytes.
@@ -441,9 +496,9 @@ impl Recording {
     /// Reads a recording: `meta_path` and the dataset beside it. The dataset must be whole
     /// samples and, if the metadata has `core:sha512`, must have that digest.
     pub fn read(meta_path: &Path) -> Result<Recording, SigmfError> {
+        let path = data_path(meta_path)?;
         let text = std::fs::read_to_string(meta_path).map_err(|e| io("read", meta_path, e))?;
         let meta = Meta::from_json(&text)?;
-        let path = data_path(meta_path);
         let data = std::fs::read(&path).map_err(|e| io("read", &path, e))?;
         check(&meta, data.len() as u64, || {
             let mut h = Sha512::new();
@@ -454,13 +509,23 @@ impl Recording {
     }
 
     /// Writes the recording as `meta_path` and the dataset beside it, with the dataset's
-    /// SHA-512 in the metadata. Returns the metadata as written.
+    /// SHA-512 in the metadata. Returns the metadata as written. Nothing is written unless the
+    /// recording could be read back ([`Meta::validate`], whole samples). The dataset is written
+    /// first: after a crash in between, the old metadata's checksum no longer matches.
     pub fn write(&self, meta_path: &Path) -> Result<Meta, SigmfError> {
+        let path = data_path(meta_path)?;
+        self.meta.validate()?;
+        if !self
+            .data
+            .len()
+            .is_multiple_of(self.meta.datatype.sample_bytes())
+        {
+            return Err(SigmfError::Length(self.data.len() as u64));
+        }
         let mut meta = self.meta.clone();
         let mut h = Sha512::new();
         h.update(&self.data);
         meta.sha512 = Some(hex(&h.finalize()));
-        let path = data_path(meta_path);
         File::create(&path)
             .and_then(|mut f| f.write_all(&self.data))
             .map_err(|e| io("write", &path, e))?;
@@ -535,14 +600,18 @@ pub struct Reader {
     hash: Sha512,
     bytes: u64,
     done: bool,
+    failed: Option<SigmfError>,
 }
+
+/// Samples read from the file per call at most, whatever the caller asks for.
+const MAX_CHUNK: usize = 1 << 20;
 
 impl Reader {
     /// Opens the recording at `meta_path`.
     pub fn open(meta_path: &Path) -> Result<Reader, SigmfError> {
+        let path = data_path(meta_path)?;
         let text = std::fs::read_to_string(meta_path).map_err(|e| io("read", meta_path, e))?;
         let meta = Meta::from_json(&text)?;
-        let path = data_path(meta_path);
         let file = File::open(&path).map_err(|e| io("open", &path, e))?;
         Ok(Reader {
             meta,
@@ -550,13 +619,26 @@ impl Reader {
             hash: Sha512::new(),
             bytes: 0,
             done: false,
+            failed: None,
         })
     }
 
-    /// The next samples, at most `max` (in the units of [`Recording::to_f64`]); an empty
-    /// vector at the end. The checks of [`Recording::read`] are made when the end is reached:
-    /// a recording is verified only once it has been read through.
+    /// The next samples, at most `max` and at most 2²⁰ (in the units of
+    /// [`Recording::to_f64`]); an empty vector at the end. The checks of [`Recording::read`]
+    /// are made when the end is reached: a recording is verified only once it has been read
+    /// through. After an error every further call returns that error.
     pub fn next_chunk(&mut self, max: usize) -> Result<Vec<(f64, f64)>, SigmfError> {
+        if let Some(e) = &self.failed {
+            return Err(e.clone());
+        }
+        let result = self.read_chunk(max.min(MAX_CHUNK));
+        if let Err(e) = &result {
+            self.failed = Some(e.clone());
+        }
+        result
+    }
+
+    fn read_chunk(&mut self, max: usize) -> Result<Vec<(f64, f64)>, SigmfError> {
         if self.done || max == 0 {
             return Ok(Vec::new());
         }

@@ -22,12 +22,20 @@ gates G5 and G6 will rest on it). Code: `crates/radio-capture` (no dependencies)
   `core:author`; per capture segment `core:sample_start`, `core:frequency`, `core:datetime`;
   per annotation `core:sample_start`, `core:sample_count`, `core:label`, `core:comment`.
   Every other field, at every level, is kept as read and written back.
+- **Refused by name**, because reading on would give wrong samples: `core:num_channels`
+  other than 1, `core:dataset` (a dataset under another name), `core:trailing_bytes` and
+  `core:header_bytes` other than 0, `core:metadata_only`. Also refused: a member name twice
+  at the top level or in `global`, and a metadata file whose name does not end in
+  `.sigmf-meta` (the dataset's name is derived from it and must never be the same file).
+- **Writing** refuses what could not be read back: a sample rate or frequency that is not
+  finite, a dataset that is not whole samples. The dataset is written before the metadata.
 - **Checksum:** SHA-512 of the dataset (FIPS 180-4), lower-case hexadecimal in `core:sha512`.
   Written always; checked on reading whenever present. A dataset that is not whole samples is
   refused. The streaming reader checks both when it reaches the end.
 - **JSON:** RFC 8259, strict (no trailing commas, no bare control characters, no lone
-  surrogates, nothing after the value), nesting limited to 64. Objects keep their member
-  order and numbers keep their text, so a 64-bit sample index is not pushed through a double.
+  surrogates, nothing after the value), at most 64 arrays and objects inside one another.
+  Objects keep their member order and numbers keep their text; whether a number is an integer
+  is decided on its digits (`9007199254740993.0` is one, `0.99999999999999999999` is not).
 - **`rcap`:** `info`, `verify`, `synth` (a simulated capture with an annotation per frame),
   `replay` (the fixed-point front over a `ci16_le` capture, optionally dropping low bits: 4
   for an SDR's 16-bit samples into the model's 12-bit ADC).
@@ -55,10 +63,14 @@ a black box, Python 3.9.6; fixtures in `crates/radio-capture/tests/fixtures/`)
 - `round_trip_keeps_everything`: four formats, 0 to 4097 samples, awkward strings, foreign
   fields at three levels, a `sample_start` of 2⁶⁴ − 1: read back equal, and written again byte
   for byte the same. The sample values of each format at their extremes.
-- `json_refuses_what_is_not_json`: 30 malformed texts; nesting 64 accepted, 66 and 100 000
-  refused (no stack overflow).
-- `damage_is_reported`: one flipped bit of the dataset (both readers), a dataset one byte
-  short, no dataset, seven kinds of wrong metadata, capture segments out of order.
+- `json_refuses_what_is_not_json`: 30 malformed texts; nesting 64 accepted, 65 and 100 000
+  refused (no stack overflow), for arrays and for objects.
+- `json_reads_what_python_writes` also holds what Python never writes: `\/`, hexadecimal
+  escapes in capitals, and 21 numbers at the edges of "is an integer".
+- `damage_is_reported`: one flipped bit of the dataset (both readers; the streaming reader
+  repeats its error), a dataset one byte short, no dataset, seven kinds of wrong metadata,
+  the five unsupported fields and two duplicates, five wrong file names, three recordings
+  that must not be written, capture segments out of order.
 
 **Replay of a known capture** (`radio-tools/tests/g1_capture_replay.rs`): `rcap synth` writes
 six frames at 12 dB SNR; the fixed-point front finds six acquisitions, the same through the
@@ -79,6 +91,39 @@ flipped bit.
 | capture order not checked | damage (after a test was added for it) |
 
 "Maj as an OR of the three ANDs" is equivalent (the majority function either way).
+
+**Evidence:** `cargo test -p radio-capture -p radio-tools` — 8 + 1 tests pass; this entry's pull
+request is the commit. The code was written before its tests in this block (the references
+came first, as fixtures); that the tests can fail is shown by the mutations, not by a failing
+first run.
+
+**Pre-PR review (fresh agent, code only), 2026-11-19:** no defect in SHA-512 or in the JSON
+reader and writer.
+- Its own runs: 4800 random and edge messages against hashlib (single, in pieces, cloned);
+  450 000 mutated JSON texts against Python's `json`, the only disagreement being lone
+  surrogates, which Python accepts and we refuse on purpose; every text we write read back
+  by Python.
+- Fixed after the review:
+  - third-party recordings with several channels, header or trailing bytes, a named dataset
+    or no dataset were read as if they had none of these: now refused by name;
+  - `rcap replay` with a shift of 32 or more used shift mod 32, and arguments that were not
+    numbers silently became defaults: now refused;
+  - `Recording::write` could write files its own reader refuses (a NaN rate as `null`, half a
+    sample) and, given a name ending in `.sigmf-data`, overwrite the dataset with the
+    metadata: now refused before anything is written;
+  - "is an integer" went through a double (`9007199254740993.0` read as 2⁵³);
+  - the nesting limit was 65, and the test did not pin it;
+  - `Reader::next_chunk` could overflow on an absurd request and forgot an error on the next
+    call;
+  - duplicate member names were handled three different ways;
+  - the escapes Python never writes (`\/`, capital hexadecimal) had no test: two mutations
+    survived there;
+  - Python's verdict now lists the member names of `global`, the capture and the annotation,
+    so a misspelt name we write is caught by Python and not only by the byte comparison.
+- Noted, not changed: most of `json_reads_what_python_writes` compares our reading of the
+  escaped form with our reading of the raw form of the same value; the content itself is
+  pinned by the spot checks and by reference 4. Writing is not atomic (no temporary file);
+  the checksum catches a torn pair.
 
 **Open questions**
 1. Validation by the SigMF project's own library (`sigmf` on PyPI, its JSON schema) is not

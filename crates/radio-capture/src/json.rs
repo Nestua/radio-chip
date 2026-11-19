@@ -38,8 +38,8 @@ impl std::fmt::Display for JsonError {
 
 impl std::error::Error for JsonError {}
 
-/// Arrays and objects nested deeper than this are refused (a hostile file must not exhaust the
-/// stack).
+/// Arrays and objects may be nested this deep and no deeper (a hostile file must not exhaust
+/// the stack).
 pub const MAX_DEPTH: usize = 64;
 
 impl Value {
@@ -63,19 +63,45 @@ impl Value {
         }
     }
 
-    /// The value as an unsigned integer, if it is a number with an exact integer value in range
-    /// (`20000000`, `2e7` and `20000000.0` all are).
+    /// The value as an unsigned integer, if it is a number whose exact decimal value is an
+    /// integer in range (`20000000`, `2e7` and `20000000.0` all are; `0.99999999999999999999`
+    /// is not, although it reads as the double 1). Decided on the digits, not through a double.
     pub fn as_u64(&self) -> Option<u64> {
         let Value::Number(t) = self else {
             return None;
         };
-        if let Ok(v) = t.parse::<u64>() {
-            return Some(v);
+        let (mantissa, exponent) = match t.find(['e', 'E']) {
+            Some(i) => (&t[..i], t[i + 1..].parse::<i64>().ok()?),
+            None => (t.as_str(), 0),
+        };
+        // Zero in any spelling (−0, 0.00, 0e−400) is the integer 0; no other negative is.
+        let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
+        if unsigned.chars().all(|c| c == '0' || c == '.') {
+            return Some(0);
         }
-        let v: f64 = t.parse().ok()?;
-        // Doubles hold every integer up to 2^53 exactly; beyond that only the plain integer
-        // form above is trusted.
-        ((0.0..=9_007_199_254_740_992.0).contains(&v) && v.fract() == 0.0).then_some(v as u64)
+        if unsigned.len() != mantissa.len() {
+            return None;
+        }
+        let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        let mut digits: String = format!("{int}{frac}");
+        let mut scale = exponent.checked_sub(frac.len() as i64)?;
+        // Digits to drop must be zeros; zeros to append must fit 20 digits.
+        while scale < 0 {
+            if digits.pop()? != '0' {
+                return None;
+            }
+            scale += 1;
+        }
+        let digits = digits.trim_start_matches('0');
+        if digits.is_empty() {
+            return Some(0);
+        }
+        if scale > 20 || digits.len() as i64 + scale > 20 {
+            return None;
+        }
+        format!("{digits}{}", "0".repeat(scale as usize))
+            .parse()
+            .ok()
     }
 
     /// The value as a string slice, if it is a string.
@@ -338,10 +364,10 @@ impl Parser<'_> {
     }
 
     fn value(&mut self, depth: usize) -> Result<Value, JsonError> {
-        if depth > MAX_DEPTH {
+        self.skip_space();
+        if matches!(self.peek(), Some(b'[' | b'{')) && depth >= MAX_DEPTH {
             return self.error("nested too deeply");
         }
-        self.skip_space();
         match self.peek() {
             None => self.error("value expected"),
             Some(b'n') => self.literal(b"null", Value::Null),

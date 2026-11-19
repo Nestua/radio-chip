@@ -131,6 +131,41 @@ fn json_reads_what_python_writes() {
     );
     assert_eq!(parse("-1").unwrap().as_u64(), None);
     assert_eq!(parse("0.5").unwrap().as_u64(), None);
+    // RFC 8259 §7, the escapes Python never writes: the solidus, and hexadecimal in capitals.
+    assert_eq!(parse(r#""a\/b""#).unwrap(), Value::String("a/b".into()));
+    assert_eq!(
+        parse(r#""\u00AF\u00af\uABCD\uD83D\uDCE1\uFFFF""#).unwrap(),
+        Value::String("\u{af}\u{af}\u{abcd}\u{1F4E1}\u{ffff}".into())
+    );
+    // Integers are decided on the digits, not through a double.
+    for (text, want) in [
+        ("9007199254740993", Some(9_007_199_254_740_993u64)),
+        ("9007199254740993.0", Some(9_007_199_254_740_993)),
+        ("9007199254740992.5", None),
+        ("0.99999999999999999999", None),
+        ("1e-400", None),
+        ("0e-400", Some(0)),
+        ("1.5e1", Some(15)),
+        ("1.50e1", Some(15)),
+        ("1.55e1", None),
+        ("120e-1", Some(12)),
+        ("125e-1", None),
+        ("18446744073709551615", Some(u64::MAX)),
+        ("18446744073709551616", None),
+        ("1e19", Some(10_000_000_000_000_000_000)),
+        ("1e20", None),
+        ("1e400", None),
+        ("-0", Some(0)),
+        ("-0.0", Some(0)),
+        ("-1e-400", None),
+        ("0.0", Some(0)),
+        ("00012e0", None),
+    ] {
+        match parse(text) {
+            Ok(v) => assert_eq!(v.as_u64(), want, "{text}"),
+            Err(_) => assert_eq!(want, None, "{text}"),
+        }
+    }
 }
 
 #[test]
@@ -171,7 +206,10 @@ fn json_refuses_what_is_not_json() {
     }
     let deep = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
     assert!(parse(&deep(MAX_DEPTH)).is_ok());
-    assert!(parse(&deep(MAX_DEPTH + 2)).is_err());
+    assert!(parse(&deep(MAX_DEPTH + 1)).is_err());
+    let objects = |n: usize| format!("{}1{}", "{\"a\":".repeat(n), "}".repeat(n));
+    assert!(parse(&objects(MAX_DEPTH)).is_ok());
+    assert!(parse(&objects(MAX_DEPTH + 1)).is_err());
     assert!(parse(&deep(100_000)).is_err());
     assert_eq!(Value::from_f64(f64::NAN), None);
     assert_eq!(Value::from_f64(f64::INFINITY), None);
@@ -270,7 +308,7 @@ fn python_reads_the_recording_we_write() {
     ours().write(&path).unwrap();
     let (meta, data) = (
         std::fs::read(&path).unwrap(),
-        std::fs::read(data_path(&path)).unwrap(),
+        std::fs::read(data_path(&path).unwrap()).unwrap(),
     );
     if std::env::var_os("UPDATE_FIXTURES").is_some() {
         std::fs::write(fixtures().join("rs.sigmf-meta"), &meta).unwrap();
@@ -312,6 +350,20 @@ fn python_reads_the_recording_we_write() {
     );
     assert_eq!(field("captures"), "1 frequency 5805000000");
     assert_eq!(field("annotations"), "1");
+    assert_eq!(
+        field("global_keys"),
+        "core:author core:datatype core:description core:hw core:sample_rate core:sha512 core:version nestua:adc_bits"
+    );
+    assert_eq!(
+        field("capture_keys"),
+        "core:datetime core:frequency core:sample_start"
+    );
+    assert_eq!(
+        field("annotation_keys"),
+        "core:label core:sample_count core:sample_start"
+    );
+    assert_eq!(field("datetime"), "2026-11-19T00:00:00Z");
+    assert_eq!(field("annotation"), "16 320 preamble");
     assert_eq!(
         field("description"),
         "\"written by radio-capture: \\\"quotes\\\", a tab\\t, \\u041a\\u0438\\u0457\\u0432, \\ud83d\\udce1\""
@@ -406,7 +458,7 @@ fn damage_is_reported() {
     let path = dir.join("d.sigmf-meta");
     let rec = ours();
     rec.write(&path).unwrap();
-    let data = data_path(&path);
+    let data = data_path(&path).unwrap();
     let good = std::fs::read(&data).unwrap();
     // One bit of the dataset.
     let mut bad = good.clone();
@@ -450,6 +502,97 @@ fn damage_is_reported() {
         let e = Meta::from_json(&meta.replacen(from, to, 1)).unwrap_err();
         assert!(e.to_string().contains(want), "{from} -> {to}: {e}");
     }
+    // Parts of SigMF that would move the samples are refused by name, and so are duplicates.
+    for (from, to, want) in [
+        (
+            "\"core:version\"",
+            "\"core:num_channels\": 2, \"core:version\"",
+            "core:num_channels",
+        ),
+        (
+            "\"core:version\"",
+            "\"core:dataset\": \"other.bin\", \"core:version\"",
+            "core:dataset",
+        ),
+        (
+            "\"core:version\"",
+            "\"core:trailing_bytes\": 4, \"core:version\"",
+            "core:trailing_bytes",
+        ),
+        (
+            "\"core:version\"",
+            "\"core:metadata_only\": true, \"core:version\"",
+            "core:metadata_only",
+        ),
+        (
+            "\"core:frequency\"",
+            "\"core:header_bytes\": 4, \"core:frequency\"",
+            "core:header_bytes",
+        ),
+        (
+            "\"core:version\"",
+            "\"core:hw\": \"twice\", \"core:version\"",
+            "duplicate",
+        ),
+        ("\"captures\"", "\"global\": {}, \"captures\"", "duplicate"),
+    ] {
+        let e = Meta::from_json(&meta.replacen(from, to, 1)).unwrap_err();
+        assert!(e.to_string().contains(want), "{to}: {e}");
+    }
+    // The harmless spellings of the same fields are accepted and kept.
+    let ok = meta.replacen(
+        "\"core:version\"",
+        "\"core:num_channels\": 1, \"core:trailing_bytes\": 0, \"core:metadata_only\": false, \"core:version\"",
+        1,
+    );
+    assert_eq!(Meta::from_json(&ok).unwrap().other.len(), 4);
+    // Writing: nothing that could not be read back, and never over the metadata itself.
+    let rec = ours();
+    for name in [
+        "x.sigmf-data",
+        "x",
+        "rec.2026-11-19",
+        ".sigmf-meta",
+        "x.sigmf-meta.bak",
+    ] {
+        assert!(
+            matches!(rec.write(&dir.join(name)), Err(SigmfError::Name(_))),
+            "{name}"
+        );
+        assert!(!dir.join(name).exists(), "{name} was written");
+    }
+    assert_eq!(
+        data_path(Path::new("a/rec.2026-11-19.sigmf-meta")).unwrap(),
+        Path::new("a/rec.2026-11-19.sigmf-data")
+    );
+    let target = dir.join("bad.sigmf-meta");
+    let mut bad = ours();
+    bad.meta.sample_rate_hz = f64::NAN;
+    assert!(matches!(bad.write(&target), Err(SigmfError::Field(_))));
+    let mut bad = ours();
+    bad.meta.captures[0].frequency_hz = Some(f64::INFINITY);
+    assert!(matches!(bad.write(&target), Err(SigmfError::Field(_))));
+    let mut bad = ours();
+    bad.data.pop();
+    assert!(matches!(bad.write(&target), Err(SigmfError::Length(1999))));
+    assert!(!target.exists() && !data_path(&target).unwrap().exists());
+    // The streaming reader: an absurd request is capped, and an error is not forgotten.
+    rec.write(&path).unwrap();
+    let mut reader = Reader::open(&path).unwrap();
+    assert_eq!(reader.next_chunk(usize::MAX).unwrap().len(), 500);
+    assert!(reader.next_chunk(usize::MAX).unwrap().is_empty());
+    let mut bytes = std::fs::read(&data).unwrap();
+    bytes[7] ^= 0x80;
+    std::fs::write(&data, bytes).unwrap();
+    let mut reader = Reader::open(&path).unwrap();
+    assert!(matches!(
+        reader.next_chunk(1000),
+        Err(SigmfError::Checksum { .. })
+    ));
+    assert!(matches!(
+        reader.next_chunk(1000),
+        Err(SigmfError::Checksum { .. })
+    ));
     // Capture segments out of order.
     let py = std::fs::read_to_string(fixtures().join("py.sigmf-meta")).unwrap();
     assert!(Meta::from_json(&py).is_ok());
