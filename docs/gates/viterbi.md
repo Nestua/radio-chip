@@ -137,9 +137,9 @@ spread overstated — all caught.
 
 ## 2026-11-19 · note · open question 1 answered by R0-09: the soft format does not hold in fading
 
-The whole receiver (`docs/gates/rx_ofdm.md`, 2026-11-19, measurements) loses 1.0 to 3.2 dB at the
-rate-3/4 modes in TGn B and D with SOFT_BITS = 4, SOFT_CLIP = 1.5, against fine soft values;
-0.2 dB or less in AWGN, as the G2 above found. Six bits with a clip of 1.5 to 2 is the first
-format within about 0.2 dB in AWGN and in both channels. SOFT_BITS, SOFT_CLIP and METRIC_BITS
-are unchanged: the choice was the founder's and its revision is too, on a paired G2 run of the
-whole receiver.
+The whole receiver (`docs/gates/rx_ofdm.md`, 2026-11-19, measurements) loses 0.8 to 3.0 dB at
+9, 18 and 36 Mb/s in TGn B and D with SOFT_BITS = 4, SOFT_CLIP = 1.5, against fine soft values,
+and 0.0 to 0.4 dB in AWGN. Six bits with a clip of 1.5 to 2 is the first format within about
+0.35 dB in AWGN and in both channels (a ranking on 200 to 300 frames per point, not a G2
+figure). SOFT_BITS, SOFT_CLIP and METRIC_BITS are unchanged: the choice was the founder's and
+its revision is too, on a paired G2 run of the whole receiver.

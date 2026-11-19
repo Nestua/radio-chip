@@ -916,3 +916,46 @@ fn hostile_arguments_do_not_panic() {
         let _ = decode_ppdu(&y, T1, &c);
     }
 }
+
+#[test]
+fn a_slope_only_the_pilots_have_is_not_applied_to_the_data() {
+    // The tracker's reason to exist in this form. The channel estimate is exact except on the
+    // four pilots, which are tilted as by 0.3 samples: every symbol's pilots then measure that
+    // slope, constant in time, and the data have none. A tracker that follows the measurement
+    // turns the outer data subcarriers by 0.77 rad and loses a 54 Mb/s frame; one that fits
+    // offset + rate·t puts it in the offset and leaves the data alone. (This is what the
+    // estimate's noise on the pilots does at low SNR, made large and noise-free.)
+    let psdu = random_psdu(1000, &mut Rng::new(0x0f09_000e));
+    let y = frame(&psdu, Rate::R54, 0x2f);
+    let mut h = estimate_channel(&y[T1..T1 + 128]).unwrap();
+    let tilt = 0.3 * 2.0 * PI / 64.0;
+    for k in [-21i8, -7, 7, 21] {
+        // P = Z·H*: turning H(k) by −k·tilt turns the pilot by +k·tilt.
+        let a = -f64::from(k) * tilt;
+        let v = h[fft_bin(k)];
+        h[fft_bin(k)] = (v.0 * a.cos() - v.1 * a.sin(), v.0 * a.sin() + v.1 * a.cos());
+    }
+    let cfg = RxOfdmConfig::default();
+    for (name, start) in [
+        ("nothing known", Tracking::default()),
+        ("from a clock offset of 0", Tracking::from_clock_offset(0.0)),
+    ] {
+        let mut tracking = start;
+        let signal = decode_signal(&y, T1, &h, &cfg).unwrap();
+        let mut log = SymbolLog::default();
+        let bits = decode_data_bits(&y, T1, &h, signal, &cfg, &mut tracking, &mut log).unwrap();
+        let sent = data_bits(&psdu, Rate::R54, 0x2f).unwrap();
+        let errors = bits.iter().zip(&sent).filter(|(a, b)| a != b).count();
+        let worst = log.timing.iter().fold(0.0f64, |m, t| m.max(t.abs()));
+        println!(
+            "{name}: offset {:.5} (tilt {tilt:.5}), worst drift applied {worst:.4} samples, {errors} bit errors",
+            tracking.offset
+        );
+        assert!((tracking.offset - tilt).abs() < 1e-3, "{name}");
+        assert!(worst < 0.01, "{name}: {worst}");
+        assert_eq!(errors, 0, "{name}");
+    }
+    // The prior on the rate is what tells the two starts apart: 2 ppm against 40.
+    let ratio = Tracking::from_clock_offset(7.0).covariance[2] / Tracking::default().covariance[2];
+    assert!((ratio - (2.0f64 / 40.0).powi(2)).abs() < 1e-12, "{ratio}");
+}
