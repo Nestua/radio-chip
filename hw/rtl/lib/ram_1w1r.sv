@@ -35,12 +35,16 @@ module ram_1w1r #(
         if (we) mem[waddr] <= wdata;
     end
 
-    // Simulation check of the contract (no hardware: $error is ignored by synthesis).
+    // Simulation check of the contract. Procedural $error is not synthesisable everywhere (the
+    // open flow's SystemVerilog front end refuses it), so the check exists only without
+    // SYNTHESIS, which synthesis tools define.
+`ifndef SYNTHESIS
     if (CHECK_COLLISION) begin : g_check
         always_ff @(posedge clk)
             if (we && re && waddr == raddr)
                 $error("ram_1w1r: read and write of address %0d in the same cycle", waddr);
     end
+`endif
 endmodule
 
 `default_nettype wire
