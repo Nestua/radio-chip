@@ -27,6 +27,9 @@
 //!   fine estimates.
 //! - `tailbw <million>`: detector events and acquisitions of the fixed receiver on noise that
 //!   went through a channel-select low-pass filter (band-limited noise is correlated at lag 16).
+//! - `agcmodel <frames per point>`: the same, with the gain steps placed by the gain control
+//!   model (`channel::FastAttackAgc`) instead of by hand: when the gain is still, where the
+//!   packet's level ends, and what the fixed receiver makes of it.
 //! - `level <frames per point>`: float and fixed receiver on the same ADC samples against the
 //!   packet's level in the ADC, at three SNRs.
 //!
@@ -37,7 +40,7 @@ use std::process::ExitCode;
 
 use radio_phy::channel::{
     add_tone, agc_transient, awgn, fractional_delay, frequency_offset, gain_step, mean_power,
-    tgn_taps, Doppler, GainState, Multipath, Rng, TgnModel,
+    tgn_taps, Doppler, FastAttackAgc, GainState, Multipath, Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
@@ -1189,6 +1192,138 @@ fn agc(frames: usize) {
     }
 }
 
+/// Packets through the gain control model. The noise sits at `IDLE_DBFS` at the largest gain
+/// (where the control idles); a packet `snr` dB above it arrives after 600 to 650 samples of
+/// noise. Reported per point: when the gain last changed relative to the STF's first sample,
+/// the packet's level after it, and the fixed receiver on the result (a phase jump uniform
+/// in ±30° at each gain change: an assumption, as in `agc`).
+fn agcmodel(frames: usize) {
+    const IDLE_DBFS: f64 = -30.0;
+    const JUMP_DEG: f64 = 30.0;
+    let cfg = RxConfig::new(FS);
+    let fx = FixedRxConfig::default();
+    let frame = preamble();
+    let p = mean_power(&frame);
+    let full = f64::from(ADC_FULL_SCALE);
+    let b = backoff_samples(&cfg);
+    let reset = FastAttackAgc::ad9361_reset(2);
+    let variants: [(&str, FastAttackAgc); 4] = [
+        ("reset values (unlock by power)", reset),
+        (
+            "reset values, unlock on a large overload",
+            FastAttackAgc {
+                unlock_on_overload: true,
+                ..reset
+            },
+        ),
+        (
+            "lock window 16, exit count 2, unlock on a large overload",
+            FastAttackAgc {
+                unlock_on_overload: true,
+                lock_window: 16,
+                exit_count: 2,
+                ..reset
+            },
+        ),
+        (
+            "the same, stronger-signal threshold 6 dB",
+            FastAttackAgc {
+                unlock_on_overload: true,
+                lock_window: 16,
+                exit_count: 2,
+                stronger_db: 6.0,
+                ..reset
+            },
+        ),
+    ];
+    println!(
+        "# rxfront agcmodel: channel::FastAttackAgc (AD9361 reset values at 2 detector clocks per\n\
+         # sample unless stated), {frames} frames per point, noise at {IDLE_DBFS} dBFS at the largest\n\
+         # gain, CFO uniform in ±235 kHz, RxFrontFixed behind a 12-bit ADC, phase jump ±{JUMP_DEG}° per\n\
+         # gain change (assumed). Samples count from the STF's first (STF 0…159, LTF 160…319).\n\
+         # moved = frames whose gain changed during the packet; last change: median / 95th\n\
+         # percentile / latest, over those; ≤159 = frames whose gain is still from the end of the\n\
+         # STF (unmoved frames count); level = the packet's RMS after the last change, dBFS,\n\
+         # lowest / mean / highest; window = frames inside −15 … −3 dBFS; early = frames whose\n\
+         # gain changed in the 400 samples of noise before the packet."
+    );
+    for (vi, (name, agc)) in variants.iter().enumerate() {
+        println!(
+            "\n## {name}\n#  SNR  moved   last change (med/95%/max)  ≤159   level dBFS (min/mean/max)  window  early  acquired  timing   fine Hz"
+        );
+        for (si, snr) in [5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+            .into_iter()
+            .enumerate()
+        {
+            let mut rng = Rng::new(0xa6c1_0000 + (vi * 100 + si) as u64);
+            // Noise power p / 10^(snr/10) is IDLE_DBFS at the largest gain.
+            let k = (10f64.powf((IDLE_DBFS - agc.max_gain_db + snr) / 10.0) / p).sqrt();
+            let mut last: Vec<usize> = Vec::new();
+            let (mut still, mut window, mut early) = (0usize, 0usize, 0usize);
+            let (mut lo, mut hi, mut sum) = (f64::INFINITY, f64::NEG_INFINITY, 0.0);
+            let (mut acq, mut tim) = (0usize, 0usize);
+            let mut sf = 0.0f64;
+            for _ in 0..frames {
+                let lead = 600 + (rng.uniform() * 50.0) as usize;
+                let mut x = vec![(0.0, 0.0); lead];
+                x.extend_from_slice(&frame);
+                let cfo = (2.0 * rng.uniform() - 1.0) * 235e3;
+                let x = frequency_offset(&x, cfo, FS, 2.0 * PI * rng.uniform());
+                let x: Vec<C> = awgn(&x, snr, p, &mut rng)
+                    .iter()
+                    .map(|s| (s.0 * k, s.1 * k))
+                    .collect();
+                let t = agc.run(&x);
+                early += usize::from(t.changes.iter().any(|c| c.0 + 400 >= lead && c.0 < lead));
+                let at = t
+                    .changes
+                    .iter()
+                    .rev()
+                    .find(|c| c.0 >= lead)
+                    .map(|c| c.0 - lead);
+                if let Some(at) = at {
+                    last.push(at);
+                }
+                still += usize::from(at.is_none_or(|a| a <= 159));
+                let (settled, states) = t.gain_states(JUMP_DEG, &mut rng);
+                let level = 10.0 * (p * k * k).log10() + settled;
+                lo = lo.min(level);
+                hi = hi.max(level);
+                sum += level;
+                window += usize::from((-15.0..=-3.0).contains(&level));
+                let g = 10f64.powf(settled / 20.0);
+                let at_settled: Vec<C> = x.iter().map(|s| (s.0 * g, s.1 * g)).collect();
+                let adc = to_adc(&agc_transient(&at_settled, &states), full);
+                if let Some(a) = acquire_fixed(&adc, &cfg, &fx) {
+                    acq += 1;
+                    if a.fft_start == lead + T1 - b {
+                        tim += 1;
+                        let e = a.cfo_hz(&fx, FS) - cfo;
+                        sf += e * e;
+                    }
+                }
+            }
+            last.sort_unstable();
+            let pick = |q: f64| {
+                last.get(((last.len() as f64 - 1.0) * q).round() as usize)
+                    .map_or("-".to_string(), |v| v.to_string())
+            };
+            println!(
+                "  {snr:>4} {:>6} {:>12} {:>6} {:>6} {:>6} {:>10.1} {:>7.1} {:>7.1} {window:>7} {early:>6} {acq:>9} {tim:>7} {:>9.0}",
+                last.len(),
+                pick(0.5),
+                pick(0.95),
+                pick(1.0),
+                still,
+                lo,
+                sum / frames as f64,
+                hi,
+                (sf / tim.max(1) as f64).sqrt()
+            );
+        }
+    }
+}
+
 /// A Hamming-windowed sinc low-pass filter, cutoff in cycles per sample, unit DC gain.
 fn lowpass(cutoff: f64, taps: usize) -> Vec<f64> {
     let mid = (taps - 1) as f64 / 2.0;
@@ -1348,9 +1483,10 @@ fn main() -> ExitCode {
         "latency" => latency(n.unwrap_or(500)),
         "agc" => agc(n.unwrap_or(500)),
         "tailbw" => tailbw(n.unwrap_or(400)),
+        "agcmodel" => agcmodel(n.unwrap_or(400)),
         "level" => level(n.unwrap_or(400)),
         _ => {
-            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency|agc|tailbw|level [n]");
+            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency|agc|agcmodel|tailbw|level [n]");
             return ExitCode::from(2);
         }
     }

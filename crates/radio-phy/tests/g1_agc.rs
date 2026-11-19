@@ -246,3 +246,102 @@ fn gain_states_describe_the_transient_relative_to_the_last_gain() {
         .all(|w| (w[0].phase - w[1].phase).abs() <= lim));
     assert!(states.iter().any(|s| s.phase != 0.0));
 }
+
+#[test]
+fn the_locked_power_waits_for_a_whole_window() {
+    // Locked from 26 on −100 dB; −50 dB from sample 30, the overload exit off. The power
+    // is first looked at when 64 samples have passed since the lock, at sample 89 (26 … 89);
+    // it is far above by then: eight in a row, 89 … 96, unlocked at 96.
+    let mut x = level(-100.0, 30);
+    x.extend(level(-50.0, 100));
+    let t = FastAttackAgc {
+        unlock_on_overload: false,
+        ..agc()
+    }
+    .run(&x);
+    assert_eq!((t.locks.clone(), t.unlocks.clone()), (vec![26], vec![96]));
+}
+
+#[test]
+fn the_peak_is_taken_on_both_rails() {
+    // The first case with the signal on the Q rail, and negative.
+    let x: Vec<Sample> = level(-50.0, 120).iter().map(|s| (0.0, -s.0)).collect();
+    assert_eq!(agc().run(&x), agc().run(&level(-50.0, 120)));
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0007's two requirements on a gain control, on 802.11 packets
+// ---------------------------------------------------------------------------------------------
+
+/// A short 6 Mb/s PPDU as float samples.
+fn packet() -> Vec<Sample> {
+    use radio_phy::ofdm::IfftConfig;
+    use radio_phy::ppdu::{build_ppdu, Rate};
+    let cfg = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+    build_ppdu(&[0x5a; 3], Rate::R6, 0x5d, &cfg)
+        .unwrap()
+        .iter()
+        .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+        .collect()
+}
+
+#[test]
+fn packets_are_still_by_the_end_of_the_stf_and_inside_the_level_window() {
+    use radio_phy::channel::{agc_transient, awgn, frequency_offset, mean_power, Rng};
+    use radio_phy::rx_front::{backoff_samples, RxConfig};
+    use radio_phy::rx_front_fixed::{acquire_fixed, to_adc, FixedRxConfig, ADC_FULL_SCALE};
+    const FS: f64 = 20e6;
+    // The noise at −30 dBFS at the largest gain, where the control idles.
+    const IDLE_DBFS: f64 = -30.0;
+    let frame = packet();
+    let p = mean_power(&frame);
+    let agc = FastAttackAgc::ad9361_reset(2);
+    let (cfg, fx) = (RxConfig::new(FS), FixedRxConfig::default());
+    let mut rng = Rng::new(0xa6c2);
+    for snr in [5.0, 12.0, 20.0, 30.0, 45.0, 60.0] {
+        let k = (10f64.powf((IDLE_DBFS - agc.max_gain_db + snr) / 10.0) / p).sqrt();
+        for _ in 0..40 {
+            let lead = 600 + (rng.uniform() * 50.0) as usize;
+            let mut x = vec![(0.0, 0.0); lead];
+            x.extend_from_slice(&frame);
+            let cfo = (2.0 * rng.uniform() - 1.0) * 200e3;
+            let x = frequency_offset(&x, cfo, FS, 0.3);
+            let x: Vec<Sample> = awgn(&x, snr, p, &mut rng)
+                .iter()
+                .map(|s| (s.0 * k, s.1 * k))
+                .collect();
+            let t = agc.run(&x);
+            // The noise before the packet moves nothing once the control has locked on it.
+            assert!(
+                t.changes.iter().all(|c| c.0 < 100 || c.0 >= lead),
+                "{snr} dB: {:?}",
+                t.changes
+            );
+            // Requirement 1: still from the end of the short training field.
+            let last = t.changes.last().unwrap().0;
+            assert!(
+                last <= lead + 159,
+                "{snr} dB: last change at {}",
+                last as i64 - lead as i64
+            );
+            // Requirement 2: the packet inside −15 … −3 dBFS, or the gain at its maximum
+            // (a packet less than 15 dB above the noise cannot be brought higher).
+            let (settled, states) = t.gain_states(30.0, &mut rng);
+            let level = 10.0 * (p * k * k).log10() + settled;
+            assert!(
+                (-15.0..=-3.0).contains(&level) || (settled == agc.max_gain_db && level < -15.0),
+                "{snr} dB: {level} dBFS at gain {settled}"
+            );
+            // And the fixed receiver finds the packet where it is, through the phase jumps.
+            let g = 10f64.powf(settled / 20.0);
+            let at_settled: Vec<Sample> = x.iter().map(|s| (s.0 * g, s.1 * g)).collect();
+            let adc = to_adc(
+                &agc_transient(&at_settled, &states),
+                f64::from(ADC_FULL_SCALE),
+            );
+            let a = acquire_fixed(&adc, &cfg, &fx).unwrap();
+            assert_eq!(a.fft_start, lead + 192 - backoff_samples(&cfg), "{snr} dB");
+        }
+    }
+}
