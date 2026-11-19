@@ -1,0 +1,12 @@
+[package]
+name = "radio-capture"
+description = "IQ capture files (SigMF) for the SDR and field stages: read, write, checksum, replay."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

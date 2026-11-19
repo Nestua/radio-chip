@@ -1,0 +1,26 @@
+{
+    "global": {
+        "core:datatype": "ci16_le",
+        "core:sample_rate": 20000000,
+        "core:version": "1.2.0",
+        "core:sha512": "54f4f3cb06109ecc8220c48287be42e23488143704b592e8e5f4242bb3c1e77c5446e9d4a1845e9f63da2a6ad78a104362a9028ec9675a0056152a1002d07dd5",
+        "core:description": "written by radio-capture: \"quotes\", a tab\t, Київ, 📡",
+        "core:hw": "none (synthetic)",
+        "core:author": "g1_capture",
+        "nestua:adc_bits": 12
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 5805000000,
+            "core:datetime": "2026-11-19T00:00:00Z"
+        }
+    ],
+    "annotations": [
+        {
+            "core:sample_start": 16,
+            "core:sample_count": 320,
+            "core:label": "preamble"
+        }
+    ]
+}

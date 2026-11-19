@@ -3,6 +3,7 @@ resolver = "2"
 # Members are listed explicitly (not `crates/*`) so scratch dirs under crates/ never break the build.
 members = [
     "crates/radio-phy",
+    "crates/radio-capture",
     "crates/radio-tools",
 ]
 

@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "radio-capture"
+version = "0.0.1"
+
+[[package]]
 name = "radio-phy"
 version = "0.0.1"
 
@@ -10,5 +14,6 @@ version = "0.0.1"
 name = "radio-tools"
 version = "0.0.1"
 dependencies = [
+ "radio-capture",
  "radio-phy",
 ]
