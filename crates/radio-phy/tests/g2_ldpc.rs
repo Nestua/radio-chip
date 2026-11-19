@@ -12,6 +12,10 @@ use radio_phy::ldpc_decoder::{
     CheckRule, LdpcDecoder, MinSumConfig, Schedule, LDPC_SOFT_BITS, LDPC_SOFT_CLIP,
 };
 
+/// The float decoder's iteration limit: the hardware's, written out, so that a hardware
+/// decoder with fewer iterations is measured against this and not against itself.
+const FLOAT_ITERATIONS: usize = 20;
+
 /// (blocks only the hardware decoder gets wrong, blocks only the float one gets wrong,
 /// blocks the float one gets wrong).
 fn discordant(
@@ -48,7 +52,7 @@ fn discordant(
                 &llr,
                 CheckRule::MinSum { scale: 0.8125 },
                 Schedule::Layered,
-                cfg.max_iter,
+                FLOAT_ITERATIONS,
             )
             .unwrap();
         let hw = dec.decode_fixed(&soft, cfg).unwrap();
@@ -92,7 +96,7 @@ const SLACK: usize = 10;
 #[test]
 fn the_gate_sees_a_narrower_decoder() {
     // What the sweep rejects at a block error rate of 10 % must fail here too: messages
-    // of 5 bits, totals of 7, an input of 4 bits, a factor of 3/4. (One bit less than
+    // of 5 bits, totals of 7, an input of 4 bits, 10 iterations, a factor of 3/4. (One bit less than
     // the choice, 6 and 8, costs nothing here: it shows as a tail below 1 %, which only
     // the sweep's block counts see.)
     let hw = MinSumConfig::HARDWARE;
@@ -111,6 +115,7 @@ fn the_gate_sees_a_narrower_decoder() {
         }
     ));
     assert!(fails(4, hw));
+    assert!(fails(LDPC_SOFT_BITS, MinSumConfig { max_iter: 10, ..hw }));
     assert!(fails(
         LDPC_SOFT_BITS,
         MinSumConfig {

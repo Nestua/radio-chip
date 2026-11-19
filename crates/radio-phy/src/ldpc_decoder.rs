@@ -122,7 +122,7 @@ impl MinSumConfig {
             && self.scale_shift <= 8
             && self.scale_num >= 1
             && self.scale_num <= 1 << self.scale_shift
-            && (!self.scale_round || self.scale_shift >= 1)
+            && (!self.scale_round || self.scale_num < 1 << self.scale_shift)
     }
 }
 

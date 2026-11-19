@@ -383,7 +383,7 @@ fn ldpc_point(
     ebn0_db: f64,
     configs: &[LdpcCfg],
     seeds: std::ops::Range<u64>,
-) -> Vec<(u64, u64)> {
+) -> Result<Vec<(u64, u64)>, String> {
     let dec = LdpcDecoder::new(code);
     let sigma2 = 1.0 / (2.0 * rate * 10f64.powf(ebn0_db / 10.0));
     let mut out = vec![(0u64, 0u64); configs.len()];
@@ -392,9 +392,7 @@ fn ldpc_point(
         let info: Vec<u8> = (0..code.k())
             .map(|_| u8::from(rng.uniform() < 0.5))
             .collect();
-        let Ok(word) = code.encode(&info) else {
-            continue;
-        };
+        let word = code.encode(&info).map_err(|e| e.to_string())?;
         let y: Vec<f64> = word
             .iter()
             .map(|&b| 1.0 - 2.0 * f64::from(b) + sigma2.sqrt() * rng.gaussian())
@@ -417,13 +415,13 @@ fn ldpc_point(
                     dec.decode_fixed(&q, &cfg)
                 }
             };
-            if let Ok(d) = got {
-                out[k].0 += u64::from(d.bits != word);
-                out[k].1 += d.iterations as u64;
-            }
+            // A refused block would otherwise count as a correct one.
+            let d = got.map_err(|e| format!("{}: {e}", cfg.label()))?;
+            out[k].0 += u64::from(d.bits != word);
+            out[k].1 += d.iterations as u64;
         }
     }
-    out
+    Ok(out)
 }
 
 fn ldpc(blocks: u64) -> Result<(), String> {
@@ -434,7 +432,10 @@ fn ldpc(blocks: u64) -> Result<(), String> {
          configuration; loss = Eb/N0 at a block error rate of 10 % (and of 1 %) minus the reference's; \
          a factor marked r is rounded to nearest"
     );
-    println!("# columns: block error rate per Eb/N0; mean iterations at the last grid point");
+    println!(
+        "# columns: block error rate per Eb/N0; mean iterations at the grid point where the \
+         configuration's own block error rate is nearest 10 %"
+    );
     for (length, rate, name, r, start) in [
         (LdpcLength::N648, LdpcRate::R1_2, "(648, 1/2)", 0.5f64, 1.0),
         (LdpcLength::N1944, LdpcRate::R1_2, "(1944, 1/2)", 0.5, 0.5),
@@ -457,11 +458,12 @@ fn ldpc(blocks: u64) -> Result<(), String> {
         let code = LdpcCode::new(length, rate).ok_or("no such code")?;
         let grid: Vec<f64> = (0..8).map(|i| start + 0.25 * f64::from(i)).collect();
         let mut bler = vec![vec![0.0; grid.len()]; configs.len()];
-        let mut iters = vec![0.0; configs.len()];
+        let mut iters = vec![vec![0.0; grid.len()]; configs.len()];
         for (gi, &ebn0) in grid.iter().enumerate() {
             let per = blocks.div_ceil(threads);
             let base = ((code.n() as u64) << 44) | ((code.k() as u64) << 32) | ((gi as u64) << 24);
-            let results: Vec<Vec<(u64, u64)>> = std::thread::scope(|scope| {
+            type Part = Option<Result<Vec<(u64, u64)>, String>>;
+            let results: Vec<Part> = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let lo = base + (t * per).min(blocks);
@@ -470,14 +472,13 @@ fn ldpc(blocks: u64) -> Result<(), String> {
                         scope.spawn(move || ldpc_point(code, r, ebn0, configs, lo..hi))
                     })
                     .collect();
-                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+                handles.into_iter().map(|h| h.join().ok()).collect()
             });
             for part in results {
+                let part = part.ok_or("a worker thread panicked")??;
                 for (k, (bad, it)) in part.iter().enumerate() {
                     bler[k][gi] += *bad as f64 / blocks as f64;
-                    if gi + 1 == grid.len() {
-                        iters[k] += *it as f64 / blocks as f64;
-                    }
+                    iters[k][gi] += *it as f64 / blocks as f64;
                 }
             }
         }
@@ -494,20 +495,28 @@ fn ldpc(blocks: u64) -> Result<(), String> {
         );
         print!("# {:<40}", "config");
         for g in &grid {
-            print!(" {g:>6.2}");
+            print!(" {g:>7.2}");
         }
         println!(" | loss 10 % |     1 % | iter");
         for (k, cfg) in configs.iter().enumerate() {
             print!("  {:<40}", cfg.label());
             for b in &bler[k] {
-                print!(" {b:>6.3}");
+                print!(" {b:>7.4}");
             }
             let loss = |i: usize| {
                 crossing(&grid, &bler[k], LDPC_TARGETS[i])
                     .zip(reference[i])
                     .map_or("    n/a".to_string(), |(x, r)| format!("{:+7.3}", x - r))
             };
-            println!(" |    {} | {} | {:>4.1}", loss(0), loss(1), iters[k]);
+            // Iterations where this configuration's block error rate is nearest 10 %.
+            let near = (0..grid.len())
+                .min_by(|&a, &b| {
+                    (bler[k][a] - LDPC_TARGETS[0])
+                        .abs()
+                        .total_cmp(&(bler[k][b] - LDPC_TARGETS[0]).abs())
+                })
+                .unwrap_or(0);
+            println!(" |    {} | {} | {:>4.1}", loss(0), loss(1), iters[k][near]);
         }
     }
     Ok(())
