@@ -189,7 +189,11 @@ fn flooding_error_rates_match_commpy() {
     for p in &points {
         let their_bler = p.block_errors / p.blocks;
         // Enough blocks to expect some twenty block errors where the reference has few.
-        let blocks = ((20.0 / their_bler) as usize).clamp(400, 4000);
+        // LDPC_GATE_BLOCKS sets the same count at every point (the journal's table: 5000).
+        let blocks = match std::env::var("LDPC_GATE_BLOCKS") {
+            Ok(v) => v.parse().unwrap(),
+            Err(_) => ((20.0 / their_bler) as usize).clamp(400, 4000),
+        };
         let (ber, se, bler) =
             error_rates(&p.code, p.rate, p.ebn0_db, blocks, &mut rng, |d, llr| {
                 d.decode_float(llr, p.rule, Schedule::Flooding, 50)
@@ -230,23 +234,34 @@ fn flooding_error_rates_match_commpy() {
 // Schedules, the fixed decoder, the PPDU
 // ---------------------------------------------------------------------------------------------
 
+/// How many more blocks the later decoder of a pair may lose alone than the earlier one
+/// loses alone, of 400 at 1.75 dB (measured: 1 against 2 and 0 against 0; a layered
+/// decoder cut to 12 iterations 22 against 1, an unnormalised one 59 against 3, a fixed
+/// one fed 4 units per unit of LLR 20 against 2 of 1000 at 2 dB).
+const DISCORDANT_SLACK: usize = 4;
+
 #[test]
 fn layered_and_fixed_decoders_are_held_to_the_flooding_one() {
     let code = LdpcCode::new(LdpcLength::N648, LdpcRate::R1_2).unwrap();
     let dec = LdpcDecoder::new(&code);
     let mut rng = Rng::new(0x1dc2);
-    let (blocks, ebn0) = (400, 2.0);
+    let (blocks, ebn0) = (400, 1.75);
     let scale = CheckRule::MinSum { scale: 0.75 };
     // [flooding 50, layered 25, layered 50, fixed 25]: block errors, iterations of the
     // converged blocks.
     let mut bad = [0usize; 4];
     let mut iters = [0usize; 4];
+    // The four decoders see the same noise, so most blocks fail in all or in none; what
+    // tells two decoders apart is the blocks only one of them gets wrong.
+    // only[a][b]: blocks decoder a gets wrong and decoder b right.
+    let mut only = [[0usize; 4]; 4];
     for _ in 0..blocks {
         let word = code.encode(&random_bits(code.k(), &mut rng)).unwrap();
         let llr = channel_llr(&word, 0.5, ebn0, &mut rng);
-        // Eight units per unit of LLR for the fixed decoder: fine enough for its rounding
-        // not to matter here (what coarser inputs cost is G2's question, in the journal).
-        let fixed_in: Vec<i32> = llr.iter().map(|x| (8.0 * x).round() as i32).collect();
+        // 64 units per unit of LLR for the fixed decoder: fine enough for its rounding not
+        // to matter. At 8 units it already does (the scaled minimum is rounded down, and
+        // the decoder loses blocks the float one keeps): G2's question, in the journal.
+        let fixed_in: Vec<i32> = llr.iter().map(|x| (64.0 * x).round() as i32).collect();
         let results = [
             dec.decode_float(&llr, scale, Schedule::Flooding, 50)
                 .unwrap(),
@@ -258,8 +273,8 @@ fn layered_and_fixed_decoders_are_held_to_the_flooding_one() {
                 &fixed_in,
                 &MinSumConfig {
                     max_iter: 25,
-                    msg_bits: 10,
-                    app_bits: 12,
+                    msg_bits: 16,
+                    app_bits: 18,
                     ..MinSumConfig::default()
                 },
             )
@@ -276,17 +291,26 @@ fn layered_and_fixed_decoders_are_held_to_the_flooding_one() {
             // convergence on a non-codeword; an unconverged one is wrong.
             assert!(r.converged || wrong);
         }
+        for a in 0..4 {
+            for b in 0..4 {
+                only[a][b] += usize::from(results[a].bits != word && results[b].bits == word);
+            }
+        }
     }
     let mean = |i: usize| iters[i] as f64 / (blocks - bad[i]) as f64;
     println!(
         "block errors of {blocks}: flooding/50 {}, layered/25 {}, layered/50 {}, fixed/25 {}; mean iterations {:.1}, {:.1}, {:.1}, {:.1}",
         bad[0], bad[1], bad[2], bad[3], mean(0), mean(1), mean(2), mean(3)
     );
-    // Layered needs about half the iterations of flooding, so 25 of it are not worse than
-    // 50 of flooding beyond the statistics of 300 blocks, and the fixed decoder follows.
-    let slack = 3.0 * ((bad[0].max(4)) as f64).sqrt();
-    assert!((bad[1] as f64) <= bad[0] as f64 + slack);
-    assert!((bad[3] as f64) <= bad[1] as f64 + slack);
+    println!(
+        "wrong in one only: layered/25 {} against flooding/50 {}; fixed/25 {} against layered/25 {}",
+        only[1][0], only[0][1], only[3][1], only[1][3]
+    );
+    // Layered needs about half the iterations of flooding, so 25 of it lose no more blocks
+    // than 50 of flooding, and the fixed decoder follows: of the blocks only one of a pair
+    // gets wrong, the later decoder may have DISCORDANT_SLACK more than the earlier.
+    assert!(only[1][0] <= only[0][1] + DISCORDANT_SLACK, "{only:?}");
+    assert!(only[3][1] <= only[1][3] + DISCORDANT_SLACK, "{only:?}");
     assert!(
         mean(1) < 0.7 * mean(0),
         "layered {} flooding {}",
@@ -502,7 +526,7 @@ fn refusals() {
     let rule = CheckRule::SumProduct;
     assert_eq!(
         dec.decode_float(&[0.0; 647], rule, Schedule::Flooding, 5),
-        Err(LdpcError::InfoLength {
+        Err(LdpcError::SoftLength {
             got: 647,
             want: 648
         })
@@ -511,18 +535,23 @@ fn refusals() {
     llr[3] = f64::NAN;
     assert_eq!(
         dec.decode_float(&llr, rule, Schedule::Layered, 5),
-        Err(LdpcError::Parameters)
+        Err(LdpcError::NotANumber)
     );
-    // Infinite and huge values are inputs like any other.
-    llr[3] = f64::INFINITY;
-    llr[4] = -1e300;
-    for schedule in [Schedule::Flooding, Schedule::Layered] {
-        let d = dec.decode_float(&llr, rule, schedule, 5).unwrap();
-        assert_eq!(d.bits.len(), 648);
+    for scale in [0.0, -0.75, 1.5, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            dec.decode_float(
+                &[1.0; 648],
+                CheckRule::MinSum { scale },
+                Schedule::Layered,
+                5
+            ),
+            Err(LdpcError::DecoderConfig),
+            "scale {scale}"
+        );
     }
     assert_eq!(
         dec.decode_fixed(&[0; 647], &MinSumConfig::default()),
-        Err(LdpcError::InfoLength {
+        Err(LdpcError::SoftLength {
             got: 647,
             want: 648
         })
@@ -556,7 +585,7 @@ fn refusals() {
         assert!(!bad.is_valid());
         assert_eq!(
             dec.decode_fixed(&[1; 648], &bad),
-            Err(LdpcError::Parameters)
+            Err(LdpcError::DecoderConfig)
         );
     }
     // Extreme integers saturate; all-erasure input ends without convergence trouble.
@@ -572,14 +601,14 @@ fn refusals() {
     let plan = LdpcPlan::new(816, 208, LdpcRate::R3_4, 1).unwrap();
     assert_eq!(
         plan.soft_codewords(&[0i32; 1247], 1),
-        Err(LdpcError::PayloadLength {
+        Err(LdpcError::SoftLength {
             got: 1247,
             want: 1248
         })
     );
     assert_eq!(
         plan.payload(&[0; 1943]),
-        Err(LdpcError::PayloadLength {
+        Err(LdpcError::SoftLength {
             got: 1943,
             want: 1944
         })
@@ -590,4 +619,108 @@ fn refusals() {
         Err(LdpcError::Parameters)
     );
     assert_eq!(broken.payload(&[0; 1944]), Err(LdpcError::Parameters));
+    // Hand-made plans whose pieces do not add up to N_avbits are refused before anything
+    // is allocated or indexed, however large their numbers.
+    for broken in [
+        LdpcPlan {
+            n_avbits: 1247,
+            ..plan
+        },
+        LdpcPlan {
+            n_punc: plan.n_punc + 1,
+            ..plan
+        },
+        LdpcPlan { n_rep: 1, ..plan },
+        LdpcPlan {
+            n_cw: usize::MAX / 1944,
+            n_shrt: (usize::MAX / 1944) * 1458 - 816,
+            ..plan
+        },
+        LdpcPlan {
+            n_cw: usize::MAX,
+            ..plan
+        },
+    ] {
+        let soft = vec![0i32; broken.n_avbits];
+        assert_eq!(
+            broken.soft_codewords(&soft, 1),
+            Err(LdpcError::Parameters),
+            "{broken:?}"
+        );
+        assert_eq!(
+            broken.payload(&[0; 1944]),
+            Err(LdpcError::Parameters),
+            "{broken:?}"
+        );
+        assert_eq!(
+            broken.encode(&[0; 816]),
+            Err(LdpcError::Parameters),
+            "{broken:?}"
+        );
+    }
+}
+
+#[test]
+fn known_bits_may_be_infinite() {
+    // A codeword with three bits in ten erased and the rest known for sure: every rule and
+    // schedule must fill the erasures in. Infinite values inside the decoder would meet as
+    // inf − inf (min-sum once answered all-zero and "converged" here).
+    let code = LdpcCode::new(LdpcLength::N648, LdpcRate::R1_2).unwrap();
+    let dec = LdpcDecoder::new(&code);
+    let mut rng = Rng::new(0x1dc5);
+    for trial in 0..8 {
+        let word = code.encode(&random_bits(code.k(), &mut rng)).unwrap();
+        let sure = if trial % 2 == 0 { f64::INFINITY } else { 1e300 };
+        let llr: Vec<f64> = word
+            .iter()
+            .map(|&b| {
+                if rng.uniform() < 0.3 {
+                    0.0
+                } else if b == 0 {
+                    sure
+                } else {
+                    -sure
+                }
+            })
+            .collect();
+        assert!(llr.iter().filter(|x| **x == 0.0).count() > 150);
+        for rule in [
+            CheckRule::SumProduct,
+            CheckRule::MinSum { scale: 1.0 },
+            CheckRule::MinSum { scale: 0.75 },
+        ] {
+            for schedule in [Schedule::Flooding, Schedule::Layered] {
+                let d = dec.decode_float(&llr, rule, schedule, 50).unwrap();
+                assert!(d.converged && d.iterations > 0, "{rule:?} {schedule:?}");
+                assert_eq!(d.bits, word, "{rule:?} {schedule:?} trial {trial}");
+            }
+        }
+    }
+}
+
+#[test]
+fn repeated_values_saturate_and_never_wrap() {
+    // 8 payload bits in a 648-bit symbol: 224 bits of a 1296 codeword, each sent two or
+    // three times.
+    let plan = LdpcPlan::new(8, 648, LdpcRate::R5_6, 1).unwrap();
+    assert!(plan.n_rep >= plan.n_avbits - plan.n_rep);
+    for (value, zero) in [(i32::MAX, i32::MAX), (i32::MIN, i32::MAX), (1 << 30, 5)] {
+        let words = plan
+            .soft_codewords(&vec![value; plan.n_avbits], zero)
+            .unwrap();
+        let want = if value > 0 { i32::MAX } else { i32::MIN };
+        let (sent, shortened, punctured) = words.iter().fold((0, 0, 0), |(s, z, p), &v| {
+            (
+                s + usize::from(v == want),
+                z + usize::from(v == zero && zero != want),
+                p + usize::from(v == 0),
+            )
+        });
+        assert_eq!(punctured, plan.n_punc);
+        if zero == want {
+            assert_eq!(sent, plan.length.bits() - plan.n_punc);
+        } else {
+            assert_eq!((sent, shortened), (plan.n_avbits - plan.n_rep, plan.n_shrt));
+        }
+    }
 }

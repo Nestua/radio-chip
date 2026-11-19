@@ -123,17 +123,34 @@ The standard defines the codes, not a decoder. Ours, in `ldpc_decoder.rs`:
   2·atanh(Π tanh(m/2)) or min-sum with a scale, on a flooding schedule (all checks, then
   all bits) or a layered one (check after check, each using the totals the checks before it
   updated). Stops when every check holds on the hard decisions; 0 iterations if the input
-  already is a codeword.
+  already is a codeword. The input is limited to ±10⁶ on entry (`LLR_LIMIT`), so an
+  infinite value is a known bit and nothing infinite meets inside; a NaN is refused, and
+  so is a min-sum scale outside (0, 1].
 - **Hardware algorithm** (`decode_fixed`, `MinSumConfig`): layered normalised min-sum in
   integers. Checks in the order of `LdpcCode::checks` (block row after block row; the Z
   checks of a block row share no bit). Per check: a bit's message is its total minus this
   check's last message, saturated to the total's width; the new message is the sign product
   of the others (0 counts as positive) and `(min · scale_num) >> scale_shift`, saturated to
   the message width; the new total is message plus new message, saturated. Hard decision 1
-  where the total is negative. Two minima and the position of the first are all a check
-  needs to keep. Widths, the factor and the iteration count are parameters: G2 chooses.
+  where the total is negative. Two minima, the position of the first and one sign bit per
+  edge are all a check needs to keep. Widths, the factor and the iteration count are
+  parameters: G2 chooses.
 - **PPDU side** (`LdpcPlan::soft_codewords`, `payload`): shortened bits enter as a sure 0,
-  punctured bits as 0, the soft values of repeated bits are added to their originals.
+  punctured bits as 0, the soft values of repeated bits are combined with their originals
+  (`Soft::combined`): floats add; integers add in `i32`, saturating at its ends and never
+  wrapping, and the decoder then saturates its input to the width of its totals. So the
+  model's sum is exact for any receiver width, and the hardware's accumulator (how wide,
+  or saturating at each addition, which is not the same when signs mix) is still to be
+  defined: with the widths, at G2. A plan is refused unless its pieces add up to N_avbits
+  (N_CW·L − N_shrt − N_punc + N_rep), checked before anything is allocated.
+- **Notes for the hardware** (from the pre-PR review, the arithmetic checked here):
+  ⌊3·min/4⌋ is `(x + 2x) >> 2`; `x − (x >> 2)` is the ceiling, a different decoder. At
+  ×3/4 a minimum of 1 becomes 0: with a coarse input scale the smallest messages vanish
+  (see the finding under G1). Limiting the magnitudes to a bound M before the comparison
+  gives the same messages whenever `(M · scale_num) >> scale_shift` ≥ the message maximum
+  (the scaling is monotonic), so the comparators need not be as wide as the totals. The
+  layer order is fixed and sequential in the model; hardware that takes the Z checks of a
+  block row together computes the same thing, any other order does not.
 
 ## 2026-11-19 · G1 · decoders
 
@@ -147,8 +164,9 @@ The standard defines the codes, not a decoder. Ours, in `ldpc_decoder.rs`:
 **Float flooding decoder against CommPy.** The test runs 400 to 4000 blocks per point (enough
 for about twenty block errors where the reference has few) and asks for agreement within
 four standard errors of both sides, on the block error rate at every point and on the bit
-error rate where at least ten blocks were wrong. Run once with 5000 blocks at every point
-(the same test with its block count raised, release build, 35 s; not committed that way):
+error rate where at least ten blocks were wrong. With 5000 blocks at every point
+(`LDPC_GATE_BLOCKS=5000 cargo test --release -p radio-phy --test g1_ldpc_decoder flooding -- --nocapture`;
+run again after the review's corrections, the same figures):
 
 | Code | Rule | Eb/N0 | BER ours | BER CommPy | BLER ours | BLER CommPy |
 |---|---|---|---|---|---|---|
@@ -171,15 +189,31 @@ decoder and differ in the matrix, which part 1 holds.
 
 **What has no outside reference** (held to the float flooding decoder, which has one)
 - The layered schedule: `layered_and_fixed_decoders_are_held_to_the_flooding_one`, (648, 1/2)
-  at 2.0 dB, 400 blocks, normalised min-sum 0.75: block errors flooding/50 9, layered/25 9,
-  layered/50 9, fixed/25 12; mean iterations of the decoded blocks 10.2, 5.7, 5.7, 5.8.
-  Layered needs 0.56 of flooding's iterations for the same result.
-- The fixed decoder: the same test (input at 8 units per unit of LLR, 10-bit messages,
-  12-bit totals: fine enough for rounding not to matter), and
+  at 1.75 dB, 400 blocks, normalised min-sum 0.75: block errors flooding/50 26, layered/25
+  25, layered/50 21, fixed/25 25; mean iterations of the decoded blocks 12.4, 6.8, 7.1,
+  6.8. Layered needs 0.55 of flooding's iterations for the same result. The decoders see
+  the same noise, so the test compares the blocks only one of a pair gets wrong: layered/25
+  alone 1, flooding/50 alone 2; fixed/25 alone 1, layered/25 alone 1. The later decoder may
+  have 4 more than the earlier. (The first version compared totals with a slack of 9 on 9
+  block errors, which a decoder 0.2 to 0.3 dB worse would have passed: review finding.)
+  What the criterion separates, measured: a layered decoder cut to 12 iterations 22
+  against 1, an unnormalised one 59 against 3; one at scale 0.875 passes (6 against 11:
+  it is better, as G2's first run also says).
+- The fixed decoder: the same test (input at 64 units per unit of LLR, 16-bit messages,
+  18-bit totals: fine enough for rounding not to matter), and
   `fixed_decoder_is_its_written_definition`: a second writing of the G0 definition without
   the two-minima shortcut, compared bit for bit and in its iteration count on three codes ×
   five width sets (down to 2-bit messages and 4-bit totals) × six noisy blocks. Our own
   second reading, like the plan cases of part 1.
+- **Finding for G2: the input scale matters more than expected.** The first version of
+  the test fed the fixed decoder 8 units per unit of LLR and called that fine enough. It
+  is not: of 1000 blocks at 1.5 dB the fixed decoder alone loses 43 and the float layered
+  one alone 4 (176 block errors against 137); at 64 units it is 9 against 3 (143 against
+  137), at 4 units 76 against 6. The widths were ample in all three, so this is the
+  rounding. My reading, not isolated yet: the scaled minimum is rounded down, a loss of
+  3/8 of a unit on average, which at 8 units is a twentieth of an LLR on messages that are
+  often near 1. G2 must try rounding to nearest in the scaling, `(3x + 2) >> 2`, before it
+  spends bits on the input.
 - With the default widths and an input of 2 units per unit of LLR the fixed decoder loses
   visibly (4 block errors of 300 against 1 at 2.5 dB in a first run): the input scale and
   the widths are G2's subject, not decided here. `MinSumConfig::default()` is a
@@ -200,9 +234,30 @@ decoder and differ in the matrix, which part 1 holds.
 | float: the stop test ignored | schedules (iteration counts) |
 | punctured bits entered as a sure zero | value placement, PPDU round trip |
 | repeated values not added | value placement |
+| after the review: float input not limited | `known_bits_may_be_infinite` |
+| min-sum scale not validated | refusals |
+| repeated integers added with wrap-around | `repeated_values_saturate_and_never_wrap` |
+| a plan's pieces not checked against N_avbits | refusals |
+| fixed: no normalisation (again, under the new criterion) | definition test, schedules, refusals |
+| float layered reads the input instead of the running totals (again) | schedules, `known_bits_may_be_infinite` |
+| in the test: layered cut to 12 iterations; fixed input at 4 units | schedules |
 
-**Evidence:** `cargo test -p radio-phy --test g1_ldpc_decoder` — 7 pass (6 s in a debug
-build); `scripts/check.sh` green; this entry's pull request.
+**Pre-PR review (fresh agent), 2026-11-19:** no error in the algorithms for finite inputs;
+by its own measurement the CommPy gate fails a float decoder displaced by ±0.1 dB on 4 of
+4 seeds (its floor is about 0.05 dB). Found and corrected: float min-sum with infinite
+inputs answered all-zero and "converged" (inf − inf inside; the old test tried one
+infinity with sum-product and looked at the length only); repeated integer values were
+added with a bare `+=` (wrap-around in release builds); a hand-made plan could allocate
+and index by numbers nothing had tied to the input's length; the schedule test's slack;
+the 5000-block table had no committed command; error variants reused under misleading
+names (now `SoftLength`, `NotANumber`, `DecoderConfig`); "two minima and the position"
+left out the sign bits; timings in this entry (removed). Not done, by its suggestion: an
+outside reference for the layered and the fixed decoder (open question 5), and the
+founder's word on the hardware algorithm's definition, which goes to them with the G2
+widths as one question.
+
+**Evidence:** `cargo test -p radio-phy --test g1_ldpc_decoder` — 9 pass;
+`scripts/check.sh` green; this entry's pull request.
 
 **Open questions** (decoder)
 1. G2: the input scale (units per LLR, what the demapper delivers), message and total
@@ -216,3 +271,7 @@ build); `scripts/check.sh` green; this entry's pull request.
    be decided with the RTL.
 4. An error floor cannot be seen at these block counts (the lowest point has 21 wrong
    blocks of 5000).
+5. The layered and the fixed decoder have no outside reference. AFF3CT (MIT licence) has a
+   layered normalised min-sum decoder that could be run as a black box on these matrices.
+6. The accumulator that combines repeated bits in hardware (its width, where it saturates)
+   and the rounding of the scaled minimum: both to G2, and with the widths to the founder.

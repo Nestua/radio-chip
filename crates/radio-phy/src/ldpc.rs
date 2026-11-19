@@ -83,6 +83,18 @@ pub enum LdpcError {
         /// Bits the plan was made for.
         want: usize,
     },
+    /// The soft values or decoded bits handed over are not as many as the code or the plan
+    /// has places for.
+    SoftLength {
+        /// Values offered.
+        got: usize,
+        /// Values wanted.
+        want: usize,
+    },
+    /// A soft value that is not a number.
+    NotANumber,
+    /// The decoder's parameters describe no decoder (a width, a normalisation factor).
+    DecoderConfig,
 }
 
 impl std::fmt::Display for LdpcError {
@@ -96,6 +108,11 @@ impl std::fmt::Display for LdpcError {
             LdpcError::PayloadLength { got, want } => {
                 write!(f, "{got} payload bits offered, the plan is for {want}")
             }
+            LdpcError::SoftLength { got, want } => {
+                write!(f, "{got} values offered, {want} wanted")
+            }
+            LdpcError::NotANumber => write!(f, "a soft value is not a number"),
+            LdpcError::DecoderConfig => write!(f, "the parameters describe no decoder"),
         }
     }
 }
@@ -399,11 +416,20 @@ impl LdpcPlan {
         let (num, den) = self.rate.fraction();
         let l = self.length.bits();
         let k = l * num / den;
+        // What is sent: the codewords without their shortened and punctured bits, plus the
+        // repeated ones, is exactly N_avbits (checked: a hand-made plan may hold anything).
+        let sent = self
+            .n_cw
+            .checked_mul(l)
+            .and_then(|x| x.checked_sub(self.n_shrt))
+            .and_then(|x| x.checked_sub(self.n_punc))
+            .and_then(|x| x.checked_add(self.n_rep));
         self.n_cw > 0
             && self.n_cw.checked_mul(k) == self.n_pld.checked_add(self.n_shrt)
             && self.n_shrt.div_ceil(self.n_cw) < k
             && self.n_punc.div_ceil(self.n_cw) < l - k
             && self.n_rep <= 1 << 24
+            && sent == Some(self.n_avbits)
     }
 
     /// The information blocks handed to the encoder: the payload spread over the codewords

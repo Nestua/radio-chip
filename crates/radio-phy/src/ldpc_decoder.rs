@@ -13,6 +13,32 @@
 
 use crate::ldpc::{LdpcCode, LdpcError, LdpcPlan};
 
+/// The float decoder's input is limited to ±this: surer than any channel makes a bit, and
+/// finite, so that an infinite input (a known bit) cannot turn into inf − inf inside.
+pub const LLR_LIMIT: f64 = 1.0e6;
+
+/// A soft value the PPDU side can combine: how the values of a bit sent more than once
+/// (repetition, §19.3.11.7.5 e) become one.
+pub trait Soft: Copy + Default {
+    /// The value of a bit received as `self` and again as `other`.
+    fn combined(self, other: Self) -> Self;
+}
+
+impl Soft for f64 {
+    /// LLRs of independent observations add.
+    fn combined(self, other: Self) -> Self {
+        self + other
+    }
+}
+
+impl Soft for i32 {
+    /// The sum, saturating at the ends of `i32` (never wrapping). The decoder then
+    /// saturates its input to the width of its totals.
+    fn combined(self, other: Self) -> Self {
+        self.saturating_add(other)
+    }
+}
+
 /// How a check combines the messages of its other bits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CheckRule {
@@ -159,9 +185,10 @@ impl LdpcDecoder {
             .all(|c| c.iter().fold(0, |acc, &i| acc ^ bits[i]) == 0)
     }
 
-    /// Belief propagation in floating point. `llr` holds n values (positive = 0); at most
-    /// `max_iter` iterations, stopping once every check holds (0 iterations if the input's
-    /// own hard decisions already are a codeword).
+    /// Belief propagation in floating point. `llr` holds n values (positive = 0), limited
+    /// to ±[`LLR_LIMIT`] on entry (so ±∞ is a known bit); a NaN is refused, and so is a
+    /// min-sum scale outside (0, 1]. At most `max_iter` iterations, stopping once every
+    /// check holds (0 iterations if the input's own hard decisions already are a codeword).
     pub fn decode_float(
         &self,
         llr: &[f64],
@@ -170,13 +197,19 @@ impl LdpcDecoder {
         max_iter: usize,
     ) -> Result<Decoded, LdpcError> {
         if llr.len() != self.n {
-            return Err(LdpcError::InfoLength {
+            return Err(LdpcError::SoftLength {
                 got: llr.len(),
                 want: self.n,
             });
         }
         if llr.iter().any(|x| x.is_nan()) {
-            return Err(LdpcError::Parameters);
+            return Err(LdpcError::NotANumber);
+        }
+        if let CheckRule::MinSum { scale } = rule {
+            // Written so that a NaN scale is refused too.
+            if !(scale > 0.0 && scale <= 1.0) {
+                return Err(LdpcError::DecoderConfig);
+            }
         }
         let update = |m: &[f64]| match rule {
             CheckRule::SumProduct => check_sum_product(m),
@@ -186,7 +219,7 @@ impl LdpcDecoder {
             |total: &[f64]| -> Vec<u8> { total.iter().map(|&x| u8::from(x < 0.0)).collect() };
         // total[b] = llr[b] + every check's message to b; c2v[c][i] = check c's message to
         // its i-th bit.
-        let mut total = llr.to_vec();
+        let mut total: Vec<f64> = llr.iter().map(|x| x.clamp(-LLR_LIMIT, LLR_LIMIT)).collect();
         let mut c2v: Vec<Vec<f64>> = self.checks.iter().map(|c| vec![0.0; c.len()]).collect();
         let mut bits = hard(&total);
         let mut iterations = 0;
@@ -248,13 +281,13 @@ impl LdpcDecoder {
     ///   every check holds or after `max_iter` passes.
     pub fn decode_fixed(&self, llr: &[i32], cfg: &MinSumConfig) -> Result<Decoded, LdpcError> {
         if llr.len() != self.n {
-            return Err(LdpcError::InfoLength {
+            return Err(LdpcError::SoftLength {
                 got: llr.len(),
                 want: self.n,
             });
         }
         if !cfg.is_valid() {
-            return Err(LdpcError::Parameters);
+            return Err(LdpcError::DecoderConfig);
         }
         let app_max = (1i32 << (cfg.app_bits - 1)) - 1;
         let msg_max = (1i32 << (cfg.msg_bits - 1)) - 1;
@@ -305,17 +338,17 @@ impl LdpcDecoder {
 impl LdpcPlan {
     /// The soft values of the Data field put back into whole codewords, the mirror of
     /// [`LdpcPlan::encode`]: shortened bits get `known_zero` (a sure 0), punctured bits 0
-    /// (nothing known), and the soft values of repeated bits are added to their originals.
-    /// `soft` holds N_avbits values; the result N_CW·L.
-    pub fn soft_codewords<T>(&self, soft: &[T], known_zero: T) -> Result<Vec<T>, LdpcError>
-    where
-        T: Copy + Default + std::ops::AddAssign,
-    {
+    /// (nothing known), and the soft values of repeated bits are combined with their
+    /// originals ([`Soft::combined`]: added; integers saturate). `soft` holds N_avbits
+    /// values; the result N_CW·L.
+    pub fn soft_codewords<T: Soft>(&self, soft: &[T], known_zero: T) -> Result<Vec<T>, LdpcError> {
+        // Consistency first: it ties N_CW·L to N_avbits, so the length check below bounds
+        // everything allocated here.
         if !self.is_consistent() {
             return Err(LdpcError::Parameters);
         }
         if soft.len() != self.n_avbits {
-            return Err(LdpcError::PayloadLength {
+            return Err(LdpcError::SoftLength {
                 got: soft.len(),
                 want: self.n_avbits,
             });
@@ -335,7 +368,7 @@ impl LdpcPlan {
             }
             let mut word: Vec<T> = soft[at..at + sent].to_vec();
             for i in 0..rep {
-                word[i % sent] += soft[at + sent + i];
+                word[i % sent] = word[i % sent].combined(soft[at + sent + i]);
             }
             out.extend_from_slice(&word[..data]);
             out.resize(out.len() + (k - data), known_zero);
@@ -359,7 +392,7 @@ impl LdpcPlan {
         let l = self.length.bits();
         let k = l * num / den;
         if codewords.len() != self.n_cw * l {
-            return Err(LdpcError::PayloadLength {
+            return Err(LdpcError::SoftLength {
                 got: codewords.len(),
                 want: self.n_cw * l,
             });
