@@ -10,6 +10,8 @@ pub mod channel;
 pub mod convolutional;
 pub mod fixed;
 pub mod interleaver;
+pub mod ldpc;
+mod ldpc_tables;
 pub mod mapper;
 pub mod modulation;
 pub mod ofdm;
