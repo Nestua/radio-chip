@@ -26,9 +26,9 @@ its own ADR to come.
 | `dc_block` | 1827 | 83 | 0.022 mm² | 0.022 mm² | +1.44 ns | routed |
 | `nco` | 6505 | 194 | 0.074 mm² | 0.075 mm² | +0.91 ns | routed |
 | `cordic` | 7742 | 797 | 0.110 mm² | 0.115 mm² | +1.13 ns | routed |
-| `rx_latch` (with its CORDIC; delay line as flip-flops) | 35 654 | 6030 | 0.68 mm² | 0.71 mm² | +0.94 ns | global route (detailed routing was still running) |
-| `det_a` | 104 426 | 2166 | 1.16 mm² | 0.81 mm² | −3.22 ns | global route |
-| `ltf_corr` | 154 776 | 7932 | 1.67 mm² | 1.22 mm² | +0.95 ns | global route |
+| `rx_latch` (with its CORDIC; delay line as flip-flops) | 35 654 | 6030 | 0.68 mm² | 0.71 mm² | +1.21 ns | routed |
+| `det_a` | 104 426 | 2166 | 1.16 mm² | 0.81 mm² | −2.46 ns | routed |
+| `ltf_corr` | 154 776 | 7932 | 1.67 mm² | 1.22 mm² | +1.42 ns | routed |
 
 (The flow reports "design area" as the cells' area after its own optimisation; for the two
 largest blocks it is below the synthesis figure, which counts the cells yosys mapped before
@@ -36,10 +36,10 @@ the flow resized and removed buffers.)
 
 **What it says**
 - The small blocks close 160 MHz on 130 nm with 0.9 to 1.4 ns to spare.
-- `det_a` does not: 3.2 ns short, about 105 MHz. The path is the one Vivado named
+- `det_a` does not: 2.5 ns short, about 115 MHz. The path is the one Vivado named
   (stage 3: the squares and P1·P2 into the constant multiply and the 80-bit compare). The
   block is 104 000 cells for one comparison per sample.
-- `ltf_corr` closes at the global-route estimate, which it does not on the FPGA at the same
+- `ltf_corr` closes, which it does not on the FPGA at the same
   clock (−1.9 ns, `rx_front.md`): a tree of adders in gates is not a carry chain in LUTs.
 - **Area is the finding.** The receiver front's blocks so far are about 3 mm² of cells at
   130 nm (`ltf_corr` 1.2 to 1.7, `det_a` 0.8 to 1.2, `rx_latch` 0.7, the rest 0.2), before
@@ -63,9 +63,15 @@ the flow resized and removed buffers.)
 - **A block too small for the power grid.** The scrambler at 40 % utilisation is narrower
   than the platform's top-metal straps; it was given a fixed 160 µm die.
 
+**Power** (the flow's estimate at the typical corner with its default activity, 160 MHz; a
+ranking, not a budget): `ltf_corr` 650 mW, `det_a` 191 mW, `rx_latch` 125 mW, `nco` 74 mW,
+`cordic` 33 mW, `dc_block` 5 mW, `scrambler` 0.1 mW. About 1.1 W for these blocks at 130 nm,
+most of it in the correlator's multipliers, which do useful work one clock in eight. For a
+radio that flies on a drone this is the second reason, after area, to fold them.
+
 **Open**
-- The three large blocks' figures are after global routing; the routed ones are to be added
-  when the runs finish.
+- All seven figures are now from routed designs (the table first held global-route estimates
+  for the three large blocks: +0.94, −3.22 and +0.95 ns).
 - `conv_encoder` (merged after these runs started) and `round_sat` (combinational: it needs
   a registered wrapper) are not in the table.
 - One corner, one clock, default flow settings: this ranks the blocks, it does not sign
