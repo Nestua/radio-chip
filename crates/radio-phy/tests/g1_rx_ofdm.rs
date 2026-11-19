@@ -640,8 +640,9 @@ fn pilots_track_a_residual_frequency_offset() {
 
 #[test]
 fn pilots_track_a_sample_clock_offset() {
-    // A receiver clock fast by p ppm reads the signal p·1e-6·Δn samples early Δn samples after
-    // the training field: the reference for the tracked timing. ±40 ppm is the standard's worst
+    // A transmitter clock fast by p ppm (`resample`'s p) makes the receiver's windows
+    // p·1e-6·Δn samples late Δn samples after the training field: the reference for the
+    // tracked timing. ±40 ppm is the standard's worst
     // case (±20 ppm at each end, IEEE 802.11-2020 §17.3.9.5–6); the longest frames drift by more
     // than four samples, past any fixed window.
     let mut rng = Rng::new(0x0f09_0009);
@@ -694,9 +695,9 @@ fn pilots_track_a_sample_clock_offset() {
 
 #[test]
 fn timing_loop_from_zero_has_no_standing_error() {
-    // Started from zero at +40 ppm the drift is a ramp of 0.0032 samples per symbol. The
-    // integral term must learn it: without it the loop would trail the ramp by rate/gain =
-    // 0.1 samples for ever.
+    // Started from zero at +40 ppm the drift is a ramp of 0.0032 samples per symbol, which the
+    // tracker has to learn from the frame: its estimate must converge on the ramp, with no
+    // standing error.
     let psdu = random_psdu(4095, &mut Rng::new(0x0f09_000a));
     let mut x = frame(&psdu, Rate::R6, 0x33);
     x.extend(vec![(0.0, 0.0); 16]);
@@ -836,6 +837,23 @@ fn clock_offset_and_carrier_offset_have_one_sign() {
     let y = resample(&x, 40.0);
     let right = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::fixed(40.0));
     let wrong = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::fixed(-40.0));
+    // The same through the start a receiver uses, with the clock offset the CFO of such a
+    // transmitter implies (+40 ppm of the carrier): `from_clock_offset` has the sign too.
+    let cfo = 40e-6 * 5.8e9;
+    let hinted = decode_ppdu_from(
+        &y,
+        T1 - 4,
+        &frozen,
+        Tracking::from_clock_offset(cfo / 5.8e9 * 1e6),
+    );
+    assert_eq!(hinted.map(|d| d.psdu), Ok(psdu.clone()));
+    let against = decode_ppdu_from(
+        &y,
+        T1 - 4,
+        &frozen,
+        Tracking::from_clock_offset(-cfo / 5.8e9 * 1e6),
+    );
+    assert!(against.map(|d| d.psdu) != Ok(psdu.clone()));
     assert_eq!(right.map(|d| d.psdu), Ok(psdu.clone()));
     assert!(wrong.map(|d| d.psdu) != Ok(psdu));
 }
@@ -958,4 +976,58 @@ fn a_slope_only_the_pilots_have_is_not_applied_to_the_data() {
     // The prior on the rate is what tells the two starts apart: 2 ppm against 40.
     let ratio = Tracking::from_clock_offset(7.0).covariance[2] / Tracking::default().covariance[2];
     assert!((ratio - (2.0f64 / 40.0).powi(2)).abs() < 1e-12, "{ratio}");
+}
+
+#[test]
+fn a_weak_pilot_makes_its_pair_worthless() {
+    // A channel with nulls near two pilots, one of each pair (+7 and −21): both slope
+    // measurements are noise, and a tracker that trusted them would lose frames that a receiver
+    // without a tracker decodes (the pre-PR reviewer measured 458 of 600 lost against 0). The
+    // measurement's variance comes from the channel gains at the pilots, so the tracker
+    // ignores what it cannot measure.
+    let mut rng = Rng::new(0x0f09_000f);
+    // Three taps whose transfer function has zeros towards subcarriers +7 and −21.
+    let zero = |k: f64| {
+        let a = 2.0 * PI * k / 64.0;
+        (0.97 * a.cos(), 0.97 * a.sin())
+    };
+    let (z1, z2) = (zero(7.0), zero(-21.0));
+    // (1 − z1·D)(1 − z2·D) = 1 − (z1 + z2)·D + z1·z2·D².
+    let taps = [
+        (1.0, 0.0),
+        (-(z1.0 + z2.0), -(z1.1 + z2.1)),
+        (z1.0 * z2.0 - z1.1 * z2.1, z1.0 * z2.1 + z1.1 * z2.0),
+    ];
+    let cfg = RxOfdmConfig::default();
+    let off = RxOfdmConfig {
+        timing_tracking: false,
+        ..cfg
+    };
+    let (mut lost, mut lost_off, frames) = ([0usize; 2], 0usize, 120);
+    for _ in 0..frames {
+        let psdu = random_psdu(300, &mut rng);
+        let f = frame(&psdu, Rate::R6, 0x39);
+        let mut x = vec![(0.0, 0.0); f.len() + 2];
+        for (n, s) in f.iter().enumerate() {
+            for (d, t) in taps.iter().enumerate() {
+                x[n + d].0 += s.0 * t.0 - s.1 * t.1;
+                x[n + d].1 += s.0 * t.1 + s.1 * t.0;
+            }
+        }
+        let y = awgn(&x, 8.0, mean_power(&x), &mut rng);
+        let ok = |c: &RxOfdmConfig, t: Tracking| {
+            decode_ppdu_from(&y, T1 - 2, c, t).is_ok_and(|d| d.psdu == psdu)
+        };
+        lost[0] += usize::from(!ok(&cfg, Tracking::from_clock_offset(0.0)));
+        lost[1] += usize::from(!ok(&cfg, Tracking::default()));
+        lost_off += usize::from(!ok(&off, Tracking::default()));
+    }
+    println!(
+        "nulls at two pilots, 6 Mb/s at 8 dB: {} lost from the CFO, {} from zero, {lost_off} without the tracker, of {frames}",
+        lost[0], lost[1]
+    );
+    assert!(
+        lost[0] <= lost_off + 3 && lost[1] <= lost_off + 3,
+        "{lost:?} against {lost_off}"
+    );
 }

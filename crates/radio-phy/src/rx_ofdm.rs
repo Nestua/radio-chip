@@ -52,9 +52,14 @@ impl Default for RxOfdmConfig {
     }
 }
 
-/// Standard deviation assumed for one symbol's slope measurement, radians per subcarrier. It
-/// only sets how fast the measurements outweigh the prior on the drift.
-pub const TIMING_MEASUREMENT_STD: f64 = 0.005;
+/// Standard deviation assumed for one symbol's slope measurement on a flat channel, radians
+/// per subcarrier: what it is at the sensitivity limit (0.0155 measured at 3.5 dB). At a
+/// higher SNR the measurement is better than assumed and the tracker merely learns more slowly
+/// than it could. It sets how fast the measurements outweigh the prior on the drift.
+pub const TIMING_MEASUREMENT_STD: f64 = 0.016;
+/// A measurement whose variance is more than this many times the nominal one is not used: its
+/// pilots are so weak that their phases wrap, and it is not even roughly Gaussian.
+pub const TIMING_MAX_VARIANCE: f64 = 3.0;
 /// Prior on the clock offset when nothing is known: the standard's worst case between two
 /// stations, ppm (IEEE 802.11-2020 §17.3.9.5–6: ±20 ppm each).
 pub const TIMING_PRIOR_PPM: f64 = 40.0;
@@ -148,18 +153,23 @@ impl Tracking {
     }
 
     /// One symbol's measurement `error` (slope left after `predicted` was removed) at time `t`
-    /// symbols: the recursive least-squares step for measured = offset + rate·t.
-    fn update(&mut self, error: f64, predicted: f64, t: f64) {
+    /// symbols, with variance `variance` in units of the nominal measurement's: the recursive
+    /// least-squares step for measured = offset + rate·t.
+    fn update(&mut self, error: f64, predicted: f64, t: f64, variance: f64) {
+        self.measured = error;
+        if !(variance > 0.0 && variance <= TIMING_MAX_VARIANCE) {
+            // No usable pilot pair: the measurement says nothing.
+            return;
+        }
         let [pbb, pbr, prr] = self.covariance;
-        // Gain K = P·φ / (φᵀ·P·φ + 1), φ = (1, t).
+        // Gain K = P·φ / (φᵀ·P·φ + R), φ = (1, t).
         let (gb, gr) = (pbb + pbr * t, pbr + prr * t);
-        let s = gb + gr * t + 1.0;
+        let s = gb + gr * t + variance;
         let (kb, kr) = (gb / s, gr / s);
         let innovation = error + predicted - (self.offset + self.rate * t);
         self.offset += kb * innovation;
         self.rate += kr * innovation;
         self.covariance = [pbb - kb * gb, pbr - kb * gr, prr - kr * gr];
-        self.measured = error;
     }
 }
 
@@ -319,8 +329,8 @@ pub fn demap(point: Sample, modulation: Modulation) -> Vec<f64> {
 /// ±1, so P is a maximum-ratio weighted phasor):
 /// 1. Timing: the slope predicted for this symbol (rate·t, less the window's moves) is
 ///    removed from the pilots; what is left between the pilots at ±21 and at ±7 is the
-///    measurement (least squares over the two pairs, weighted by their magnitudes), which
-///    updates the tracker ([`Tracking`]). The data are then turned back by the updated rate·t.
+///    measurement (least squares over the two pairs, weighted by the channel gains of their
+///    pilots), which updates the tracker ([`Tracking`]) with a variance from the same gains. The data are then turned back by the updated rate·t.
 ///    Beyond half a sample the window moves by one sample for the next symbol.
 /// 2. Common phase φ = ∠Σ P(k)·e^(−j·k·slope).
 /// 3. Each data point is Z(k)·H*(k)·e^(−j(φ + k·slope)) / (|H(k)|²·K_MOD), on the integer grid.
@@ -334,6 +344,8 @@ pub fn equalise(
 ) -> Option<Equalised> {
     let z = fft64(window)?;
     let turn = |v: Sample, angle: f64| cmul(v, (angle.cos(), angle.sin()));
+    let used = (-26i8..=26).filter(|&k| k != 0);
+    let mean_gain = used.map(|k| abs2(h[fft_bin(k)])).sum::<f64>() / 52.0;
     let mut common_phase = 0.0;
     if cfg.pilot_tracking {
         let polarity = f64::from(pilot_polarity(polarity_index));
@@ -359,27 +371,44 @@ pub fn equalise(
             // Pilots at −21, −7, 7, 21: the outer pair spans 42 subcarriers, the inner 14.
             let outer = cmul(q[3], conj(q[0]));
             let inner = cmul(q[2], conj(q[1]));
-            let (wo, wi) = (abs2(outer).sqrt(), abs2(inner).sqrt());
+            // A pilot's phase noise goes as 1/|H|², a pair's as the sum of its two: the pair's
+            // weight is the harmonic combination of the channel gains (from the estimate, which
+            // is the same for every symbol; the pilots' own magnitudes are noisy). One weak
+            // pilot makes its pair worthless, as it should.
+            let gain = |c: i8| abs2(h[fft_bin(c)]);
+            let pair = |a: f64, b: f64| if a + b > 0.0 { a * b / (a + b) } else { 0.0 };
+            let (wo, wi) = (pair(gain(21), gain(-21)), pair(gain(7), gain(-7)));
             let den = 42.0 * 42.0 * wo + 14.0 * 14.0 * wi;
             let error = if den > 0.0 {
                 (42.0 * wo * outer.1.atan2(outer.0) + 14.0 * wi * inner.1.atan2(inner.0)) / den
             } else {
                 0.0
             };
-            tracking.update(error, predicted, t);
+            // The measurement's variance against a flat channel of the same mean gain (where
+            // each pair's weight is half that gain): what the tracker trusts it by.
+            let flat = (42.0 * 42.0 + 14.0 * 14.0) * mean_gain / 2.0;
+            tracking.update(error, predicted, t, flat / den);
             tracking.drift = tracking.rate * t;
             tracking.slope = tracking.drift + moved;
         }
+        let removed = if cfg.timing_tracking {
+            tracking.slope
+        } else {
+            0.0
+        };
         let sum = p
             .iter()
             .zip(&PILOT_SUBCARRIERS)
-            .map(|(v, &c)| turn(*v, -f64::from(c) * tracking.slope))
+            .map(|(v, &c)| turn(*v, -f64::from(c) * removed))
             .fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1));
         common_phase = sum.1.atan2(sum.0);
     }
-    let slope = tracking.slope;
-    let used = (-26i8..=26).filter(|&k| k != 0);
-    let mean_gain = used.map(|k| abs2(h[fft_bin(k)])).sum::<f64>() / 52.0;
+    // Without the tracker nothing is removed and the window stays, whatever the state says.
+    let slope = if cfg.pilot_tracking && cfg.timing_tracking {
+        tracking.slope
+    } else {
+        0.0
+    };
     let grid = f64::from(mean_energy(modulation)).sqrt();
     let (mut points, mut weights) = (Vec::with_capacity(48), Vec::with_capacity(48));
     for c in data_subcarriers() {
@@ -400,10 +429,10 @@ pub fn equalise(
     }
     // A window one sample earlier takes 2π/64 off the slope left in it: keep that within half a
     // sample.
-    if tracking.slope > ONE_SAMPLE / 2.0 {
-        tracking.shift -= 1;
-    } else if tracking.slope < -ONE_SAMPLE / 2.0 {
-        tracking.shift += 1;
+    if slope > ONE_SAMPLE / 2.0 {
+        tracking.shift = tracking.shift.saturating_sub(1);
+    } else if slope < -ONE_SAMPLE / 2.0 {
+        tracking.shift = tracking.shift.saturating_add(1);
     }
     Some(Equalised {
         points,
