@@ -143,3 +143,10 @@ and 0.1 to 0.4 dB in AWGN. Six bits with a clip of 2 is the first format within 
 0.25 dB in AWGN and in both channels (a ranking on 200 to 300 frames per point, not a G2
 figure). SOFT_BITS, SOFT_CLIP and METRIC_BITS are unchanged: the choice was the founder's and
 its revision is too, on a paired G2 run of the whole receiver.
+
+## 2026-11-19 · decision · the founder: six bits, clip 2, as the working format
+
+Decided on the evidence of the note above. The constants change with R0-09 G2, where the
+whole receiver's sweep confirms or corrects the format and this journal's G2 (loss against
+float, metric width) is rerun at the new widths. Record: `docs/gates/rx_ofdm.md`,
+2026-11-19, decisions.

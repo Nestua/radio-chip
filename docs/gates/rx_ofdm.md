@@ -289,8 +289,8 @@ each half of a row the receivers saw the same frames)
   against 110 in TGn D at 6 Mb/s and 0 ppm; with the variance from the channel gains, 111.
 
 **Open questions**
-1. The soft-value format in fading (above). A G2 decision of the Viterbi decoder's input, so
-   the founder's (it was approved at 4 bits on AWGN evidence, with this caveat recorded).
+1. Answered 2026-11-19 (entry "decisions" below): six bits with a clip of 2 is the working
+   format; a full G2 sweep confirms or corrects it.
 2. The tracker's constants (the measurement's assumed deviation, the ±2 ppm of the CFO's
    clock offset, the rejection at three times the nominal variance) were set by reasoning and
    one test, not swept. Two known weaknesses:
@@ -311,3 +311,18 @@ each half of a row the receivers saw the same frames)
 6. The reserved SIGNAL bit and implausible LENGTH values are not used to reject a false
    SIGNAL: parity alone passes half of all noise.
 7. Fixed point (G2) for every step of this block.
+
+## 2026-11-19 · decisions · the founder on the soft-value format
+
+- **Six bits with a clip of 2 is the working soft-value format** for the fixed-point receiver
+  (R0-09 G2), replacing four bits with a clip of 1.5. Reason: the measurements above (0.8 to
+  3.0 dB lost at 9, 18 and 36 Mb/s in TGn B and D with four bits).
+- It is a working format, not a G2 result: the evidence is a ranking on 200 to 300 frames per
+  point. R0-09 G2 runs the full sweep (thousands of frames, AWGN and TGn B, D, E, the eight
+  rates, 4, 5 and 6 bits). If five bits hold the budget the question returns to the founder
+  with those figures.
+- Cost accepted: the decoder's path metrics widen from 9 to 11 bits. No decoder RTL exists
+  yet, so nothing is rewritten.
+- `SOFT_BITS`, `SOFT_CLIP` and `METRIC_BITS` in the model change with R0-09 G2, behind their
+  own gates (the Viterbi G2 of `docs/gates/viterbi.md` is rerun at the new widths), not with
+  this note.
