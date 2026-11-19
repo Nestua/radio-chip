@@ -1,0 +1,49 @@
+# JSON written by CPython json.dumps, black box; one text per line.
+# Tool: Python 3.9.6, hashlib and json from the standard library
+# Odd lines: ensure_ascii=True (\u escapes); even lines: the same value, ensure_ascii=False.
+{}
+{}
+[]
+[]
+""
+""
+0
+0
+-1
+-1
+20000000
+20000000
+5800000000.0
+5800000000.0
+2400000000.5
+2400000000.5
+1e-07
+1e-07
+-3.25e+17
+-3.25e+17
+0.1
+0.1
+12345678901234567890
+12345678901234567890
+true
+true
+false
+false
+null
+null
+"plain"
+"plain"
+"quote \" backslash \\ slash / tab \t newline \n return \r"
+"quote \" backslash \\ slash / tab \t newline \n return \r"
+"control \u0001 \u001f bell \b formfeed \f"
+"control \u0001 \u001f bell \b formfeed \f"
+"\u041a\u0438\u0457\u0432, 5,8 \u0413\u0413\u0446 \u2014 \u00ab\u0442\u0435\u0441\u0442\u00bb"
+"Київ, 5,8 ГГц — «тест»"
+"astral \ud83d\udce1 and \u2028 separator"
+"astral 📡 and   separator"
+[1, [2, [3, [4, []]]], {"a": {"b": {"c": null}}}]
+[1, [2, [3, [4, []]]], {"a": {"b": {"c": null}}}]
+{"core:datatype": "ci16_le", "core:sample_rate": 20000000, "list": [1.5, -2, "x"]}
+{"core:datatype": "ci16_le", "core:sample_rate": 20000000, "list": [1.5, -2, "x"]}
+{"": 1, " spaced key ": [true, false, null], "k": "v"}
+{"": 1, " spaced key ": [true, false, null], "k": "v"}

@@ -299,3 +299,48 @@ fn whole_ppdu_tx_default() {
     // W = 13: G2 budget allows ~2^-11 per stage; allow print rounding + a few LSB.
     whole_ppdu(13, PRINT_TOL + 4.0 / 2048.0);
 }
+
+/// The receive half of the R0 exit gate: the annex's own printed waveform (Tables I-22…I-30,
+/// three decimals, windowed) through the receiver gives the annex's PSDU, rate and length.
+#[test]
+#[ignore = "needs the locally extracted IEEE 802.11-2024 Annex I.1 fixture"]
+fn annex_waveform_decodes() {
+    use radio_phy::rx_ofdm::{decode_ppdu, RxOfdmConfig};
+    let a = load();
+    let mut annex: BTreeMap<i64, Printed> = BTreeMap::new();
+    for t in [
+        "I-22", "I-23", "I-24", "I-25", "I-26", "I-27", "I-28", "I-29", "I-30",
+    ] {
+        annex.extend(a.iq[t].iter().map(|(k, v)| (*k, *v)));
+    }
+    let y: Vec<(f64, f64)> = (0..881)
+        .map(|i| {
+            let v = annex[&i];
+            (v.0.unwrap(), v.1.unwrap())
+        })
+        .collect();
+    let want = psdu(&a);
+    // The seed whose sequence is the annex's Table I-14.
+    let seed = {
+        let seq = bit_table(&a, "I-14");
+        (1..=0x7fu8)
+            .find(|&s| {
+                let mut sc = Scrambler::new(s).unwrap();
+                (0..127).map(|_| sc.next_bit()).collect::<Vec<_>>() == seq
+            })
+            .unwrap()
+    };
+    // T1 starts at sample 192; every window start inside the guard interval must do.
+    for backoff in [0usize, 2, 4, 8, 15] {
+        let d = decode_ppdu(&y, 192 - backoff, &RxOfdmConfig::default()).unwrap();
+        assert_eq!(d.signal.rate, Rate::R36);
+        assert_eq!(d.signal.length, 100);
+        assert_eq!(d.psdu, want, "back-off {backoff}");
+        assert_eq!(d.scrambler_seed, seed, "back-off {backoff}");
+    }
+    println!(
+        "Annex I.1 waveform: {} octets decoded, \"{}…\"",
+        want.len(),
+        String::from_utf8_lossy(&want[24..52])
+    );
+}

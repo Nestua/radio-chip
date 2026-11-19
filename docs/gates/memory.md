@@ -46,3 +46,23 @@ promises neither.
 - No FPGA inference check yet (Vivado should map both shapes to block RAM or LUT RAM). It will be
   run with the top level's OOC synthesis.
 - The ASIC macro mapping comes with R5.
+
+## 2026-11-19 · note · the wrapper's contract against the IHP SG13G2 macro set
+
+The phase review (`docs/reviews/2026-11-19-r0-phase-review.md`, finding 8) asked whether the
+open PDK of R5 offers a memory with the wrapper's ports before more blocks depend on it.
+Checked by reading the PDK (IHP-Open-PDK at e73adb4, `ihp-sg13g2/libs.ref/sg13g2_sram`); nothing
+was synthesised.
+
+- The library has two-port macros `RM_IHPSG13_2P_*`: ports A and B, each with its own clock,
+  enable, write enable, read enable, address and data. Sizes: 64 × 22, 64 × 32, 256 × 8/16/32,
+  512 × 8/16/32, 1024 × 16/32. (Single-port `1P` macros go to 8192 × 32.)
+- `ram_1w1r` maps to one of them: write on A, read on B, the same clock on both. `ram_1w2r`
+  is two, as the wrapper already builds it.
+- The receiver front's memories fit: the 512 × 26-bit history in a 512 × 32 (two for the two
+  read ports), the 73 × 64-bit delay line of `rx_latch` in two 256 × 32 (73 words exceed the
+  64-word macros) or in flip-flops.
+- A read and a write of one address in the same cycle is what the wrapper forbids
+  (`CHECK_COLLISION`); the macro's behaviour in that case therefore does not matter.
+- Not checked: the macros' timing at our clock, their bit-mask and BIST pins (tied off in a
+  wrapper body), and `rdata` after a cycle without a read. These come with R0-14 and R5.

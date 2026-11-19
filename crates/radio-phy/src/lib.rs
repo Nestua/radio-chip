@@ -16,5 +16,6 @@ pub mod ofdm;
 pub mod ppdu;
 pub mod rx_front;
 pub mod rx_front_fixed;
+pub mod rx_ofdm;
 pub mod scrambler;
 pub mod viterbi;
