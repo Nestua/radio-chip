@@ -544,6 +544,71 @@ impl AgcTrace {
         states.reverse();
         (settled, states)
     }
+
+    /// [`AgcTrace::gain_states`] with the DC offset of every stretch, the settled one
+    /// included: a last state without end carries it (gain 0 dB, phase 0). The offsets are
+    /// in the units of the signal after the gain, as [`agc_transient`] adds them.
+    pub fn gain_states_dc(
+        &self,
+        jump_deg: f64,
+        dc: &GainDc,
+        rng: &mut Rng,
+    ) -> (f64, Vec<GainState>) {
+        let (settled, mut states) = self.gain_states(jump_deg, rng);
+        for s in &mut states {
+            s.dc = dc.at(settled + s.gain_db);
+        }
+        states.push(GainState {
+            until: usize::MAX,
+            gain_db: 0.0,
+            phase: 0.0,
+            dc: dc.at(settled),
+        });
+        (settled, states)
+    }
+}
+
+/// The DC offset of a zero-IF receive chain as a function of its gain (R0-07e; what is
+/// published and what is assumed: `docs/gates/channel.md`). Two parts, after the gain, in the
+/// units of the signal there (1.0 the ADC's full scale where the caller says so).
+///
+/// The AD9361 stores a correction per gain index and applies it when the index is used
+/// (UG-570 Rev. A, pp. 11–12), so what a calibrated chain leaves is a property of the
+/// index: `per_index`. What nothing corrects and arises before the gain grows with it:
+/// `before_gain`. No level of either is published.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GainDc {
+    /// Magnitude of the offset each gain index leaves; its direction is drawn once per
+    /// index (of 1 dB) from `seed`, uniform.
+    pub per_index: f64,
+    /// The table of directions.
+    pub seed: u64,
+    /// An offset at the input of the gain: 10^(g/20) times this after it.
+    pub before_gain: Sample,
+}
+
+impl GainDc {
+    /// The offset after a gain of `gain_db`.
+    pub fn at(&self, gain_db: f64) -> Sample {
+        // Indices of 1 dB, as the chip's gain table; a gain that is not a number is index 0.
+        let index = if gain_db.is_finite() {
+            gain_db.round() as i64
+        } else {
+            0
+        };
+        let mut rng = Rng::new(self.seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let (sin, cos) = (2.0 * PI * rng.uniform()).sin_cos();
+        let g = 10f64.powf(gain_db / 20.0);
+        let before = if g.is_finite() {
+            (self.before_gain.0 * g, self.before_gain.1 * g)
+        } else {
+            (0.0, 0.0)
+        };
+        (
+            self.per_index * cos + before.0,
+            self.per_index * sin + before.1,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

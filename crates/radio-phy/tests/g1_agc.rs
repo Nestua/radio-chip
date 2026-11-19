@@ -436,3 +436,101 @@ fn the_reset_value_of_the_power_measurement_outlasts_the_preamble() {
         assert!(t.locks[0] >= 522, "{db}: {:?}", t.locks);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// DC offset per gain state (R0-07e, second half). Published (UG-570 Rev. A, pp. 11–12): the
+// correction is stored per gain index and applied when the index is used, so what is left
+// is a property of the index. Its size is not published: the levels are parameters
+// (`docs/gates/channel.md`). The cases are worked by hand from that definition.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn dc_follows_the_gain_index_and_the_gain() {
+    use radio_phy::channel::{agc_transient, GainDc, Rng};
+    // Gains 70, 60, 70, 60, 40: two indices are visited twice.
+    let t = AgcTrace {
+        gain_db: Vec::new(),
+        changes: vec![(0, 70.0), (5, 60.0), (9, 70.0), (12, 60.0), (20, 40.0)],
+        locks: Vec::new(),
+        unlocks: Vec::new(),
+    };
+    // Only the part that arises before the gain: (3, −4)·10⁻⁴ at the input is
+    // (3, −4)·10⁻⁴·10^(g/20) after it: ×10^3.5, ×10³, ×10² at 70, 60 and 40 dB.
+    let before = GainDc {
+        per_index: 0.0,
+        seed: 1,
+        before_gain: (3e-4, -4e-4),
+    };
+    let (settled, s) = t.gain_states_dc(0.0, &before, &mut Rng::new(3));
+    assert_eq!(settled, 40.0);
+    let until: Vec<usize> = s.iter().map(|v| v.until).collect();
+    assert_eq!(until, [5, 9, 12, 20, usize::MAX]);
+    let gains: Vec<f64> = s.iter().map(|v| v.gain_db).collect();
+    assert_eq!(gains, [30.0, 20.0, 30.0, 20.0, 0.0]);
+    let r = 10f64.sqrt();
+    for (v, k) in s
+        .iter()
+        .zip([1000.0 * r, 1000.0, 1000.0 * r, 1000.0, 100.0])
+    {
+        assert!((v.dc.0 - 3e-4 * k).abs() < 1e-12 * k, "{v:?}");
+        assert!((v.dc.1 + 4e-4 * k).abs() < 1e-12 * k, "{v:?}");
+    }
+    assert_eq!(s[4].phase, 0.0);
+    // Only what the stored correction leaves: the same size at every index, the same value
+    // whenever an index returns, another direction at another index, another table with
+    // another seed.
+    let left = GainDc {
+        per_index: 0.02,
+        seed: 1,
+        before_gain: (0.0, 0.0),
+    };
+    let (_, s) = t.gain_states_dc(0.0, &left, &mut Rng::new(3));
+    for v in &s {
+        assert!((v.dc.0.hypot(v.dc.1) - 0.02).abs() < 1e-15, "{v:?}");
+    }
+    assert_eq!(s[0].dc, s[2].dc);
+    assert_eq!(s[1].dc, s[3].dc);
+    let apart = |a: Sample, b: Sample| (a.0 - b.0).hypot(a.1 - b.1) > 1e-3;
+    assert!(apart(s[0].dc, s[1].dc) && apart(s[1].dc, s[4].dc) && apart(s[0].dc, s[4].dc));
+    assert_eq!(left.at(60.0), s[1].dc);
+    assert_eq!(left.at(60.4), s[1].dc, "indices are whole decibels");
+    assert_eq!(left.at(59.6), s[1].dc, "the nearest one");
+    let other = GainDc { seed: 2, ..left };
+    assert!(apart(other.at(60.0), left.at(60.0)));
+    // Both parts add.
+    let both = GainDc {
+        per_index: 0.02,
+        seed: 1,
+        before_gain: (3e-4, -4e-4),
+    };
+    let (a, b, c) = (both.at(40.0), left.at(40.0), before.at(40.0));
+    assert!((a.0 - b.0 - c.0).abs() < 1e-15 && (a.1 - b.1 - c.1).abs() < 1e-15);
+    // Through `agc_transient` the settled chain keeps its own offset to the last sample.
+    let x = vec![(0.25, 0.5); 40];
+    let (_, s) = t.gain_states_dc(0.0, &both, &mut Rng::new(3));
+    let y = agc_transient(&x, &s);
+    let d = both.at(40.0);
+    for n in [20, 39] {
+        assert!((y[n].0 - 0.25 - d.0).abs() < 1e-15 && (y[n].1 - 0.5 - d.1).abs() < 1e-15);
+    }
+    let d = both.at(70.0);
+    let g = 10f64.powf(1.5);
+    assert!((y[10].0 - 0.25 * g - d.0).abs() < 1e-12 && (y[10].1 - 0.5 * g - d.1).abs() < 1e-12);
+    // The gains and phases are those of `gain_states` with the same random stream.
+    let (_, with) = t.gain_states_dc(30.0, &both, &mut Rng::new(9));
+    let (_, without) = t.gain_states(30.0, &mut Rng::new(9));
+    assert_eq!(with.len(), without.len() + 1);
+    for (a, b) in with.iter().zip(&without) {
+        assert_eq!((a.until, a.gain_db, a.phase), (b.until, b.gain_db, b.phase));
+    }
+    // No gain change at all: one state, the idle chain's offset.
+    let idle = AgcTrace {
+        gain_db: Vec::new(),
+        changes: vec![(0, 70.0)],
+        locks: Vec::new(),
+        unlocks: Vec::new(),
+    };
+    let (settled, s) = idle.gain_states_dc(0.0, &left, &mut Rng::new(3));
+    assert_eq!((settled, s.len(), s[0].until), (70.0, 1, usize::MAX));
+    assert_eq!(s[0].dc, left.at(70.0));
+}

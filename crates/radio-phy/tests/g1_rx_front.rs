@@ -1160,3 +1160,93 @@ fn a_failed_candidate_does_not_block_a_weaker_packet_after_it() {
         "{ok}/40 packets acquired after a failed candidate"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The DC blocker's controls at a gain change (R0-07e, candidates for ADR 0008). The reference
+// is the definition worked by hand on short inputs: a consistency gate of the model, not an
+// outside reference (`docs/gates/rx_front.md`).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn dc_blocker_hold_freezes_the_estimate_and_the_gear() {
+    use radio_phy::rx_front::DcBlocker;
+    // Pole 2^−2. n = 0: μ = 1, y = 8, m = 8.
+    let mut b = DcBlocker::new(2);
+    assert_eq!(b.push((8.0, -8.0)), (8.0, -8.0));
+    // Held: y = x − m with m unchanged, however many samples pass.
+    b.hold(true);
+    for _ in 0..5 {
+        assert_eq!(b.push((16.0, 0.0)), (8.0, 8.0));
+    }
+    // Released: the gear resumes where it stopped (n = 1: μ = 1/2): y = 8, m = 12 (and −4);
+    // n = 2: μ = 1/2: y = 4, m = 14 (−2); n = 3: μ = 1/4: y = 2, m = 14.5 (−1.5).
+    b.hold(false);
+    assert_eq!(b.push((16.0, 0.0)), (8.0, 8.0));
+    assert_eq!(b.push((16.0, 0.0)), (4.0, 4.0));
+    assert_eq!(b.push((16.0, 0.0)), (2.0, 2.0));
+    assert_eq!(b.push((16.0, 0.0)), (1.5, 1.5));
+}
+
+#[test]
+fn dc_blocker_rescale_moves_the_estimate_by_the_gain_step() {
+    use radio_phy::rx_front::DcBlocker;
+    // m = (8, −4) after the first sample. A step of −20 dB is a factor of 0.1 in amplitude:
+    // m = (0.8, −0.4); a DC that fell with the gain is removed at once.
+    let mut b = DcBlocker::new(7);
+    b.push((8.0, -4.0));
+    b.rescale(-20.0);
+    let y = b.push((0.8, -0.4));
+    assert!(y.0.abs() < 1e-12 && y.1.abs() < 1e-12, "{y:?}");
+    // +6.0206 dB doubles it. The gear is not touched (n = 2: μ = 1/2).
+    let mut b = DcBlocker::new(7);
+    b.push((8.0, -4.0));
+    b.push((8.0, -4.0));
+    b.rescale(20.0 * 2f64.log10());
+    let y = b.push((20.0, -8.0));
+    assert!((y.0 - 4.0).abs() < 1e-12 && y.1.abs() < 1e-12, "{y:?}");
+    let y = b.push((20.0, -8.0)); // m = 16 + 4/2 = 18
+    assert!((y.0 - 2.0).abs() < 1e-12, "{y:?}");
+    // A step that is not a number leaves the estimate alone.
+    let mut b = DcBlocker::new(7);
+    b.push((8.0, -4.0));
+    b.rescale(f64::NAN);
+    b.rescale(f64::INFINITY);
+    assert_eq!(b.push((8.0, -4.0)), (0.0, 0.0));
+}
+
+#[test]
+fn dc_blocker_restart_averages_again_from_the_present_estimate() {
+    use radio_phy::rx_front::DcBlocker;
+    // Pole 2^−3, run to steady state on zero, then the DC jumps to 8.
+    let mut b = DcBlocker::new(3);
+    for _ in 0..100 {
+        b.push((0.0, 0.0));
+    }
+    // restart(1): μ = 1/2 for two samples (as n = 1, 2), then 1/4 for four, then 1/8.
+    b.restart(1);
+    let got: Vec<f64> = (0..8).map(|_| b.push((8.0, 0.0)).0).collect();
+    // m: 0 → 4 → 6 → 6.5 → 6.875 → 7.15625 → 7.3671875 → (1/8) …
+    let want = [
+        8.0,
+        4.0,
+        2.0,
+        1.5,
+        1.125,
+        0.84375,
+        0.6328125,
+        0.6328125 * 7.0 / 8.0,
+    ];
+    assert_eq!(got, want);
+    // A restart beyond the steady-state pole is the steady state; restart(0) takes the
+    // next sample whole.
+    let mut b = DcBlocker::new(3);
+    for _ in 0..100 {
+        b.push((0.0, 0.0));
+    }
+    b.restart(u32::MAX);
+    assert_eq!(b.push((8.0, 0.0)).0, 8.0);
+    assert_eq!(b.push((8.0, 0.0)).0, 7.0);
+    b.restart(0);
+    assert_eq!(b.push((8.0, 0.0)).0, 6.125);
+    assert_eq!(b.push((8.0, 0.0)).0, 0.0);
+}
