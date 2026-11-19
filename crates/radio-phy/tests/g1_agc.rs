@@ -422,7 +422,7 @@ fn details_the_first_cases_do_not_reach() {
     x[35] = (f64::NAN, f64::NAN);
     let t = agc().run(&x);
     assert!(t.gain_db.iter().all(|g| g.is_finite()));
-    assert_eq!(t.gain_db[119], 40.0);
+    assert_eq!((t.locks.clone(), t.gain_db[119]), (vec![45], 40.0));
 }
 
 #[test]
