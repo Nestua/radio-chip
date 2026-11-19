@@ -12,6 +12,6 @@ publish.workspace = true
 workspace = true
 
 [dev-dependencies]
-# SHA-512 for the hash-only gates against the standard's annexes; a workspace crate without
-# dependencies of its own.
+# SHA-512 for the hash-only gates against the standard's annexes (tests/g1_annex_i1_hashes.rs,
+# g1_ldpc.rs); a workspace crate without dependencies of its own.
 radio-capture = { path = "../radio-capture" }

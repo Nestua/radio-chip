@@ -6,7 +6,8 @@ Reads the text of your own copy of the standard and parses the bit tables I-32 â
   <hashes>   committed: per table its length and the SHA-512 (hashlib) of its canonical text
              ("<n> <bit>\n" per bit, n counting in transmission order), and the two examples'
              inputs, the PSDUs of Tables I-31 and I-37, in hex (ADR 0005, addendum
-             2026-11-19: tables by hash, a test's input in clear);
+             2026-11-19: tables by hash; the inputs of the worked examples in clear, each
+             allowed by the founder);
   <fixture>  not committed (target/ext/): "<table> <bits>" for the value-by-value gate.
 
     pdftotext -layout 80211-2024.pdf 80211-2024.txt
@@ -63,7 +64,8 @@ def main(src, hashes, fixture):
         out.write("# IEEE Std 802.11-2024 Annex I.2 and I.3 (LDPC examples 1 and 2): SHA-512 of each bit\n")
         out.write("# table's canonical text (see tools/ref/annex_ldpc_hash.py), not the tables.\n")
         out.write("# Tool: CPython hashlib. Command: python3 -I tools/ref/annex_ldpc_hash.py <text> <this file> <fixture>\n")
-        out.write("# <table> <bits> <sha512>; psdu1, psdu2 = the examples' inputs (Tables I-31, I-37) in hex.\n")
+        out.write("# <table> <bits> <sha512>; psdu1, psdu2 = the examples' inputs (Tables I-31, I-37; taken\n")
+        out.write("# from the DATA bits of Tables I-32, I-38) in hex.\n")
         out.write(f"psdu1 {psdu('I-32').hex()}\n")
         out.write(f"psdu2 {psdu('I-38').hex()}\n")
         for t in WANT:

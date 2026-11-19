@@ -28,8 +28,13 @@ approach is shown to a lawyer once before a public release or an MPW.
   independent black box, as any transcription is.
 - **Worked examples are not reproduced; their hashes are.** Annex I.1 (tens of pages of
   tables) is a substantial part of the document, not a parameter. The repository holds the
-  SHA-512 of each table (R0-06b) so that CI can compare the model's output; the tables
-  themselves stay in a local fixture extracted from a licensed copy.
+  SHA-512 of each table its gate uses (R0-06b) so that CI can compare the model's output; the tables
+  themselves stay in a local fixture extracted from a licensed copy. One exception, decided
+  separately the same day: the inputs of the worked examples are in the repository, because
+  no test of an example can run without its input (a printed reference sequence a test
+  needs, as the decision above already allows). So far: the 100-octet PSDU of Table I-1
+  (also the input of LDPC example 1) and the 140-octet PSDU of Table I-37 (LDPC example 2,
+  R0-12). A further one is asked for again.
 - Patents on what the parameters describe are not touched by this addendum (see below).
 
 ## Consequences

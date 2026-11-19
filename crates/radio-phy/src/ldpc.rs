@@ -259,16 +259,29 @@ impl LdpcCode {
 
     /// Whether `word` (n bits) satisfies every parity check.
     pub fn is_codeword(&self, word: &[u8]) -> bool {
-        word.len() == self.n()
-            && word.iter().all(|&b| b <= 1)
-            && self
-                .checks()
-                .iter()
-                .all(|check| check.iter().fold(0, |acc, &i| acc ^ word[i]) == 0)
+        if word.len() != self.n() || word.iter().any(|&b| b > 1) {
+            return false;
+        }
+        let z = self.z;
+        self.rows.iter().all(|row| {
+            (0..z).all(|r| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(_, &s)| s >= 0)
+                    .fold(0, |acc, (col, &s)| {
+                        acc ^ word[col * z + (r + s as usize) % z]
+                    })
+                    == 0
+            })
+        })
     }
 }
 
 /// The derived parameters of an LDPC PPDU (§19.3.11.7.5, steps a to e).
+///
+/// The fields are public to be read. A plan is consistent when it comes from
+/// [`LdpcPlan::new`]; one put together by hand is refused by the encoding functions if its
+/// numbers do not fit its code (`LdpcError::Parameters`), never trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LdpcPlan {
     /// Payload bits: SERVICE and PSDU (N_pld).
@@ -301,12 +314,13 @@ impl LdpcPlan {
         m_stbc: usize,
     ) -> Result<Self, LdpcError> {
         let (num, den) = rate.fraction();
+        // The bounds first: they keep every product below inside 32 bits.
         if n_pld == 0
+            || n_pld > 1 << 24
             || n_cbps == 0
+            || n_cbps > 1 << 20
             || !(1..=2).contains(&m_stbc)
             || !(n_cbps * num).is_multiple_of(den)
-            || n_pld > 1 << 24
-            || n_cbps > 1 << 20
         {
             return Err(LdpcError::Parameters);
         }
@@ -380,6 +394,18 @@ impl LdpcPlan {
         total / self.n_cw + usize::from(cw < total % self.n_cw)
     }
 
+    /// Whether the numbers fit the code: what `new` guarantees and a hand-made plan may not.
+    fn consistent(&self) -> bool {
+        let (num, den) = self.rate.fraction();
+        let l = self.length.bits();
+        let k = l * num / den;
+        self.n_cw > 0
+            && self.n_cw.checked_mul(k) == self.n_pld.checked_add(self.n_shrt)
+            && self.n_shrt.div_ceil(self.n_cw) < k
+            && self.n_punc.div_ceil(self.n_cw) < l - k
+            && self.n_rep <= 1 << 24
+    }
+
     /// The information blocks handed to the encoder: the payload spread over the codewords
     /// with the shortening zeros at the end of each (step c). Concatenated, N_CW·k bits.
     pub fn shortened(&self, payload: &[u8]) -> Result<Vec<u8>, LdpcError> {
@@ -389,16 +415,18 @@ impl LdpcPlan {
                 want: self.n_pld,
             });
         }
+        if !self.consistent() {
+            return Err(LdpcError::Parameters);
+        }
         let (num, den) = self.rate.fraction();
         let k = self.length.bits() * num / den;
         let mut out = Vec::with_capacity(self.n_cw * k);
         let mut at = 0;
         for cw in 0..self.n_cw {
             let data = k - self.share(self.n_shrt, cw);
-            let end = (at + data).min(payload.len());
-            out.extend_from_slice(&payload[at..end]);
+            out.extend_from_slice(&payload[at..at + data]);
             out.resize((cw + 1) * k, 0);
-            at = end;
+            at += data;
         }
         Ok(out)
     }
@@ -424,7 +452,7 @@ impl LdpcPlan {
         let mut out = Vec::with_capacity(self.n_avbits);
         for (cw, word) in words.chunks(l).enumerate() {
             let data = k - self.share(self.n_shrt, cw);
-            let parity = (l - k).saturating_sub(self.share(self.n_punc, cw));
+            let parity = l - k - self.share(self.n_punc, cw);
             let start = out.len();
             out.extend_from_slice(&word[..data]);
             out.extend_from_slice(&word[k..k + parity]);

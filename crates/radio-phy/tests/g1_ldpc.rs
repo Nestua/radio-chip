@@ -152,7 +152,7 @@ fn prototypes_match_an_outside_copy() {
 /// reach. (n_pld, N_CBPS, rate, m_STBC) → (N_CW, L, N_avbits, N_shrt, N_punc, N_rep).
 #[test]
 fn plan_cases_worked_by_hand() {
-    use LdpcLength::{N1296, N648};
+    use LdpcLength::{N1296, N1944, N648};
     let cases = [
         // MCS 0, 27 octets: N_avbits = 52·⌈232/26⌉ = 468 ≤ 648 and 468 < 232 + 912/2, so one
         // 648 codeword; N_shrt = 324 − 232 = 92; N_punc = 648 − 468 − 92 = 88 > 0.1·324 and
@@ -170,6 +170,18 @@ fn plan_cases_worked_by_hand() {
         // N_avbits = 312 ≤ 648 at rate 2/3 with 10 payload bits: 312 < 10 + 912/3 = 314, so
         // 648 and not 1296; N_shrt = 432 − 10 = 422, N_rep = 312 − 216 − 10 = 86.
         ((10, 312, LdpcRate::R2_3, 1), (1, N648, 312, 422, 0, 86)),
+        // The bounds of Table 19-16's ranges belong to the lower range. N_avbits = 648 exactly
+        // (648 < 200 + 456): one 648 codeword, N_shrt = 124, N_rep = 648 − 324 − 200 = 124.
+        ((200, 648, LdpcRate::R1_2, 1), (1, N648, 648, 124, 0, 124)),
+        // N_avbits = 648·⌈1200/486⌉ = 1944 exactly: one 1944 codeword, not two; N_shrt =
+        // 1458 − 1200 = 258, N_rep = 1944 − 486 − 1200 = 258.
+        (
+            (1200, 648, LdpcRate::R3_4, 1),
+            (1, N1944, 1944, 258, 0, 258),
+        ),
+        // "≥" in the table: N_avbits = 600 = 144 + 912/2 exactly, so 1296. N_shrt = 504,
+        // N_punc = 1296 − 600 − 504 = 192: not above 0.3·648 = 194.4, and 504 ≥ 1.2·192.
+        ((144, 600, LdpcRate::R1_2, 1), (1, N1296, 600, 504, 192, 0)),
         // 648 < N_avbits = 1296 ≤ 1296 at rate 2/3 with 810 payload bits (no whole number of
         // octets, but the rule is on bits): 1296 < 810 + 1464/3 = 1298, so 1296 and not 1944;
         // N_shrt = 864 − 810 = 54, nothing punctured, N_rep = 1296 − 432 − 810 = 54.
@@ -212,10 +224,39 @@ fn refusals() {
             "{pld} {cbps} {m}"
         );
     }
-    assert_eq!(
-        LdpcPlan::new(usize::MAX, 52, LdpcRate::R1_2, 1),
-        Err(LdpcError::Parameters)
-    );
+    // Sizes no PPDU has are refused before any arithmetic on them (no overflow).
+    for (pld, cbps, rate) in [
+        (usize::MAX, 52, LdpcRate::R1_2),
+        (816, usize::MAX, LdpcRate::R2_3),
+        (816, usize::MAX / 2 + 2, LdpcRate::R3_4),
+        ((1 << 24) + 1, 52, LdpcRate::R1_2),
+        (816, (1 << 20) + 2, LdpcRate::R1_2),
+    ] {
+        assert_eq!(
+            LdpcPlan::new(pld, cbps, rate, 1),
+            Err(LdpcError::Parameters)
+        );
+    }
+    // A plan put together by hand that does not fit its code is refused, not trusted.
+    let good = LdpcPlan::new(816, 208, LdpcRate::R3_4, 1).unwrap();
+    for bad in [
+        LdpcPlan { n_cw: 0, ..good },
+        LdpcPlan {
+            n_shrt: good.n_shrt + 1,
+            ..good
+        },
+        LdpcPlan { n_cw: 2, ..good },
+        LdpcPlan {
+            n_punc: 486,
+            ..good
+        },
+        LdpcPlan {
+            length: LdpcLength::N648,
+            ..good
+        },
+    ] {
+        assert_eq!(bad.encode(&[0; 816]), Err(LdpcError::Parameters), "{bad:?}");
+    }
     let plan = LdpcPlan::new(816, 208, LdpcRate::R3_4, 1).unwrap();
     assert_eq!(
         plan.encode(&[0; 815]),
@@ -298,6 +339,32 @@ fn plan_invariants() {
     }
     println!("plans with puncturing {punctured}, with repetition {repeated}, with the extra symbol {incremented}");
     assert!(punctured > 1000 && repeated > 1000 && incremented > 100);
+}
+
+/// Step e) beyond what example 2 reaches (it repeats 80 of 568 data bits): the repeated bits
+/// run on from the data into the parity and, when one pass over the codeword is not enough,
+/// start again. Our reading of the clause, with the content checked.
+#[test]
+fn repetition_goes_through_the_parity_and_round_again() {
+    // 8 payload bits in one 648-bit symbol at rate 5/6: N_avbits = 648 ≥ 8 + 912/6, so a 1296
+    // codeword; N_shrt = 1080 − 8, nothing punctured, N_rep = 648 − 216 − 8 = 424: more than
+    // the 224 bits of the codeword that are sent.
+    let p = LdpcPlan::new(8, 648, LdpcRate::R5_6, 1).unwrap();
+    assert_eq!(
+        (p.n_cw, p.length, p.n_shrt, p.n_punc, p.n_rep),
+        (1, LdpcLength::N1296, 1072, 0, 424)
+    );
+    let payload = [1, 0, 1, 1, 0, 0, 1, 0];
+    let word = p.codewords(&payload).unwrap();
+    let mut once = payload.to_vec();
+    once.extend_from_slice(&word[1080..]);
+    assert_eq!(once.len(), 224);
+    assert!(
+        once[8..].contains(&1),
+        "a parity part of zeros shows nothing"
+    );
+    let want: Vec<u8> = once.iter().cycle().take(224 + 424).copied().collect();
+    assert_eq!(p.encode(&payload).unwrap(), want);
 }
 
 // ---------------------------------------------------------------------------------------------
