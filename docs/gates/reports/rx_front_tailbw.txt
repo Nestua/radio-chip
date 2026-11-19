@@ -1,8 +1,11 @@
 # rxfront tailbw: RxFrontFixed on noise at −30 dBFS behind a 65-tap low-pass filter,
-# 400 M samples per case. Budget: 5e-8 detector events per sample (1 per second).
-# passband        detector events   per sample   acquisitions
-white                           0        0.0e0              0
-±9.0 MHz                        0        0.0e0              0
-±8.3 MHz                        4       1.0e-8              0
-±7.5 MHz                       22       5.5e-8              0
-±6.0 MHz                      624       1.6e-6              0
+# 2000 M samples per case (10 threads x 200 M; the streams depend on the thread count).
+# Budget: 5e-8 detector events per sample (1 per second at 20 MS/s).
+# The 802.11 signal occupies ±8.3 MHz: the two narrowest filters cut into it and are not
+# usable channel filters; they show the trend.
+# passband        detector events  excursions   per sample   acquisitions
+white                           0           0        0.0e0              0
+±9.0 MHz                       12           8       6.0e-9              0
+±8.3 MHz                       28          18       1.4e-8              0
+±7.5 MHz (cuts)               129          85       6.5e-8              0
+±6.0 MHz (cuts)              3248        2085       1.6e-6              0

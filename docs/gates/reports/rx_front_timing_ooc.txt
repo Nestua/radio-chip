@@ -1,0 +1,80 @@
+# Excerpts of the Vivado 2024.2 reports of tools/syn/ooc_probe.tcl, 2026-11-19, build server,
+# sources at 464d270: timing summary, utilisation, worst path per block.
+== dc_block
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+      3.414        0.000                      0                  114        0.098        0.000                      0                  114        2.850        0.000                       0                    83  
+| CLB LUTs                |  189 |     0 |          0 |    117120 |  0.16 |
+| CLB Registers           |   83 |     0 |          0 |    234240 |  0.04 |
+| CLB Registers                              |   83 |     0 |          0 |    234240 |  0.04 |
+| Block RAM Tile |    0 |     0 |          0 |       144 |  0.00 |
+Slack (MET) :             3.414ns  (required time - arrival time)
+  Source:                 m_re_reg[0]/C
+  Destination:            out_re_reg[0]/S
+  Data Path Delay:        2.672ns  (logic 1.134ns (42.438%)  route 1.538ns (57.562%))
+  Logic Levels:           7  (CARRY8=3 LUT1=1 LUT5=1 LUT6=2)
+== nco
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+      2.584        0.000                      0                  233        0.088        0.000                      0                  233        2.548        0.000                       0                    60  
+| CLB LUTs                |   96 |     0 |          0 |    117120 |  0.08 |
+| CLB Registers           |   52 |     0 |          0 |    234240 |  0.02 |
+| CLB Registers                              |   52 |     0 |          0 |    234240 |  0.02 |
+| Block RAM Tile    |    1 |     0 |          0 |       144 |  0.69 |
+Slack (MET) :             2.584ns  (required time - arrival time)
+  Source:                 r1_reg_rep/CLKARDCLK
+  Destination:            p3_re_reg/DSP_A_B_DATA_INST/B[9]
+  Data Path Delay:        3.055ns  (logic 1.894ns (62.004%)  route 1.161ns (37.996%))
+  Logic Levels:           3  (LUT5=1 LUT6=2)
+== cordic
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+      3.721        0.000                      0                  742        0.064        0.000                      0                  742        2.363        0.000                       0                   780  
+| CLB LUTs                   | 1212 |     0 |          0 |    117120 |  1.03 |
+| CLB Registers              |  779 |     0 |          0 |    234240 |  0.33 |
+| CLB Registers                              |  779 |     0 |          0 |    234240 |  0.33 |
+| Block RAM Tile |    0 |     0 |          0 |       144 |  0.00 |
+Slack (MET) :             3.721ns  (required time - arrival time)
+  Source:                 g_iter[3].y_reg[5][9]/C
+  Destination:            g_iter[4].z_reg[6][14]/D
+  Data Path Delay:        2.526ns  (logic 1.188ns (47.022%)  route 1.338ns (52.978%))
+  Logic Levels:           5  (CARRY8=2 LUT2=1 LUT4=1 LUT5=1)
+== rx_latch
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+      0.835        0.000                      0                 3563        0.039        0.000                      0                 3563        2.363        0.000                       0                  1482  
+| CLB LUTs                   | 1758 |     0 |          0 |    117120 |  1.50 |
+| CLB Registers              | 1111 |     0 |          0 |    234240 |  0.47 |
+| CLB Registers                              | 1111 |     0 |          0 |    234240 |  0.47 |
+| Block RAM Tile |    0 |     0 |          0 |       144 |  0.00 |
+Slack (MET) :             0.835ns  (required time - arrival time)
+  Source:                 l_im_reg[0]/C
+  Destination:            u_cordic/y_reg[0][2]/D
+  Data Path Delay:        5.411ns  (logic 2.448ns (45.238%)  route 2.963ns (54.762%))
+  Logic Levels:           14  (CARRY8=4 LUT1=1 LUT3=1 LUT4=1 LUT5=4 LUT6=3)
+== det_a
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+     -0.637      -15.671                     53                 1849        0.073        0.000                      0                 1849        2.363        0.000                       0                   401  
+| CLB LUTs                   |  642 |     0 |          0 |    117120 |  0.55 |
+| CLB Registers              |  300 |     0 |          0 |    234240 |  0.13 |
+| CLB Registers                              |  300 |     0 |          0 |    234240 |  0.13 |
+| Block RAM Tile |    0 |     0 |          0 |       144 |  0.00 |
+Slack (VIOLATED) :        -0.637ns  (required time - arrival time)
+  Source:                 pp__1/DSP_A_B_DATA_INST/CLK
+  Destination:            rhs3_reg[76]/D
+  Data Path Delay:        6.848ns  (logic 4.942ns (72.171%)  route 1.906ns (27.829%))
+  Logic Levels:           22  (CARRY8=10 DSP_ALU=2 DSP_M_DATA=1 DSP_MULTIPLIER=1 DSP_OUTPUT=2 DSP_PREADD_DATA=1 LUT2=1 LUT3=2 LUT4=2)
+== ltf_corr
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+     -1.887    -1049.353                    729                18006        0.046        0.000                      0                18006        2.850        0.000                       0                  3338  
+| CLB LUTs                | 1932 |     0 |          0 |    117120 |  1.65 |
+| CLB Registers           | 3320 |     0 |          0 |    234240 |  1.42 |
+| CLB Registers                              | 3320 |     0 |          0 |    234240 |  1.42 |
+| Block RAM Tile |    0 |     0 |          0 |       144 |  0.00 |
+Slack (VIOLATED) :        -1.887ns  (required time - arrival time)
+  Source:                 g_mul[47].p_im_reg[47]/DSP_M_DATA_INST/CLK
+  Destination:            g_im_reg[5]/DSP_OUTPUT_INST/ALU_OUT[0]
+  Data Path Delay:        8.094ns  (logic 7.159ns (88.452%)  route 0.935ns (11.548%))
+  Logic Levels:           18  (CARRY8=3 DSP_ALU=7 DSP_C_DATA=1 DSP_OUTPUT=6 LUT2=1)

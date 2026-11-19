@@ -162,13 +162,14 @@ Mutation check (each restored with `cp` + `touch`):
    long-range profile at 5/10 MHz has 1.6/3.2 µs guards. R0-09 should test E/F at 20 MHz as the
    ISI case.
 
-## 2026-11-19 · G1 · `agc_transient`: gain, phase and DC states while the gain control settles
+## 2026-11-19 · `agc_transient`: gain, phase and DC states while the gain control settles
 
 - **What:** sample n takes the first state with n < `until` (gain in dB, a carrier phase, a DC
   offset added after the gain); samples after the last state are unchanged. Used by
   `rxfront agc` (`docs/gates/rx_front.md`, 2026-11-19).
 - **Reference:** its definition written out sample by sample, and the two older functions it
-  generalises: one state without phase or DC equals `gain_step` on the scaled signal, and a
+  generalises (both ours: this is a consistency gate of a simulator primitive, not an outside
+  reference; `gain_step` and `add_tone` have theirs above): one state without phase or DC equals `gain_step` on the scaled signal, and a
   DC-only state equals `add_tone` at 0 Hz. Test `g1_channel_impairments::agc_transient_states`.
 - **Mutations** (each fails the test): the rotation's sign; a state ending one sample late; the
   DC not added to the imaginary part.
