@@ -1202,3 +1202,11 @@ the build server; no gate reruns it.
     errors).
 19. The hand-off of samples to the rest of the receiver and the latency budget to SIGNAL and
     to the ACK (ADR 0007, decision 2).
+
+## 2026-11-19 · note · the same blocks on the open ASIC flow
+
+`docs/gates/silicon_probe.md` has the receiver-front blocks through OpenROAD-flow-scripts on
+IHP SG13G2 at the same 6.25 ns: `det_a` fails there too (−3.2 ns), `ltf_corr` passes at the
+global-route estimate, and the blocks together are about 3 mm² of cells. The simulation
+checks of `rx_latch` and `ram_1w1r` moved inside `` `ifndef SYNTHESIS `` because the open
+flow's front end rejects procedural `$error`; the `latch` and `ram` gates are unchanged.
