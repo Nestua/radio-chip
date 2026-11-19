@@ -259,8 +259,8 @@ fn viterbi(blocks: u64) -> Result<(), String> {
 // LDPC
 // ---------------------------------------------------------------------------------------------
 
-/// Block error rate the loss is read at.
-const LDPC_TARGET: f64 = 0.1;
+/// Block error rates the loss is read at.
+const LDPC_TARGETS: [f64; 2] = [0.1, 0.01];
 
 #[derive(Clone, Copy, PartialEq)]
 enum LdpcCfg {
@@ -284,11 +284,12 @@ impl LdpcCfg {
             LdpcCfg::Reference => "reference: sum-product".into(),
             LdpcCfg::Float { scale, iters } => format!("float layered x{scale}, {iters} it"),
             LdpcCfg::Fixed { in_bits, clip, cfg } => format!(
-                "in {in_bits}b clip {clip} msg {} tot {} x{}/{} {} it",
+                "in {in_bits}b clip {clip} msg {} tot {} x{}/{}{} {} it",
                 cfg.msg_bits,
                 cfg.app_bits,
                 cfg.scale_num,
                 1 << cfg.scale_shift,
+                if cfg.scale_round { "r" } else { "" },
                 cfg.max_iter
             ),
         }
@@ -301,9 +302,10 @@ const LDPC_CHOICE: (u32, f64, MinSumConfig) = (
     6,
     2.0,
     MinSumConfig {
-        max_iter: 15,
-        scale_num: 3,
-        scale_shift: 2,
+        max_iter: 20,
+        scale_num: 7,
+        scale_shift: 3,
+        scale_round: false,
         msg_bits: 6,
         app_bits: 8,
     },
@@ -313,13 +315,16 @@ fn ldpc_configs() -> Vec<LdpcCfg> {
     let (in_bits, clip, cfg) = LDPC_CHOICE;
     let fixed = |in_bits, clip, cfg| LdpcCfg::Fixed { in_bits, clip, cfg };
     let mut v = vec![LdpcCfg::Reference];
-    for scale in [1.0, 0.875, 0.8125, 0.75, 0.6875] {
+    // The algorithm's own cost, in floating point: the scale, then the iterations.
+    for scale in [1.0, 0.875, 0.8125, 0.75] {
         v.push(LdpcCfg::Float { scale, iters: 50 });
     }
-    v.push(LdpcCfg::Float {
-        scale: 0.75,
-        iters: cfg.max_iter,
-    });
+    for iters in [10, 15, 20, 30] {
+        v.push(LdpcCfg::Float {
+            scale: 0.8125,
+            iters,
+        });
+    }
     v.push(fixed(in_bits, clip, cfg));
     // Input: width and clip, with messages and totals wide enough not to interfere.
     let wide = MinSumConfig {
@@ -344,19 +349,36 @@ fn ldpc_configs() -> Vec<LdpcCfg> {
             }
         }
     }
-    for (scale_num, scale_shift) in [(1, 0), (7, 3), (13, 4), (11, 4), (5, 3), (1, 1)] {
-        v.push(fixed(
-            in_bits,
-            clip,
-            MinSumConfig {
+    // The same with one bit less at the input: narrower messages may then do.
+    for msg_bits in [4, 5, 6] {
+        for extra in [1, 2, 3] {
+            let c = MinSumConfig {
+                msg_bits,
+                app_bits: msg_bits + extra,
+                ..cfg
+            };
+            v.push(fixed(in_bits - 1, clip, c));
+        }
+    }
+    // The factor, rounded down and to nearest.
+    for (scale_num, scale_shift) in [(1, 0), (15, 4), (7, 3), (13, 4), (3, 2), (11, 4)] {
+        for scale_round in [false, true] {
+            let c = MinSumConfig {
                 scale_num,
                 scale_shift,
+                scale_round,
                 ..cfg
-            },
-        ));
+            };
+            if c != cfg && c.is_valid() {
+                v.push(fixed(in_bits, clip, c));
+            }
+        }
     }
-    for max_iter in [4, 6, 8, 10, 12, 20, 30, 50] {
-        v.push(fixed(in_bits, clip, MinSumConfig { max_iter, ..cfg }));
+    for max_iter in [6, 8, 10, 12, 15, 20, 25, 30, 50] {
+        let c = MinSumConfig { max_iter, ..cfg };
+        if c != cfg {
+            v.push(fixed(in_bits, clip, c));
+        }
     }
     v
 }
@@ -416,7 +438,8 @@ fn ldpc(blocks: u64) -> Result<(), String> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
     println!(
         "# G2 sweep: LDPC, {blocks} blocks per point, BPSK/AWGN, same noise for every \
-         configuration; loss = Eb/N0 at a block error rate of {LDPC_TARGET} minus the reference's"
+         configuration; loss = Eb/N0 at a block error rate of 10 % (and of 1 %) minus the reference's; \
+         a factor marked r is rounded to nearest"
     );
     println!("# columns: block error rate per Eb/N0; mean iterations at the last grid point");
     for (length, rate, name, r, start) in [
@@ -439,7 +462,7 @@ fn ldpc(blocks: u64) -> Result<(), String> {
         ),
     ] {
         let code = LdpcCode::new(length, rate).ok_or("no such code")?;
-        let grid: Vec<f64> = (0..7).map(|i| start + 0.25 * f64::from(i)).collect();
+        let grid: Vec<f64> = (0..8).map(|i| start + 0.25 * f64::from(i)).collect();
         let mut bler = vec![vec![0.0; grid.len()]; configs.len()];
         let mut iters = vec![0.0; configs.len()];
         for (gi, &ebn0) in grid.iter().enumerate() {
@@ -465,22 +488,33 @@ fn ldpc(blocks: u64) -> Result<(), String> {
                 }
             }
         }
-        let reference =
-            crossing(&grid, &bler[0], LDPC_TARGET).ok_or("reference misses the target")?;
-        println!("\n## {name}: reference reaches a block error rate of {LDPC_TARGET} at {reference:.3} dB");
-        print!("# {:<38}", "config");
+        // The 10 % crossing must exist; the 1 % one may be missed by a thin run.
+        let reference = LDPC_TARGETS.map(|t| crossing(&grid, &bler[0], t));
+        let at = |x: Option<f64>| x.map_or("n/a".to_string(), |x| format!("{x:.3} dB"));
+        if reference[0].is_none() {
+            return Err("reference misses the target".into());
+        }
+        println!(
+            "\n## {name}: reference reaches a block error rate of 10 % at {}, of 1 % at {}",
+            at(reference[0]),
+            at(reference[1])
+        );
+        print!("# {:<40}", "config");
         for g in &grid {
             print!(" {g:>6.2}");
         }
-        println!(" | loss dB | iter");
+        println!(" | loss 10 % |     1 % | iter");
         for (k, cfg) in configs.iter().enumerate() {
-            print!("  {:<38}", cfg.label());
+            print!("  {:<40}", cfg.label());
             for b in &bler[k] {
                 print!(" {b:>6.3}");
             }
-            let loss = crossing(&grid, &bler[k], LDPC_TARGET)
-                .map_or("   n/a".to_string(), |x| format!("{:+7.3}", x - reference));
-            println!(" | {loss} | {:>4.1}", iters[k]);
+            let loss = |i: usize| {
+                crossing(&grid, &bler[k], LDPC_TARGETS[i])
+                    .zip(reference[i])
+                    .map_or("    n/a".to_string(), |(x, r)| format!("{:+7.3}", x - r))
+            };
+            println!(" |    {} | {} | {:>4.1}", loss(0), loss(1), iters[k]);
         }
     }
     Ok(())

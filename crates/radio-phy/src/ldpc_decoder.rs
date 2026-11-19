@@ -70,6 +70,10 @@ pub struct MinSumConfig {
     pub scale_num: i32,
     /// See `scale_num`.
     pub scale_shift: u32,
+    /// Whether the scaled minimum is rounded to nearest (half up: 2^(scale_shift−1) is
+    /// added before the shift) or down. Rounding down takes 3/8 of a unit from a message
+    /// on average at ×3/4 and turns a minimum of 1 into 0.
+    pub scale_round: bool,
     /// Width of a check's message, sign included: magnitudes saturate at 2^(bits−1) − 1.
     pub msg_bits: u32,
     /// Width of a bit's running total (and of the input after saturation), sign included.
@@ -84,6 +88,7 @@ impl Default for MinSumConfig {
             max_iter: 20,
             scale_num: 3,
             scale_shift: 2,
+            scale_round: false,
             msg_bits: 8,
             app_bits: 10,
         }
@@ -92,13 +97,14 @@ impl Default for MinSumConfig {
 
 impl MinSumConfig {
     /// Whether the parameters describe a decoder: widths of 2 to 24 bits, the total at
-    /// least as wide as a message, a factor in (0, 1].
+    /// least as wide as a message, a factor in (0, 1] (below 1 if it is rounded).
     pub fn is_valid(&self) -> bool {
         (2..=24).contains(&self.msg_bits)
             && (self.msg_bits..=24).contains(&self.app_bits)
             && self.scale_shift <= 8
             && self.scale_num >= 1
             && self.scale_num <= 1 << self.scale_shift
+            && (!self.scale_round || self.scale_shift >= 1)
     }
 }
 
@@ -275,8 +281,9 @@ impl LdpcDecoder {
     /// - For a check: each bit's message is its total minus this check's last message to
     ///   it, saturated to the total's range. The check's new message to a bit is the sign
     ///   product of the other bits' messages (0 counts as positive) and
-    ///   `(min · scale_num) >> scale_shift` of their smallest magnitude, saturated to the
-    ///   message range. The bit's new total is its message plus the new one, saturated.
+    ///   `(min · scale_num + r) >> scale_shift` of their smallest magnitude (r =
+    ///   2^(scale_shift−1) with `scale_round`, else 0), saturated to the message range.
+    ///   The bit's new total is its message plus the new one, saturated.
     /// - After each pass over all checks: bit = 1 where the total is negative; stop when
     ///   every check holds or after `max_iter` passes.
     pub fn decode_fixed(&self, llr: &[i32], cfg: &MinSumConfig) -> Result<Decoded, LdpcError> {
@@ -297,6 +304,11 @@ impl LdpcDecoder {
         let mut bits = hard(&total);
         let mut iterations = 0;
         let mut v2c = Vec::new();
+        let half = if cfg.scale_round {
+            1i64 << (cfg.scale_shift - 1)
+        } else {
+            0
+        };
         while iterations < cfg.max_iter && !self.converged(&bits) {
             for (check, old) in self.checks.iter().zip(c2v.iter_mut()) {
                 v2c.clear();
@@ -316,7 +328,8 @@ impl LdpcDecoder {
                 for (i, ((&b, o), &v)) in check.iter().zip(old.iter_mut()).zip(&v2c).enumerate() {
                     let min = if i == at { min2 } else { min1 };
                     // min ≤ 2^23 and scale_num ≤ 2^8: the product stays inside i64 easily.
-                    let scaled = (i64::from(min) * i64::from(cfg.scale_num)) >> cfg.scale_shift;
+                    let scaled =
+                        (i64::from(min) * i64::from(cfg.scale_num) + half) >> cfg.scale_shift;
                     let mag = scaled.min(i64::from(msg_max)) as i32;
                     let new = if negative ^ (v < 0) { -mag } else { mag };
                     total[b] = (v + new).clamp(-app_max, app_max);

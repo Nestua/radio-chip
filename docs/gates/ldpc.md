@@ -275,3 +275,29 @@ widths as one question.
    layered normalised min-sum decoder that could be run as a black box on these matrices.
 6. The accumulator that combines repeated bits in hardware (its width, where it saturates)
    and the rounding of the scaled minimum: both to G2, and with the widths to the founder.
+
+## 2026-11-19 · G0 · G2 budget (decoder widths)
+
+- **What is chosen:** the integer decoder's input format (width b and clip C: soft value =
+  round(y·in_max/C) saturated to ±in_max = ±(2^(b−1) − 1), y the matched-filter output
+  with signal amplitude 1, the Viterbi's convention), the message and total widths, the
+  normalisation factor with its rounding, and the iteration limit.
+- **Two losses, kept apart.** (a) The algorithm: layered normalised min-sum at a given
+  iteration limit against sum-product with 50 flooding iterations. That is a choice of
+  throughput and area, not of arithmetic; it is reported, and the iteration limit is the
+  founder's to set. (b) The arithmetic: the integer decoder against the float layered
+  min-sum at its best factor and the same iteration limit.
+- **Budget:** (b) ≤ 0.1 dB of Eb/N0 at a block error rate of 10 %, on BPSK/AWGN, on the
+  worst of five codes: (648, 1/2), (1944, 1/2), (1944, 3/4), (648, 5/6), (1944, 5/6) (both
+  ends of length and rate; rate 1/2 is the hardest for min-sum). Rule: the narrowest input,
+  then the narrowest messages, then the narrowest totals that meet it; the factor is the
+  best one that is a shift-and-add.
+- **Method:** `g2 ldpc [blocks]`: every configuration decodes the same noisy blocks; the
+  10 % crossing by log-linear interpolation on a 0.25 dB grid; the 1 % crossing is printed
+  too, as a check that nothing bends lower down (an error floor would need far more
+  blocks). One parameter at a time around the choice, so the choice is revised and the
+  sweep rerun until the centre is the choice.
+- The clip is relative to the signal amplitude, as the Viterbi's: it assumes soft values
+  normalised by the channel gain, which R0-09's demapper owns; in fading the weights
+  change the optimum, and this sweep is rerun through the receiver when the HT or TDMA
+  mapping exists.

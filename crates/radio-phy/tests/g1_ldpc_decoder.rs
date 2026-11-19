@@ -334,6 +334,11 @@ fn fixed_by_definition(code: &LdpcCode, llr: &[i32], cfg: &MinSumConfig) -> (Vec
     let mut total: Vec<i64> = llr.iter().map(|&x| sat(i64::from(x), app_max)).collect();
     let mut last: Vec<Vec<i64>> = checks.iter().map(|c| vec![0; c.len()]).collect();
     let bits = |t: &[i64]| -> Vec<u8> { t.iter().map(|&x| u8::from(x < 0)).collect() };
+    let half = if cfg.scale_round {
+        1i64 << (cfg.scale_shift - 1)
+    } else {
+        0
+    };
     let mut passes = 0;
     while passes < cfg.max_iter && !code.is_codeword(&bits(&total)) {
         for (c, check) in checks.iter().enumerate() {
@@ -351,7 +356,7 @@ fn fixed_by_definition(code: &LdpcCode, llr: &[i32], cfg: &MinSumConfig) -> (Vec
                 };
                 let min = others().map(i64::abs).min().unwrap();
                 let minus = others().filter(|&m| m < 0).count() % 2 == 1;
-                let mag = ((min * i64::from(cfg.scale_num)) >> cfg.scale_shift).min(msg_max);
+                let mag = ((min * i64::from(cfg.scale_num) + half) >> cfg.scale_shift).min(msg_max);
                 let new = if minus { -mag } else { mag };
                 total[b] = sat(msg[i] + new, app_max);
                 last[c][i] = new;
@@ -372,6 +377,7 @@ fn fixed_decoder_is_its_written_definition() {
             max_iter: 6,
             scale_num: 3,
             scale_shift: 2,
+            scale_round: true,
             msg_bits: 3,
             app_bits: 4,
         },
@@ -379,6 +385,7 @@ fn fixed_decoder_is_its_written_definition() {
             max_iter: 6,
             scale_num: 13,
             scale_shift: 4,
+            scale_round: false,
             msg_bits: 4,
             app_bits: 4,
         },
@@ -386,6 +393,7 @@ fn fixed_decoder_is_its_written_definition() {
             max_iter: 4,
             scale_num: 1,
             scale_shift: 0,
+            scale_round: false,
             msg_bits: 2,
             app_bits: 6,
         },
@@ -393,6 +401,7 @@ fn fixed_decoder_is_its_written_definition() {
             max_iter: 5,
             scale_num: 7,
             scale_shift: 3,
+            scale_round: true,
             msg_bits: 5,
             app_bits: 6,
         },
@@ -579,6 +588,13 @@ fn refusals() {
         },
         MinSumConfig {
             scale_shift: 9,
+            ..MinSumConfig::default()
+        },
+        // Nothing to round at a factor of 1.
+        MinSumConfig {
+            scale_num: 1,
+            scale_shift: 0,
+            scale_round: true,
             ..MinSumConfig::default()
         },
     ] {
