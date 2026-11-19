@@ -61,6 +61,10 @@ pub struct FixedRxConfig {
     pub corr_bits: u32,
     /// Bits E of the samples entering the final coarse and fine CFO correlations.
     pub est_bits: u32,
+    /// Weight w of the coarse CFO estimate in the CFO handed on, in 64ths (0..=64):
+    /// `cfo = coarse + round((64 − w)·(fine − coarse)/64)`. 0 by decision (ADR 0007): the
+    /// fine estimate, exactly. 15 is the AWGN optimum (`rx_front::FINE_WEIGHT` ≈ 49/64).
+    pub coarse_weight_64: i64,
 }
 
 impl Default for FixedRxConfig {
@@ -81,6 +85,7 @@ impl Default for FixedRxConfig {
             tap_bits: 8,
             corr_bits: 20,
             est_bits: 12,
+            coarse_weight_64: 0,
         }
     }
 }
@@ -103,6 +108,7 @@ impl FixedRxConfig {
             && (4..=40).contains(&self.cordic_bits)
             && self.cordic_iters <= 30
             && (1..=30).contains(&self.dc_frac)
+            && (0..=64).contains(&self.coarse_weight_64)
             && self.theta_shift <= 16
     }
 }
@@ -480,7 +486,8 @@ pub struct FixedAcquisition {
     pub ltf_start: usize,
     /// First sample of the FFT window of T1 (first path − back-off).
     pub fft_start: usize,
-    /// Combined CFO in units of 2π/2^P per sample: the downstream NCO's step is its negative.
+    /// The CFO handed on (the fine estimate unless `coarse_weight_64` is set), in units of
+    /// 2π/2^P per sample: the downstream NCO's step is its negative.
     pub cfo_phase: i64,
     /// Coarse (STF) estimate alone, same units.
     pub coarse_phase: i64,
@@ -489,7 +496,7 @@ pub struct FixedAcquisition {
 }
 
 impl FixedAcquisition {
-    /// The combined CFO in Hz.
+    /// The CFO handed on, in Hz.
     pub fn cfo_hz(&self, fx: &FixedRxConfig, sample_rate_hz: f64) -> f64 {
         self.cfo_phase as f64 * sample_rate_hz / 2f64.powi(fx.nco_phase_bits as i32)
     }
@@ -772,7 +779,7 @@ impl RxFrontFixed {
             return None;
         }
 
-        // Fine CFO, lag 64, resolved against the coarse one; combined with 1/2 + 1/4 + 1/64.
+        // Fine CFO, lag 64, resolved against the coarse one.
         let fine_start = (sym + FINE_GUARD).checked_sub(GI2_LEN)?;
         let cf = self.lag_sum(fine_start, FINE_LEN, LTF_SYMBOL_LEN, fx.est_bits);
         let coarse = -self.per_sample(angle_c, STF_PERIOD as u32);
@@ -784,8 +791,10 @@ impl RxFrontFixed {
         let half = span >> 1;
         let d = (raw - coarse + half).rem_euclid(span) - half;
         let fine = coarse + d;
-        // 49/64 = 0.765625 for 0.771, rounded (three floored shifts would bias by −1.5 LSB).
-        let cfo = coarse + ((49 * d + 32) >> 6);
+        // The CFO handed on: coarse + (64 − w)/64 of the resolved residual, rounded. With
+        // w = 0 (ADR 0007) this is `fine` exactly and the hardware needs no multiplier; w = 15
+        // is the AWGN optimum (49/64 for 0.771).
+        let cfo = coarse + (((64 - fx.coarse_weight_64) * d + 32) >> 6);
 
         Some(FixedAcquisition {
             decided_at: n,
