@@ -176,3 +176,51 @@ Mutation check (each restored with `cp` + `touch`):
 - **Not modelled:** the settling time of a gain step (steps are instantaneous), a filter's
   transient after the step, and what a particular AGC does. The AD9361's fast-attack behaviour
   is to be taken from captures in R1.
+
+## 2026-11-19 · G0 · R0-07e: a fast-attack gain control (`FastAttackAgc`)
+
+**What it is for.** ADR 0007 puts two requirements on a real gain control: still from the end
+of the short training field, and the packet inside a level window (−15 to −3 dBFS). Until now
+the gain steps in `rxfront agc` were placed by hand. This model places them as a gain control
+would: from the samples. It is simulation only (the gain control of R1 is the AD9361's own;
+ours comes with R3).
+
+**Outside reference: the published behaviour of the AD9361's fast-attack mode** (Analog
+Devices UG-570 Rev. A, "Fast Attack AGC Mode", pp. 42–46, Fig. 25 and Table 20; register
+reset values from UG-672 Rev. 0; read on 2026-11-19 by a research agent from archive copies,
+the numbers below still to be checked against the printed pages by a second reading). What
+the documents state and the model takes over:
+
+| Published | In the model |
+|---|---|
+| State 1, peak overload detect: an overload decreases the gain; the detectors are held in reset for the Peak Overload Wait Time after each change (reset value 4 ClkRF); the state ends when no overload occurs for the Energy Detect Count (8 ClkRF) | `peak_wait`, `energy_detect`, in samples |
+| Decrement by case (Table 20, reset values, gain indices of 1 dB): large ADC overload and large LMT overload 5; one of them 2; small ADC overload 2 | `step_both`, `step_large`, `step_small` |
+| State 2: after the Settling Delay (20 ClkRF, counted from the last change) the average power is measured (16·2ⁿ samples, "16 or more") and the gain makes one change to bring it to the Lock Level (reset value −10 dBFS, 1 dB steps); an overload returns to State 1 | `settling_delay`, `power_samples`, `lock_dbfs` |
+| State 5, gain lock: left when the power rises (stronger signal) or falls (energy lost) by a threshold (10 dB each) for twice the Gain Lock Exit Count (8), or, if enabled, on a large overload; the gain then goes to its maximum, or stays | `stronger_db`, `lost_db`, `exit_count`, `lock_window`, `unlock_on_overload`, `unlock_to_max` |
+| Gain range 0 to about 73 dB at 2.3 GHz in 1 dB indices | `min_gain_db`, `max_gain_db` |
+
+**What the documents do not state, and the model therefore defines** (each a parameter or a
+stated simplification, to be replaced by R1's captures):
+- One signal for all detectors. The chip has an analogue peak detector before its filter (LMT)
+  and one on the ADC's output; the model compares the peak of the sample after the gain,
+  max(|I|, |Q|) with 1.0 the ADC's full scale, with three thresholds (`both_peak` ≥
+  `large_peak` ≥ `small_peak`). The split of the gain between the stages is not modelled.
+- Exact sample timing: a decision at sample n acts from sample n + 1; the samples
+  n + 1 … n + `peak_wait` are not examined; the quiet count runs from the change.
+- The lock change is round(lock level − measured level) dB, limited to the gain range.
+  0 dBFS is a mean |v|² of 1 (the convention of `rxfront`: a packet "at −15 dBFS").
+- In lock the power is the mean of the last `lock_window` samples, compared with the level
+  the lock change aimed at, once a whole window has passed since the lock.
+- States 3 and 4 (a 1 dB decrease on an overload after the lock change, before the final
+  lock) are not modelled: the lock is final at once. The 3 → 5 condition is not published.
+- **Phase and DC at a gain change are not published at all** (the only statement found: the
+  LNA's output turns by about 180° when it is bypassed, UG-672 register 0x022). They stay the
+  assumptions of `agc_transient`: `AgcTrace::gain_states` hands the model's gain changes to
+  it with a phase jump per change drawn from a stated range.
+- Noise figure against gain, the filters' transients, the attack delay after entering
+  receive: not modelled.
+
+**Gates (G1):** `tests/g1_agc.rs`. The state machine on inputs whose answer is worked by
+hand from the table above (every change's sample and size); dB definitions (a constant
+envelope locks within half a step of the lock level); then the two requirements of ADR 0007
+measured on 802.11 preambles over the input range, as a report and as gates where they hold.

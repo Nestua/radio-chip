@@ -288,6 +288,246 @@ pub fn agc_transient(x: &[Sample], states: &[GainState]) -> Vec<Sample> {
         .collect()
 }
 
+/// A fast-attack gain control as the AD9361's is published (UG-570, "Fast Attack AGC Mode";
+/// the table of what is taken from it and what is defined here is in
+/// `docs/gates/channel.md`, R0-07e). Simulation only. Times are in samples, levels in dB with
+/// 0 dBFS a mean |v|² of 1 after the gain, peaks as max(|I|, |Q|) with 1.0 the ADC's full
+/// scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FastAttackAgc {
+    /// Largest gain, dB: where the control starts and returns to.
+    pub max_gain_db: f64,
+    /// Smallest gain, dB.
+    pub min_gain_db: f64,
+    /// Peak at or above which both overload detectors fire (the analogue one too).
+    pub both_peak: f64,
+    /// Peak at or above which the large overload fires.
+    pub large_peak: f64,
+    /// Peak at or above which the small overload fires.
+    pub small_peak: f64,
+    /// Decrease when both detectors fire, dB (Table 20, case 1).
+    pub step_both: f64,
+    /// Decrease on a large overload, dB (case 2).
+    pub step_large: f64,
+    /// Decrease on a small overload, dB (case 3).
+    pub step_small: f64,
+    /// Samples after a gain change in which the peak detectors are held in reset.
+    pub peak_wait: usize,
+    /// Samples without overload after which peak detection ends.
+    pub energy_detect: usize,
+    /// Samples from the last change to the start of the power measurement.
+    pub settling_delay: usize,
+    /// Samples of the power measurement.
+    pub power_samples: usize,
+    /// Level the lock change aims at, dBFS.
+    pub lock_dbfs: f64,
+    /// Samples of the power measurement while locked.
+    pub lock_window: usize,
+    /// Samples in a row beyond a threshold that unlock the gain.
+    pub exit_count: usize,
+    /// Rise of the power that unlocks, dB.
+    pub stronger_db: f64,
+    /// Fall of the power that unlocks, dB.
+    pub lost_db: f64,
+    /// Whether a large overload unlocks at once.
+    pub unlock_on_overload: bool,
+    /// Whether an unlocked gain returns to the maximum (or stays).
+    pub unlock_to_max: bool,
+}
+
+/// What [`FastAttackAgc::run`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgcTrace {
+    /// The gain applied to each sample, dB.
+    pub gain_db: Vec<f64>,
+    /// (first sample, gain) of every stretch of constant gain; the first is (0, maximum).
+    pub changes: Vec<(usize, f64)>,
+    /// First samples of the locked stretches.
+    pub locks: Vec<usize>,
+    /// Samples at which the lock was left.
+    pub unlocks: Vec<usize>,
+}
+
+impl FastAttackAgc {
+    /// The AD9361's register reset values (UG-672) at `per_sample` detector clocks (ClkRF)
+    /// per sample, counts rounded up: 4, 8 and 20 clocks, 16 samples of power, lock level
+    /// −10 dBFS, 10 dB to unlock over 16 clocks, steps of 5, 2 and 2 dB. The peak thresholds
+    /// are the model's: full scale, 1 dB below it, and 6 dB above it for both detectors.
+    pub fn ad9361_reset(per_sample: usize) -> Self {
+        let per = per_sample.max(1);
+        Self {
+            max_gain_db: 73.0,
+            min_gain_db: 0.0,
+            both_peak: 2.0,
+            large_peak: 1.0,
+            small_peak: 0.891,
+            step_both: 5.0,
+            step_large: 2.0,
+            step_small: 2.0,
+            peak_wait: 4usize.div_ceil(per),
+            energy_detect: 8usize.div_ceil(per),
+            settling_delay: 20usize.div_ceil(per),
+            power_samples: 16,
+            lock_dbfs: -10.0,
+            lock_window: 64,
+            exit_count: 16usize.div_ceil(per),
+            stronger_db: 10.0,
+            lost_db: 10.0,
+            unlock_on_overload: false,
+            unlock_to_max: true,
+        }
+    }
+
+    /// The gain the control gives each sample of `x` (the signal before the gain), starting
+    /// in peak detection at the maximum gain. A decision at sample n acts from n + 1.
+    pub fn run(&self, x: &[Sample]) -> AgcTrace {
+        enum State {
+            /// Peak detection and power measurement; `since` is the first sample at the
+            /// present gain (or of the state), `look` the first sample the peak detectors
+            /// examine (they are held in reset after a change), `sum` the power so far.
+            Seeking { since: usize, look: usize, sum: f64 },
+            /// Locked from `since`, aiming at `level` (power); `beyond` counts the samples
+            /// in a row beyond a threshold, signed by the direction.
+            Locked {
+                since: usize,
+                level: f64,
+                beyond: i64,
+            },
+        }
+        let mut gain = self.max_gain_db;
+        let mut t = AgcTrace {
+            gain_db: Vec::with_capacity(x.len()),
+            changes: vec![(0, gain)],
+            locks: Vec::new(),
+            unlocks: Vec::new(),
+        };
+        let mut state = State::Seeking {
+            since: 0,
+            look: 0,
+            sum: 0.0,
+        };
+        // Power after the gain, per sample, for the locked state's window.
+        let mut powers: Vec<f64> = Vec::with_capacity(x.len());
+        for (n, s) in x.iter().enumerate() {
+            t.gain_db.push(gain);
+            let g = 10f64.powf(gain / 20.0);
+            let (re, im) = (g * s.0, g * s.1);
+            let peak = re.abs().max(im.abs());
+            let power = re * re + im * im;
+            powers.push(power);
+            let mut next = gain;
+            match &mut state {
+                State::Seeking { since, look, sum } => {
+                    let step = if n < *look {
+                        None
+                    } else if peak >= self.both_peak {
+                        Some(self.step_both)
+                    } else if peak >= self.large_peak {
+                        Some(self.step_large)
+                    } else if peak >= self.small_peak {
+                        Some(self.step_small)
+                    } else {
+                        None
+                    };
+                    let measure_from = *since + self.settling_delay.max(self.energy_detect);
+                    if let Some(step) = step {
+                        // An overload at any point of the search starts it again.
+                        next = (gain - step).max(self.min_gain_db);
+                        state = State::Seeking {
+                            since: n + 1,
+                            look: n + 1 + self.peak_wait,
+                            sum: 0.0,
+                        };
+                    } else if n >= measure_from {
+                        *sum += power;
+                        if n + 1 == measure_from + self.power_samples.max(1) {
+                            let mean = *sum / self.power_samples.max(1) as f64;
+                            let change = (self.lock_dbfs - 10.0 * mean.log10()).round();
+                            next = (gain + change).clamp(self.min_gain_db, self.max_gain_db);
+                            t.locks.push(n + 1);
+                            state = State::Locked {
+                                since: n + 1,
+                                level: mean * 10f64.powf((next - gain) / 10.0),
+                                beyond: 0,
+                            };
+                        }
+                    }
+                }
+                State::Locked {
+                    since,
+                    level,
+                    beyond,
+                } => {
+                    let w = self.lock_window.max(1);
+                    let mut unlock = self.unlock_on_overload && peak >= self.large_peak;
+                    if !unlock && n + 1 >= *since + w {
+                        let mean = powers[n + 1 - w..=n].iter().sum::<f64>() / w as f64;
+                        let dir = if mean >= *level * 10f64.powf(self.stronger_db / 10.0) {
+                            1
+                        } else if mean <= *level * 10f64.powf(-self.lost_db / 10.0) {
+                            -1
+                        } else {
+                            0
+                        };
+                        *beyond = if dir != 0 && dir == beyond.signum() {
+                            *beyond + dir
+                        } else {
+                            dir
+                        };
+                        unlock = beyond.unsigned_abs() as usize >= self.exit_count.max(1);
+                    }
+                    if unlock {
+                        t.unlocks.push(n);
+                        if self.unlock_to_max {
+                            next = self.max_gain_db;
+                        }
+                        state = State::Seeking {
+                            since: n + 1,
+                            look: n + 1,
+                            sum: 0.0,
+                        };
+                    }
+                }
+            }
+            if next != gain {
+                gain = next;
+                t.changes.push((n + 1, gain));
+            }
+        }
+        // A change decided at the last sample has no sample to act on.
+        t.changes.retain(|c| c.0 < x.len().max(1));
+        t.locks.retain(|l| *l < x.len());
+        t
+    }
+}
+
+impl AgcTrace {
+    /// The trace as [`agc_transient`] takes it: the gain the chain ends at, dB, and one
+    /// state per stretch before the last change, its gain relative to that. Each change
+    /// turns the carrier phase by an angle uniform in ±`jump_deg` (an assumption: nothing is
+    /// published); the phases are relative to the settled chain.
+    pub fn gain_states(&self, jump_deg: f64, rng: &mut Rng) -> (f64, Vec<GainState>) {
+        let settled = self.changes.last().map_or(0.0, |c| c.1);
+        let mut phase = 0.0;
+        let mut states: Vec<GainState> = self
+            .changes
+            .windows(2)
+            .rev()
+            .map(|w| {
+                phase += (2.0 * rng.uniform() - 1.0) * jump_deg.to_radians();
+                GainState {
+                    until: w[1].0,
+                    gain_db: w[0].1 - settled,
+                    phase,
+                    dc: (0.0, 0.0),
+                }
+            })
+            .collect();
+        states.reverse();
+        (settled, states)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Part II (R0-07b): FFT, fractional delay, sample-clock offset, fading taps, TGn multipath.
 // ---------------------------------------------------------------------------------------------
