@@ -1099,7 +1099,8 @@ No model behaviour changed; the decisions are in ADR 0007 (proposed, in its own 
 control settles; the ADC clips). Test: `g1_channel_impairments::agc_transient_states`, against
 its definition and against `gain_step` and `add_tone`, which it generalises (`channel.md`).
 
-**1. AGC transient** — `rxfront agc 500`, `reports/rx_front_agc.txt`. Fixed receiver, 20 dB SNR.
+**1. AGC transient** — `rxfront agc 500`, `reports/rx_front_agc.txt` (this run is kept as
+`rx_front_agc_combined.txt` since R0-08d). Fixed receiver, 20 dB SNR.
 The phase jumps in these cases are assumed (±10°, ±30°, ±90° per gain change); no capture of a
 real AGC is behind them yet. The cases separate the causes.
 
@@ -1219,11 +1220,15 @@ that is handed on).
 
 - **Float** (`rx_front.rs`): `cfo_hz = fine + coarse_weight·(coarse − fine)`, with
   `RxConfig::coarse_weight` 0 by default. `FINE_WEIGHT` stays as the AWGN optimum:
-  `coarse_weight = 1 − FINE_WEIGHT` is the rule used until today.
+  `coarse_weight = 1 − FINE_WEIGHT` is the rule used until today (the same value up to
+  float rounding: the expression is reordered).
 - **Fixed** (`rx_front_fixed.rs`): `cfo = coarse + round((64 − w)·d/64)`, `w =
   FixedRxConfig::coarse_weight_64`, 0 by default: `fine` exactly, so the decision engine
   needs no multiplier for it. `w = 15` is the old 49/64 rule bit for bit. `is_valid` refuses
   a weight outside 0…64.
+- The two models carry the weight separately (`RxConfig::coarse_weight` is ignored by the
+  fixed model, which reads `FixedRxConfig::coarse_weight_64`): a paired run with a
+  non-default weight must set both, and 15/64 is not 1 − 0.771 exactly, as before.
 - The coarse estimate still resolves the fine one's ambiguity and still rotates the LTF for
   the confirmation: what ADR 0007 lists as not solved stays not solved.
 
@@ -1231,7 +1236,7 @@ that is handed on).
 | Gate | What it holds |
 |---|---|
 | `g1_rx_front::the_acquisition_hands_on_the_fine_estimate` | default output = fine estimate; a set weight gives `fine + w·(coarse − fine)`; with a 30° carrier jump at STF sample 48 (20 dB, 300 frames) the output's RMS error is 428 Hz, the lag-64 theory 454 Hz (gate ±15 %), where the AWGN weight gives 3947 Hz (gate: more than 4×) |
-| `g1_rx_front::acquires_timing_and_cfo_in_awgn` | the default against the fine estimate's own variance theory at 20, 10 and 5 MHz, 10 and 20 dB: RMS/theory 1.00 to 1.03 (gate ±8 %); the AWGN weight on the same frames still against the combined theory |
+| `g1_rx_front::acquires_timing_and_cfo_in_awgn` | the default against the fine estimate's own variance theory at 20, 10 and 5 MHz, 10 and 20 dB: RMS/theory 1.01 to 1.03 (gate ±8 %); the AWGN weight on the same frames still against the combined theory |
 | `g2_rx_front::fixed_acquisition_hands_on_the_fine_estimate` | fixed default `cfo_phase == fine_phase` on 200 frames; `w = 15` equals the old rule exactly; weights −1 and 65 are invalid |
 
 **Mutations** (each fails the gates named; sources restored with `cp` + `touch`)
@@ -1257,19 +1262,37 @@ line and was left; `tailfx` is the detector alone)
   shrink" is a question for G2 restated as PER loss (ADR 0007, order of work).
 - **What it buys** (`rxfront agc`, 20 dB, 500 frames per case, the phase jumps assumed): with
   a gain change inside the STF the output's error is 430 to 540 Hz in every row where the
-  timing is right; it was 0.8 to 13.5 kHz. A −20 dB clipped step at sample 48 with ±30°:
-  8133 Hz → 478 Hz.
+  timing is right; it was 380 Hz to 8.5 kHz (13.5 kHz in the ±90° row, where the timing is
+  exact in 277 of 500 frames). A −20 dB clipped step at sample 48 with ±30°: 8133 Hz →
+  478 Hz. The gain is confined to events inside the coarse window (samples 32 to 144); in
+  the seven rows where the old output was already 380 to 458 Hz (a step before sample 32, a
+  −6 dB step, a trim without a jump or at sample 144) the new one is 4 to 16 % worse, the
+  AWGN cost below. The old run is kept as `rx_front_agc_combined.txt`; the report's first
+  error column is now called "output".
 - **What it costs.** With a still front end: 477 Hz instead of 422 Hz at 20 dB (+13 %; in
-  the G1 run 465 against 454 Hz of theory at 20 MHz). And a jump inside the LTF now reaches
-  the output whole instead of 0.77 of it: a −2 dB trim with ±30° at sample 208, 8311 Hz
-  (was 6360 Hz). The requirement on the AGC is the one ADR 0007 states: still from the end
+  the G1 run 465 against 454 Hz of theory at 20 MHz). Over SNR (`rxfront level`, float,
+  −15 dBFS, against the run before): +6 % at 4 dB (3110 against 2925 Hz), +14 % at 10 dB
+  (1420 against 1249 Hz), +16 % at 25 dB (250 against 215 Hz; the high-SNR limit of the
+  theory is +13.9 %). And a jump inside the LTF now reaches the output whole instead of
+  0.77 of it: a −2 dB trim with ±30° at sample 176, 2402 Hz (was 1853); at 208, 8311 Hz
+  (was 6360); at 272, 6978 Hz (was 5345). The requirement on the AGC is the one ADR 0007 states: still from the end
   of the STF.
 - **Level** (`rxfront level`): the fixed model's CFO error against float is within 1 % from
   −3 to −15 dBFS at every SNR and +7 % at −30 dBFS at 25 dB (was +6 %); the picture below
   −45 dBFS is as before (quantisation of the estimate's input).
 - Not rerun: `rx_ofdm_per.txt` and the soft-format reports of R0-09 (their frames start the
-  timing tracker from the CFO; the estimate they see is 13 % noisier in AWGN). They are
+  timing tracker from the CFO; the estimate they see is 6 to 16 % noisier in AWGN, most at the high SNR of
+  the fast modes). They are
   rerun with R0-09 G2, which changes the receiver they measure anyway.
 
 **Evidence:** `cargo test -p radio-phy --test g1_rx_front --test g2_rx_front` — 24 + 10 pass;
 `scripts/check.sh` green; this entry's pull request.
+
+**Pre-PR review (fresh agent, the diff only), 2026-11-19:** no defect in either model (the
+fixed rule checked for every sign of the residual and for overflow; `w = 15` is the old
+expression literally). Corrected after it, all in this entry or in labels: the "was" range
+of the AGC rows (it had been stated as 0.8 to 13.5 kHz, ignoring seven rows that were
+already below 460 Hz and are now slightly worse), the AWGN cost given per SNR instead of
+one point, the report column still called "combined", the old report kept for ADR 0007's
+figures, the two separate weight parameters stated. Not verified by the reviewer: the
+mutation table and `scripts/check.sh` (both run here).

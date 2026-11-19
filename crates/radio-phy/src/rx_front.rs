@@ -121,7 +121,8 @@ pub struct RxConfig {
     /// estimate alone, so that a gain change inside the short training field does not reach
     /// the output (the coarse estimate still resolves the fine one's ambiguity).
     /// `1 − FINE_WEIGHT` is the optimum in AWGN with a still front end; kept as a parameter
-    /// to be measured again against a real AGC.
+    /// to be measured again against a real AGC. The fixed model ignores this field and reads
+    /// `FixedRxConfig::coarse_weight_64`: set both for a paired run.
     pub coarse_weight: f64,
 }
 
