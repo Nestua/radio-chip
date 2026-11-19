@@ -52,7 +52,8 @@ pub const FINE_GUARD: usize = 4;
 /// Lag-64 products in the fine CFO estimate: GI2 + both LTF symbols (96 + 64 samples) less a
 /// guard at each end.
 pub const FINE_LEN: usize = 96 - 2 * FINE_GUARD;
-/// Weight of the fine (residual) estimate when combining it with the coarse one, by inverse
+/// Weight of the fine (residual) estimate that is optimal in AWGN when combining it with the
+/// coarse one (not the default since ADR 0007, see [`RxConfig::coarse_weight`]), by inverse
 /// variance at high SNR: var(Δf) ∝ D/(L²·SNR)/D² = 1/(L²·D), so with L = 96 and 88,
 /// D = 16 and 64: v_coarse/v_fine = (88²·64)/(96²·16) = 3.36, w = 3.36/4.36 = 0.771.
 pub const FINE_WEIGHT: f64 = {
@@ -115,6 +116,14 @@ pub struct RxConfig {
     /// maximum and the detector keeps counting; an acquisition closes the search and resets
     /// the run counter when it is applied. See [`DECISION_LATENCY`] for what changes.
     pub decision_latency: usize,
+    /// Weight of the coarse (STF) CFO estimate in the CFO handed on:
+    /// `cfo = fine + coarse_weight·(coarse − fine)`. 0 by decision (ADR 0007): the fine
+    /// estimate alone, so that a gain change inside the short training field does not reach
+    /// the output (the coarse estimate still resolves the fine one's ambiguity).
+    /// `1 − FINE_WEIGHT` is the optimum in AWGN with a still front end; kept as a parameter
+    /// to be measured again against a real AGC. The fixed model ignores this field and reads
+    /// `FixedRxConfig::coarse_weight_64`: set both for a paired run.
+    pub coarse_weight: f64,
 }
 
 impl RxConfig {
@@ -129,6 +138,7 @@ impl RxConfig {
             dc_shift: Some(7),
             backoff_ns: 200.0,
             decision_latency: DECISION_LATENCY,
+            coarse_weight: 0.0,
         }
     }
 
@@ -164,7 +174,7 @@ pub struct Acquisition {
     /// First sample of the FFT window of the first long training symbol: the first-path
     /// estimate minus the back-off. Later symbols follow at +64 (T2) and +144 + 80·i.
     pub fft_start: usize,
-    /// Combined CFO estimate in Hz.
+    /// The CFO estimate handed on, in Hz: the fine one unless [`RxConfig::coarse_weight`] is set.
     pub cfo_hz: f64,
     /// Coarse (STF) estimate alone.
     pub coarse_cfo_hz: f64,
@@ -643,7 +653,8 @@ pub(crate) struct Pending<A> {
 ///    next position: the search goes on, it does not wait for another detection.
 /// 4. **CFO**: the final coarse estimate over STF products [T1 − 160, T1 − 64) and the fine
 ///    lag-64 estimate over GI2 + T1 against T1 + T2 (less the guard), both read from the
-///    history buffer; fine resolved against coarse, combined with [`FINE_WEIGHT`].
+///    history buffer; fine resolved against coarse and handed on (with
+///    [`RxConfig::coarse_weight`] of the coarse one mixed in, 0 by default).
 ///
 /// 5. **Decision latency**: the result of an accepted candidate is applied
 ///    [`RxConfig::decision_latency`] samples later; an acquisition then closes the search and
@@ -907,7 +918,7 @@ impl RxFront {
             detected_at: s.opened_by,
             ltf_start: sym - GI2_LEN,
             fft_start: sym.checked_sub(self.b)?,
-            cfo_hz: coarse + FINE_WEIGHT * (fine - coarse),
+            cfo_hz: fine + self.cfg.coarse_weight * (coarse - fine),
             coarse_cfo_hz: coarse,
             fine_cfo_hz: fine,
             ltf_metric,

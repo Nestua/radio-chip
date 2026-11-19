@@ -3,7 +3,8 @@
 Status: **accepted** · proposed 2026-11-19, accepted by the founder 2026-11-19 · PHY architecture
 (risk point).
 Source: the independent review of 2026-11-19 (`docs/reviews/2026-11-19-r0-phase-review.md`) and
-the reruns in `docs/gates/reports/rx_front_agc.txt`, `rx_front_tailbw.txt`, `rx_front_level.txt`
+the reruns in `docs/gates/reports/rx_front_agc_combined.txt` (the run before this decision
+was applied; `rx_front_agc.txt` is the run after it), `rx_front_tailbw.txt`, `rx_front_level.txt`
 (journal: `docs/gates/rx_front.md`, 2026-11-19, measurements).
 
 ## Decided
@@ -26,7 +27,7 @@ The text below is the proposal as it was put to the founder.
 **Today:** `cfo = coarse + 0.771·(fine − coarse)`, the inverse-variance weight for clean AWGN.
 The coarse estimate uses STF samples 32…144, the fine one GI2 and the two long symbols.
 
-**Measured** (`rx_front_agc.txt`; the phase jumps are assumed, no real AGC has been captured):
+**Measured** (`rx_front_agc_combined.txt`; the phase jumps are assumed, no real AGC has been captured):
 
 | What happens | Coarse | Fine | Combined |
 |---|---|---|---|

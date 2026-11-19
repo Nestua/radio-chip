@@ -23,7 +23,8 @@
 //!
 //! - `agc <frames per case>`: the fixed receiver on packets whose start goes through an AGC
 //!   settling transient (clipping, gain steps with phase jumps and DC changes inside the STF):
-//!   acquisition, timing, and the error of the combined, coarse and fine CFO estimates.
+//!   acquisition, timing, and the error of the CFO handed on (output) and of the coarse and
+//!   fine estimates.
 //! - `tailbw <million>`: detector events and acquisitions of the fixed receiver on noise that
 //!   went through a channel-select low-pass filter (band-limited noise is correlated at lag 16).
 //! - `level <frames per point>`: float and fixed receiver on the same ADC samples against the
@@ -1121,7 +1122,7 @@ fn agc(frames: usize) {
     let mut ci = 0u64;
     for (title, group) in &cases {
         println!(
-            "\n## {title}\n# case                                          acquired  timing    ±64   combined     coarse       fine  slips"
+            "\n## {title}\n# case                                          acquired  timing    ±64     output     coarse       fine  slips"
         );
         for c in group {
             ci += 1;

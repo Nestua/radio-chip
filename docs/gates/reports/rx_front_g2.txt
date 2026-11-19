@@ -1,5 +1,6 @@
 # R0-08b part 2 — G2 of the fixed-point receiver front (rxfront g2 300; g2joint 3000; tailfx 200)
 # crates/radio-tools/src/bin/rxfront.rs, 10 threads, macOS arm64; one-at-a-time sweep around the chosen widths
+# g2 and g2joint rerun 2026-11-19 with the fine CFO estimate as the output (ADR 0007); tailfx (detector only) not rerun
 
 # rxfront g2: fixed-point receiver front vs float on 1200 paired frames
 # (300 per case: AWGN 4 dB, AWGN 10 dB, AWGN 25 dB, TGn D 9 dB), packet at -15 dBFS, CFO ±235 kHz
@@ -7,157 +8,157 @@
 # ≤ +10 % per case, FFT start identical in ≥ 99.9 % overall; FA = detector events on
 # 5 × 3 M noise samples at -15/-30/-45/-55/-65 dBFS (detector widths only; must be 0)
 
-## defaults FixedRxConfig { dc_frac: 10, det_bits: 13, theta_num: 21668, theta_shift: 16, cordic_iters: 16, cordic_bits: 18, angle_bits: 16, nco_phase_bits: 22, nco_lut_bits: 9, nco_amp_bits: 11, z_bits: 12, tap_bits: 8, corr_bits: 20, est_bits: 12 }
-  PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+## defaults FixedRxConfig { dc_frac: 10, det_bits: 13, theta_num: 21668, theta_shift: 16, cordic_iters: 16, cordic_bits: 18, angle_bits: 16, nco_phase_bits: 22, nco_lut_bits: 9, nco_amp_bits: 11, z_bits: 12, tap_bits: 8, corr_bits: 20, est_bits: 12, coarse_weight_64: 0 }
+  PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## dc_frac F
-   2 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.6% | Pd+0 (≠0) acq≠0 cfo+0.8% | Pd+0 (≠0) acq≠0 cfo+42.0% | Pd+0 (≠0) acq≠0 cfo-0.2% | FA 2999548
-   3 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+11.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | FA 2102493
-   4 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+4.1% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 1990306
-   5 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+1.6% | Pd+0 (≠0) acq≠0 cfo+0.3% | FA 1005874
-   6 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.7% | Pd+0 (≠0) acq≠0 cfo+0.3% | FA 477516
-   7 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.5% | FA 114212
-   8 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.6% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 0
-   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.5% | FA 0
-  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 0
-  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 0
-  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 0
+   2 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.6% | Pd+0 (≠0) acq≠0 cfo+1.8% | Pd+0 (≠0) acq≠0 cfo+39.5% | Pd+0 (≠0) acq≠0 cfo-0.1% | FA 2999548
+   3 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.4% | Pd+0 (≠0) acq≠0 cfo+0.6% | Pd+0 (≠0) acq≠0 cfo+10.6% | Pd+0 (≠0) acq≠0 cfo-0.3% | FA 2102493
+   4 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+3.3% | Pd+0 (≠0) acq≠0 cfo-0.0% | FA 1990306
+   5 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+1.5% | Pd+0 (≠0) acq≠0 cfo-0.1% | FA 1005874
+   6 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.7% | Pd+0 (≠0) acq≠0 cfo-0.1% | FA 477516
+   7 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 114212
+   8 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.6% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 0
+   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 0
+  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 0
+  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 0
+  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 0
 
 ## det_bits D
-   6 PASS timing≠ 1/1199 | Pd-1 (≠1) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd-4 (≠4) acq≠1 cfo+0.5% | FA 0
-   7 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 0
-   8 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 2193
-   9 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+1 (≠1) acq≠0 cfo+0.4% | FA 72
-  10 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 127
-  11 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 415
-  12 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 502
-  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | FA 0
+   6 PASS timing≠ 1/1199 | Pd-1 (≠1) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd-4 (≠4) acq≠1 cfo+0.0% | FA 0
+   7 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 0
+   8 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 2193
+   9 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+1 (≠1) acq≠0 cfo+0.0% | FA 72
+  10 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 127
+  11 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 415
+  12 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 502
+  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0% | FA 0
 
 ## cordic_iters N
-   6 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+6.0% | Pd+0 (≠0) acq≠0 cfo+33.1% | Pd+0 (≠0) acq≠0 cfo+420.6% | Pd+0 (≠0) acq≠0 cfo+13.4%
-   7 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+2.1% | Pd+0 (≠0) acq≠0 cfo+8.8% | Pd+0 (≠0) acq≠0 cfo+163.9% | Pd+0 (≠0) acq≠0 cfo+1.2%
-   8 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+1.6% | Pd+0 (≠0) acq≠0 cfo+63.4% | Pd+0 (≠0) acq≠0 cfo+1.3%
-   9 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo+1.3% | Pd+0 (≠0) acq≠0 cfo+21.1% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+7.8% | Pd+0 (≠0) acq≠0 cfo+0.3%
-  11 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+1.5% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  14 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  15 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   6 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+2.6% | Pd+0 (≠0) acq≠0 cfo+19.9% | Pd+0 (≠0) acq≠0 cfo+283.1% | Pd+0 (≠0) acq≠0 cfo+9.3%
+   7 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.9% | Pd+0 (≠0) acq≠0 cfo+6.3% | Pd+0 (≠0) acq≠0 cfo+106.4% | Pd+0 (≠0) acq≠0 cfo+1.9%
+   8 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+2.0% | Pd+0 (≠0) acq≠0 cfo+35.1% | Pd+0 (≠0) acq≠0 cfo+1.0%
+   9 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+1.2% | Pd+0 (≠0) acq≠0 cfo+16.6% | Pd+0 (≠0) acq≠0 cfo-0.1%
+  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.9% | Pd+0 (≠0) acq≠0 cfo+4.1% | Pd+0 (≠0) acq≠0 cfo-0.4%
+  11 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.9% | Pd+0 (≠0) acq≠0 cfo-0.1%
+  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0%
+  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  14 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  15 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## cordic_bits W_c
-   8 FAIL timing≠ 5/1200 | Pd+0 (≠0) acq≠0 cfo+37.0% | Pd+0 (≠0) acq≠0 cfo+140.6% | Pd+0 (≠0) acq≠0 cfo+1146.5% | Pd+0 (≠0) acq≠0 cfo+97.7%
-   9 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+13.7% | Pd+0 (≠0) acq≠0 cfo+47.0% | Pd+0 (≠0) acq≠0 cfo+598.4% | Pd+0 (≠0) acq≠0 cfo+32.3%
-  10 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+4.4% | Pd+0 (≠0) acq≠0 cfo+15.0% | Pd+0 (≠0) acq≠0 cfo+248.0% | Pd+0 (≠0) acq≠0 cfo+12.8%
-  11 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+1.7% | Pd+0 (≠0) acq≠0 cfo+2.4% | Pd+0 (≠0) acq≠0 cfo+84.9% | Pd+0 (≠0) acq≠0 cfo+4.5%
-  12 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo-0.3% | Pd+0 (≠0) acq≠0 cfo+23.4% | Pd+0 (≠0) acq≠0 cfo+1.4%
-  13 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+3.5% | Pd+0 (≠0) acq≠0 cfo+1.0%
-  14 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo-1.5% | Pd+0 (≠0) acq≠0 cfo+0.6%
-  15 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo-1.0% | Pd+0 (≠0) acq≠0 cfo+0.6%
-  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.3% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  17 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  18 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  19 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  20 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   8 FAIL timing≠ 5/1200 | Pd+0 (≠0) acq≠0 cfo+18.9% | Pd+0 (≠0) acq≠0 cfo+61.2% | Pd+0 (≠0) acq≠0 cfo+618.4% | Pd+0 (≠0) acq≠0 cfo+57.1%
+   9 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+6.2% | Pd+0 (≠0) acq≠0 cfo+20.9% | Pd+0 (≠0) acq≠0 cfo+283.9% | Pd+0 (≠0) acq≠0 cfo+19.4%
+  10 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+1.6% | Pd+0 (≠0) acq≠0 cfo+6.5% | Pd+0 (≠0) acq≠0 cfo+105.0% | Pd+0 (≠0) acq≠0 cfo+6.8%
+  11 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.8% | Pd+0 (≠0) acq≠0 cfo+2.4% | Pd+0 (≠0) acq≠0 cfo+32.2% | Pd+0 (≠0) acq≠0 cfo+2.8%
+  12 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.3% | Pd+0 (≠0) acq≠0 cfo+0.7% | Pd+0 (≠0) acq≠0 cfo+8.8% | Pd+0 (≠0) acq≠0 cfo+0.2%
+  13 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.9% | Pd+0 (≠0) acq≠0 cfo+0.3%
+  14 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo-0.9% | Pd+0 (≠0) acq≠0 cfo+0.1%
+  15 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.5% | Pd+0 (≠0) acq≠0 cfo+0.1%
+  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.3% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  17 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  18 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  19 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  20 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## angle_bits A (N = min(16, A))
-   8 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+5.7% | Pd+0 (≠0) acq≠0 cfo+29.2% | Pd+0 (≠0) acq≠0 cfo+453.8% | Pd+0 (≠0) acq≠0 cfo+18.3%
-   9 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+2.0% | Pd+0 (≠0) acq≠0 cfo+11.3% | Pd+0 (≠0) acq≠0 cfo+200.4% | Pd+0 (≠0) acq≠0 cfo+5.3%
-  10 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+1.1% | Pd+0 (≠0) acq≠0 cfo+4.2% | Pd+0 (≠0) acq≠0 cfo+95.7% | Pd+0 (≠0) acq≠0 cfo-0.2%
-  11 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.6% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+32.3% | Pd+0 (≠0) acq≠0 cfo+2.2%
-  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+1.0% | Pd+0 (≠0) acq≠0 cfo+7.8% | Pd+0 (≠0) acq≠0 cfo+1.1%
-  13 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+3.5% | Pd+0 (≠0) acq≠0 cfo+0.1%
-  14 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.2% | Pd+0 (≠0) acq≠0 cfo+0.5%
-  15 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.5%
-  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   8 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+4.5% | Pd+0 (≠0) acq≠0 cfo+19.8% | Pd+0 (≠0) acq≠0 cfo+256.1% | Pd+0 (≠0) acq≠0 cfo+13.6%
+   9 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+2.5% | Pd+0 (≠0) acq≠0 cfo+5.4% | Pd+0 (≠0) acq≠0 cfo+128.9% | Pd+0 (≠0) acq≠0 cfo+3.5%
+  10 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+1.5% | Pd+0 (≠0) acq≠0 cfo+2.1% | Pd+0 (≠0) acq≠0 cfo+46.0% | Pd+0 (≠0) acq≠0 cfo+0.9%
+  11 FAIL timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.5% | Pd+0 (≠0) acq≠0 cfo+1.0% | Pd+0 (≠0) acq≠0 cfo+17.6% | Pd+0 (≠0) acq≠0 cfo+0.1%
+  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo+7.0% | Pd+0 (≠0) acq≠0 cfo+0.2%
+  13 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo-0.1%
+  14 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.5% | Pd+0 (≠0) acq≠0 cfo+0.1%
+  15 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## nco_phase_bits P
-  22 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  23 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  24 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  25 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  26 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  27 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  28 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+  22 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  23 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  24 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  25 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  26 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  27 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  28 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## nco_lut_bits L
-   4 FAIL timing≠ 4/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   5 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3%
-   6 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   7 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   8 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  10 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   4 FAIL timing≠ 4/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   5 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.2%
+   6 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   7 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   8 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  10 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## nco_amp_bits Q
-   4 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   5 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   6 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   7 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   8 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  14 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   4 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   5 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0%
+   6 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   7 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   8 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  14 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## z_bits Z
-   3 FAIL timing≠ 12/59 | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠241 cfo+0.8%
-   4 FAIL timing≠ 42/1171 | Pd+0 (≠0) acq≠0 cfo+1.7% | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠29 cfo-0.0%
-   5 FAIL timing≠ 21/1200 | Pd+0 (≠0) acq≠0 cfo+0.5% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.7%
-   6 FAIL timing≠ 9/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.5%
-   7 FAIL timing≠ 6/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3%
-   8 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   9 FAIL timing≠ 3/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   3 FAIL timing≠ 12/59 | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠241 cfo+1.3%
+   4 FAIL timing≠ 42/1171 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠29 cfo+0.1%
+   5 FAIL timing≠ 21/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.2% | Pd+0 (≠0) acq≠0 cfo+0.1%
+   6 FAIL timing≠ 9/1200 | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.2%
+   7 FAIL timing≠ 6/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.3%
+   8 FAIL timing≠ 2/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   9 FAIL timing≠ 3/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## tap_bits T
-   1 FAIL timing≠ 60/1199 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠1 cfo+0.8%
-   2 FAIL timing≠ 60/1200 | Pd+0 (≠0) acq≠0 cfo+1.1% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2%
-   3 FAIL timing≠ 14/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.5%
-   4 FAIL timing≠ 7/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3%
-   5 FAIL timing≠ 3/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   6 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   7 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-   8 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   1 FAIL timing≠ 60/1199 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠1 cfo+0.0%
+   2 FAIL timing≠ 60/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.2%
+   3 FAIL timing≠ 14/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   4 FAIL timing≠ 7/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.0%
+   5 FAIL timing≠ 3/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0%
+   6 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   7 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+   8 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## corr_bits K
-   6 FAIL timing≠ 27/43 | Pd+0 (≠0) acq≠283 cfo+143.1% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠274 cfo+138.0%
-   7 FAIL timing≠ 642/1076 | Pd+0 (≠0) acq≠29 cfo+126.3% | Pd+0 (≠0) acq≠1 cfo+108.2% | Pd+0 (≠0) acq≠0 cfo+424.3% | Pd+0 (≠0) acq≠94 cfo+126.6%
-   8 FAIL timing≠ 366/1190 | Pd+0 (≠0) acq≠2 cfo+121.3% | Pd+0 (≠0) acq≠0 cfo+77.4% | Pd+0 (≠0) acq≠0 cfo+318.0% | Pd+0 (≠0) acq≠8 cfo+112.3%
-   9 FAIL timing≠ 186/1199 | Pd+0 (≠0) acq≠0 cfo+17.9% | Pd+0 (≠0) acq≠0 cfo+2.4% | Pd+0 (≠0) acq≠0 cfo+54.8% | Pd+0 (≠0) acq≠1 cfo+65.5%
-  10 FAIL timing≠ 63/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+4.2%
-  11 FAIL timing≠ 24/1200 | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.2%
-  12 FAIL timing≠ 17/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.7%
-  13 FAIL timing≠ 4/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  14 FAIL timing≠ 4/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3%
-  15 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.3%
-  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  17 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  18 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   6 FAIL timing≠ 27/43 | Pd+0 (≠0) acq≠283 cfo+204.6% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠300 cfo-100.0% | Pd+0 (≠0) acq≠274 cfo+264.1%
+   7 FAIL timing≠ 642/1076 | Pd+0 (≠0) acq≠29 cfo+169.7% | Pd+0 (≠0) acq≠1 cfo+140.4% | Pd+0 (≠0) acq≠0 cfo+490.0% | Pd+0 (≠0) acq≠94 cfo+150.2%
+   8 FAIL timing≠ 366/1190 | Pd+0 (≠0) acq≠2 cfo+164.7% | Pd+0 (≠0) acq≠0 cfo+93.0% | Pd+0 (≠0) acq≠0 cfo+376.4% | Pd+0 (≠0) acq≠8 cfo+153.7%
+   9 FAIL timing≠ 186/1199 | Pd+0 (≠0) acq≠0 cfo+15.2% | Pd+0 (≠0) acq≠0 cfo+4.7% | Pd+0 (≠0) acq≠0 cfo+67.6% | Pd+0 (≠0) acq≠1 cfo+80.4%
+  10 FAIL timing≠ 63/1200 | Pd+0 (≠0) acq≠0 cfo-0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+9.5%
+  11 FAIL timing≠ 24/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo-0.1%
+  12 FAIL timing≠ 17/1200 | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.3%
+  13 FAIL timing≠ 4/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.0%
+  14 FAIL timing≠ 4/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.2%
+  15 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.2%
+  16 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  17 PASS timing≠ 1/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  18 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
 
 ## est_bits E
-   6 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+3.0% | Pd+0 (≠0) acq≠0 cfo+15.2% | Pd+0 (≠0) acq≠0 cfo+185.7% | Pd+0 (≠0) acq≠0 cfo+14.3%
-   7 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+1.9% | Pd+0 (≠0) acq≠0 cfo+4.2% | Pd+0 (≠0) acq≠0 cfo+67.7% | Pd+0 (≠0) acq≠0 cfo+4.3%
-   8 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.8% | Pd+0 (≠0) acq≠0 cfo+1.4% | Pd+0 (≠0) acq≠0 cfo+18.2% | Pd+0 (≠0) acq≠0 cfo-0.3%
-   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.6% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+6.1% | Pd+0 (≠0) acq≠0 cfo-0.1%
-  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+3.0% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+1.1% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.4%
-  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.4%
+   6 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+3.2% | Pd+0 (≠0) acq≠0 cfo+12.2% | Pd+0 (≠0) acq≠0 cfo+176.5% | Pd+0 (≠0) acq≠0 cfo+17.2%
+   7 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+1.7% | Pd+0 (≠0) acq≠0 cfo+3.7% | Pd+0 (≠0) acq≠0 cfo+71.2% | Pd+0 (≠0) acq≠0 cfo+5.3%
+   8 FAIL timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+1.3% | Pd+0 (≠0) acq≠0 cfo+19.3% | Pd+0 (≠0) acq≠0 cfo-1.4%
+   9 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+5.3% | Pd+0 (≠0) acq≠0 cfo-0.4%
+  10 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo-0.6% | Pd+0 (≠0) acq≠0 cfo+2.0% | Pd+0 (≠0) acq≠0 cfo-0.0%
+  11 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo-0.0%
+  12 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo+0.0%
+  13 PASS timing≠ 0/1200 | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.0% | Pd+0 (≠0) acq≠0 cfo+0.2% | Pd+0 (≠0) acq≠0 cfo-0.0%
 
 # rxfront g2joint: 12000 paired frames (3000 per case)
-## chosen: PASS timing≠ 5/11983 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.1% | Pd+0 (≠0) acq≠0 cfo+0.1%
+## chosen: PASS timing≠ 5/11983 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.0%
    disagreements (case, fixed − float): [(3, -1), (2, -1), (3, -1), (2, 1), (3, 1)]
-## generous: PASS timing≠ 0/11983 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.2%
+## generous: PASS timing≠ 0/11983 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.0%
    disagreements (case, fixed − float): []
-## first joint set (A14 N14 W_c15 Z10 Q9 K17): FAIL timing≠ 12/11983 | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.1% | Pd+0 (≠0) acq≠0 cfo+0.3% | Pd+0 (≠0) acq≠0 cfo+0.2%
+## first joint set (A14 N14 W_c15 Z10 Q9 K17): FAIL timing≠ 12/11983 | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo-0.0% | Pd+0 (≠0) acq≠0 cfo+0.4% | Pd+0 (≠0) acq≠0 cfo+0.0%
    disagreements (case, fixed − float): [(1, -1), (2, 1), (3, -1), (2, -1), (1, 1), (3, -1), (3, 1), (3, -1), (2, 1), (2, 1), (3, -1), (3, 1)]
 
 # rxfront tailfx: fixed detector (defaults), 200 M noise samples at each of -15/-30/-45/-55/-65 dBFS: 0 events

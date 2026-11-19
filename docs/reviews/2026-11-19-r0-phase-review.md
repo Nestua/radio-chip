@@ -27,7 +27,7 @@ checked yet.
 The reruns were themselves reviewed by a second fresh reviewer before this file was merged; its
 corrections are in the text below (the first draft overstated findings 1 and 5).
 
-**Finding 1** (`docs/gates/reports/rx_front_agc.txt`, 500 frames per case, 20 dB SNR). One event
+**Finding 1** (`docs/gates/reports/rx_front_agc_combined.txt`, 500 frames per case, 20 dB SNR). One event
 at STF sample 48:
 
 | Case | Combined CFO RMS | Coarse | Fine alone |
