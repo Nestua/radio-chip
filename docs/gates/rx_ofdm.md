@@ -15,7 +15,10 @@ float. Mirror of `ppdu.rs` (R0-06); feeds `viterbi.rs` (R0-10); fed by `rx_front
   base × polarity p_i; SIGNAL uses p_0).
 - **Timing tracker** (sample-clock offset). Each symbol's pilots measure the slope of the
   phase across the subcarriers left after the predicted slope is removed: a least-squares fit
-  over the pairs ±21 and ±7, weighted by their magnitudes. A clock offset makes the slope grow
+  over the pairs ±21 and ±7. A pair's weight is the harmonic combination of the channel gains
+  |H|² at its two pilots (one weak pilot makes the pair worthless), and the same gains give
+  the measurement's variance against a flat channel of the same mean gain; a measurement more
+  than three times worse than nominal is not used (`TIMING_MAX_VARIANCE`). A clock offset makes the slope grow
   linearly, slope(t) = rate·t, t in symbols from the middle of the long training field (1.4
   for SIGNAL). The measurement also has a part that does not grow: the channel estimate's own
   noise on the four pilots looks like a constant slope, about 0.1 samples at the sensitivity
@@ -24,8 +27,9 @@ float. Mirror of `ppdu.rs` (R0-06); feeds `viterbi.rs` (R0-10); fed by `rx_front
   sample, the FFT window moves by one sample for the next symbol.
 - **The tracker's prior:** the offset's is flat; the rate's is ±40 ppm around zero when nothing
   is known (`Tracking::default`), ±2 ppm around the clock offset the front's CFO implies when
-  it is given (`Tracking::from_clock_offset`), with 0.005 rad per subcarrier assumed for one
-  measurement (`TIMING_MEASUREMENT_STD`).
+  it is given (`Tracking::from_clock_offset`), with 0.016 rad per subcarrier assumed for one
+  measurement (`TIMING_MEASUREMENT_STD`: what it is at the sensitivity limit, 0.0155 measured
+  at 3.5 dB).
 - **CFO to clock offset:** both ends derive carrier and sample clock from one oscillator
   (§17.3.9.5–6 for the transmitter; our receiver by design), so a transmitter p ppm fast is
   also p·10⁻⁶·fc high: ppm = +CFO / carrier · 10⁶.
@@ -64,6 +68,7 @@ tracking, a SIGNAL plausibility check beyond parity, anything for HT/HE.
 | 8 | A known sample-clock offset: the timing drift reported per symbol | `pilots_track_a_sample_clock_offset`, `timing_loop_from_zero_has_no_standing_error`, `window_follows_a_drift_longer_than_the_guard_interval` |
 | 9 | A symbol built in the frequency domain with a known slope and common phase, on a channel with two pilots in a null and two of unequal gain | `slope_and_phase_on_unequal_pilots` |
 | 10 | A channel estimate tilted by 0.3 samples on the four pilots only: a constant slope the data do not have | `a_slope_only_the_pilots_have_is_not_applied_to_the_data` |
+| 12 | A channel with nulls at one pilot of each pair (three taps with zeros towards subcarriers +7 and −21), against the same receiver without the tracker | `a_weak_pilot_makes_its_pair_worthless` |
 | 11 | Physics of a clock offset: a tone through `resample(+p)` is p·10⁻⁶ higher, so a fast transmitter is also high in carrier | `clock_offset_and_carrier_offset_have_one_sign` |
 
 This closes the receive half of the R0 exit gate on a clean channel: the model decodes the
@@ -90,23 +95,29 @@ the commit)
   0.011 rad of 2π·f·Δn/fs; the same frame is lost without pilot tracking.
 - Sample-clock offset of ±40 and +13 ppm, 4095 octets at 6, 24 and 54 Mb/s, the tracker
   started 0.2 ppm off: all decoded; the tracked drift (up to ±4.38 samples over 1367 symbols,
-  with window moves) within 0.002 samples of ppm·Δn; lost without the tracker. Started from
+  with window moves) within 0.003 samples of ppm·Δn; lost without the tracker. Started from
   zero, 6 and 24 Mb/s still decode.
-- Started from zero at +40 ppm: the estimate is off by at most 0.025 samples in the first 200
-  symbols and by 0.0002 after 700.
+- Started from zero at +40 ppm: the estimate is off by at most 0.054 samples in the first 200
+  symbols and by 0.0003 after 700.
 - The window move: within the standard's limits (±40 ppm, 4095 octets) the drift stays under
   4.4 samples, and a window with a back-off decodes clean frames without moving. Its gate is
   therefore ten times the worst case: ±400 ppm over 5.5 ms, 43.7 samples of drift, decoded.
 - Slope and common phase on unequal pilots: the measurement is 0.029452 for a true slope of
   0.029452; with that slope removed, the phase is 0.399999 for 0.4 and every point is within
   0.02 of the grid.
+- A slope only the pilots have (reference 10): the tracker puts 0.02951 of a 0.02945 tilt
+  into its offset, applies at most 0.0006 samples of drift, and the 54 Mb/s frame has no bit
+  error; from a clock offset of 0, none at all.
+- Nulls at one pilot of each pair (reference 12), 6 Mb/s at 8 dB, 120 frames: 0 lost started
+  from the CFO, 5 from zero, 0 without the tracker.
 - The sign of the CFO-to-clock-offset rule (`clock_offset_and_carrier_offset_have_one_sign`):
   a 1 MHz tone through `resample(+1000 ppm)` comes out at 1 001 000.0 Hz, so a transmitter
   that is fast is also high; a 54 Mb/s frame with a fixed tracker decodes with +40 ppm and
   not with −40.
 - Hostile arguments (`hostile_arguments_do_not_panic`): window starts and shifts beyond any
   stream, lengths no SIGNAL can carry, a symbol of the wrong size, senseless soft settings:
-  errors, never a panic or an overflow (the tests run with overflow checks).
+  errors, never a panic or an overflow (under `cargo test`, as `scripts/check.sh` runs it,
+  overflow checks are on; the `--release` command above has them off).
 - Soft-value contract: a noiseless BPSK point on a mean-gain subcarrier is ±5, 1.5 and beyond
   ±7, weight 0 gives 0 (`soft_value_contract`), and the values come back in coded order.
 - Channel-state weights: two equal paths two samples apart (nulls near k = ±16), 12 Mb/s at
@@ -168,6 +179,12 @@ a channel estimate tilted on the pilots alone; the data must decode with no drif
   constant slope for the whole frame (0.11 samples RMS at 3.5 dB), the loop converged onto it,
   and applied it to all 48 data subcarriers. The tracker now fits offset + rate·t and removes
   only the drift. A frozen loop cost nothing, which separated the cause.
+- *A measurement trusted when it was worthless.* The second review built a channel with a
+  null at one pilot of each pair: the tracker lost 458 of 600 frames (6 Mb/s, 6 dB) that a
+  receiver without it decoded, and in TGn D at 6 Mb/s it cost 12 % of frames. The pair
+  weights were the pilots' own (noisy) magnitudes and cancelled out of the fit, so every
+  measurement entered at the same variance. They are now the channel gains, and they set
+  the variance.
 - *Panics.* The reviewer found overflow and index panics on arguments no caller should
   pass (a start of `usize::MAX`, a symbol with 7 points, a negative `soft_max`); fixed and
   gated.
@@ -187,18 +204,18 @@ frame; crossings interpolated on 1 dB and 3 dB grids, so ±0.2 dB at best)
 
 | Rate | AWGN, 4-bit soft | AWGN, fine soft | TGn B, 4-bit | TGn B, fine | TGn D, 4-bit | TGn D, fine |
 |---|---|---|---|---|---|---|
-| 6 Mb/s | 3.5 | 3.4 | 10.0 | 9.7 | 8.0 | 8.0 |
-| 9 Mb/s | 4.4 | 4.4 | 15.6 | 14.2 | 14.7 | 11.7 |
-| 12 Mb/s | 6.7 | 6.7 | 13.3 | 13.2 | 12.2 | 12.0 |
-| 18 Mb/s | 8.7 | 8.6 | 18.6 | 17.8 | 18.0 | 15.5 |
+| 6 Mb/s | 3.5 | 3.4 | 10.2 | 9.7 | 7.9 | 7.9 |
+| 9 Mb/s | 4.4 | 4.3 | 15.7 | 14.2 | 14.7 | 11.7 |
+| 12 Mb/s | 6.8 | 6.7 | 13.3 | 13.2 | 12.1 | 11.9 |
+| 18 Mb/s | 8.7 | 8.6 | 18.6 | 17.8 | 18.0 | 15.6 |
 | 24 Mb/s | 11.6 | 11.3 | 19.3 | 19.2 | 17.0 | 16.9 |
-| 36 Mb/s | 14.6 | 14.5 | 23.2 | 22.2 | 22.8 | 21.1 |
-| 48 Mb/s | 18.9 | 18.5 | 25.9 | 25.8 | 24.7 | 24.4 |
+| 36 Mb/s | 14.6 | 14.5 | 23.2 | 22.2 | 22.9 | 21.1 |
+| 48 Mb/s | 18.9 | 18.5 | 25.9 | 25.8 | 24.7 | 24.2 |
 | 54 Mb/s | 19.9 | 19.7 | 28.3 | 28.0 | 28.0 | 26.5 |
 
-- In AWGN the Viterbi decoder's 4-bit soft values (clip 1.5) cost 0.0 to 0.4 dB.
+- In AWGN the Viterbi decoder's 4-bit soft values (clip 1.5) cost 0.1 to 0.4 dB.
 - In fading they cost 0.8 to 3.0 dB at 9, 18 and 36 Mb/s in both channels and 1.5 dB at
-  54 Mb/s in TGn D (0.3 dB in TGn B); 0.3 dB or less at the rate-1/2 and rate-2/3 modes. The
+  54 Mb/s in TGn D (0.3 dB in TGn B); 0.5 dB or less at the rate-1/2 and rate-2/3 modes. The
   weights |H|² spread the soft values over more than four bits hold: weak subcarriers round
   to 0 (erasures) and strong ones clip, and a rate-3/4 code has no redundancy to spare. This
   is open question 1 of `viterbi.md`, answered: the format has to be chosen again on the whole
@@ -245,31 +262,43 @@ each half of a row the receivers saw the same frames)
 
 | Operating point | ±40 ppm: from the CFO | from zero | no tracker | 0 ppm: from the CFO | from zero | no tracker |
 |---|---|---|---|---|---|---|
-| AWGN, 6 Mb/s, 3.5 dB | 116 | 144 | 716 | 118 | 143 | 108 |
-| AWGN, 24 Mb/s, 11.5 dB | 126 | 133 | 512 | 107 | 117 | 111 |
-| AWGN, 54 Mb/s, 20 dB | 103 | 127 | 544 | 103 | 121 | 104 |
+| AWGN, 6 Mb/s, 3.5 dB | 116 | 149 | 716 | 110 | 128 | 108 |
+| AWGN, 24 Mb/s, 11.5 dB | 127 | 143 | 512 | 109 | 116 | 111 |
+| AWGN, 54 Mb/s, 20 dB | 104 | 260 | 544 | 105 | 108 | 104 |
 | AWGN, 54 Mb/s, 35 dB | 0 | 0 | 153 | 0 | 0 | 0 |
-| TGn D, 6 Mb/s, 8.5 dB | 120 | 152 | 583 | 129 | 160 | 110 |
-| TGn D, 12 Mb/s, 12.5 dB | 83 | 110 | 414 | 74 | 95 | 72 |
-| TGn D, 48 Mb/s, 24.5 dB | 119 | 137 | 401 | 112 | 123 | 112 |
-| TGn D, 54 Mb/s, 28.5 dB | 71 | 94 | 447 | 76 | 85 | 77 |
+| TGn D, 6 Mb/s, 8.5 dB | 108 | 221 | 583 | 111 | 117 | 110 |
+| TGn D, 12 Mb/s, 12.5 dB | 78 | 159 | 414 | 71 | 74 | 72 |
+| TGn D, 48 Mb/s, 24.5 dB | 120 | 212 | 401 | 112 | 115 | 112 |
+| TGn D, 54 Mb/s, 28.5 dB | 71 | 208 | 447 | 77 | 76 | 77 |
 
-- Started from the CFO, the tracker costs nothing measurable at 0 ppm from 12 Mb/s up (−4 to
-  +2 frames in 1000) and 10 and 19 frames at 6 Mb/s (one to two standard deviations of the
-  difference). With a clock offset it loses what the same receiver loses at 0 ppm.
-- Started from zero it costs 10 to 35 frames in 1000 more: it has to learn the rate from the
-  frame itself. The start from the CFO is the designed mode.
+- Started from the CFO, the tracker costs nothing at 0 ppm (−2 to +2 frames in 1000 against
+  no tracker), and with a clock offset it loses what the same receiver loses at 0 ppm (−6 to
+  +18 frames; different frames, so within their noise).
+- Started from zero with a clock offset it loses 16 to 156 frames in 1000 more than from the
+  CFO: it has to learn the rate from the frame itself, and it is cautious about its
+  measurements. The start from the CFO is the designed mode; the start from zero is what is
+  left when the carrier is unknown, and it still saves most of what no tracker loses.
 - The proportional-integral loop this replaced lost 153 where no tracker lost 108 (AWGN,
-  6 Mb/s, 0 ppm, 1000 paired frames) and 142 against 110 in TGn D (the run before the
-  change; its report was overwritten by this one).
+  6 Mb/s, 0 ppm, 1000 paired frames) and 142 against 110 in TGn D. Those figures are from the
+  run before the change and are in no committed report; the scratch control that separated
+  the cause (97 lost without a loop, 97 with the loop frozen, 145 with it running, 1000
+  frames) is not committed either.
+- The tracker before the second review's fix (measurements at equal variance) lost 129
+  against 110 in TGn D at 6 Mb/s and 0 ppm; with the variance from the channel gains, 111.
 
 **Open questions**
 1. The soft-value format in fading (above). A G2 decision of the Viterbi decoder's input, so
    the founder's (it was approved at 4 bits on AWGN evidence, with this caveat recorded).
-2. The tracker's two constants (the measurement's assumed deviation and the ±2 ppm of the
-   CFO's clock offset) were set by reasoning, not swept. A transmitter that does not derive
-   carrier and clock from one oscillator breaks the start from the CFO; the tracker then
-   needs about 170 symbols to outweigh its prior.
+2. The tracker's constants (the measurement's assumed deviation, the ±2 ppm of the CFO's
+   clock offset, the rejection at three times the nominal variance) were set by reasoning and
+   one test, not swept. Two known weaknesses:
+   - a transmitter that does not derive carrier and clock from one oscillator breaks the
+     start from the CFO, and the tracker then needs hundreds of symbols to outweigh its prior;
+   - started from zero in a channel with a null at one pilot of each pair, the tracker still
+     loses frames a receiver without it decodes (`a_weak_pilot_makes_its_pair_worthless`: a
+     few in 120): the estimate's own noise makes a null's gain look larger than it is, so the
+     variance computed for the measurement is too small. A noise estimate would fix it; the
+     front has none yet. Started from the CFO it loses none there.
 3. The scrambler seed is a single point of failure: one error in seven bits loses the frame.
    The standard gives no protection; a receiver can at best check the result against the
    reserved SERVICE bits (9 zeros).
