@@ -358,8 +358,8 @@ overstated; `f64::clamp` could panic on a reversed range; silence unlocked the g
 97 samples; six surviving mutations; the test header's "reference we did not write".
 
 **Not done here / open**
-1. The DC offset per gain state (the model's states carry none) and the DC blocker's hold
-   or rescale at a gain step: the backlog item's second half, next.
+1. ~~The DC offset per gain state and the DC blocker's hold or rescale at a gain step~~:
+   done, the entry below and `docs/gates/rx_front.md` (2026-11-19).
 2. R0-09's packet error rate through the model (the data symbols at −10 or −14 dBFS with
    their peaks: the window's upper edge), with R0-09's fixed receiver.
 3. Holding the gain after acquisition (above): who tells the gain control, and when.
@@ -367,3 +367,68 @@ overstated; `f64::clamp` could panic on a reversed range; silence unlocked the g
    weak packet after a strong one's lock): the two-packet scenes of R0-08 through this model.
 5. Phase and DC at a gain change remain assumptions until R1's captures; so do the
    detector thresholds, the single detector point and the sample timing.
+
+## 2026-11-19 · G0 + G1 · R0-07e, second half: the DC offset per gain state (`GainDc`)
+
+**What it is for.** The gain changes of `FastAttackAgc` carried no DC offset. A zero-IF
+chain has one, it differs from gain state to gain state, and the receiver's DC blocker meets
+the change inside the preamble. `GainDc` gives every stretch of constant gain its offset;
+`AgcTrace::gain_states_dc` hands them to `agc_transient`, the settled stretch included (a
+last state without end).
+
+**Reference: what the AD9361's documents state about DC** (Analog Devices UG-570 Rev. A,
+archive copy, read by a research agent on 2026-11-19; pages as it reported them):
+
+| Published | In the model |
+|---|---|
+| "The RF DC offset correction for each enabled Rx gain index is stored in a LUT and applied when the Rx gain index is used." (p. 12); the baseband words likewise "applied as the Rx gain changes based on the current Rx gain table index" (p. 11) | What a calibrated chain leaves is a property of the gain index: `per_index`, one value per index of 1 dB, the same whenever the index returns |
+| Tracking updates the RF correction on three events: "Rx gain change, no energy detected, or when the ENSM exits the Rx state" (p. 12), "only … at the current gain index" (p. 30); the baseband tracking is "a high-pass filter loop" with an option to "attack/settle quickly after a gain change" (p. 11) | Not modelled: the offsets are constant per index for the length of a run. The chip's own tracking is a second DC blocker in front of ours; R1's captures show what it leaves |
+| **No level**: no residual in dBFS or dBc, no offset against gain index, no size or length of the transient at a gain step, no corner frequency of the tracking loop (UG-570, the register map, Analog Devices' "AD936x DC offset issue" note, the driver's documentation) | The levels are parameters, swept in the measurements |
+
+**Defined here** (nothing published behind it):
+- `per_index`: one magnitude at every index; the direction is drawn once per index from a
+  seed, uniform. A real table's residuals differ in size from index to index.
+- `before_gain`: an offset at the input of the gain, 10^(g/20) times that after it: the
+  part nothing corrects (an uncalibrated chain, or one whose correction has aged). It is
+  the case in which scaling the receiver's DC estimate by the gain step is exact; the
+  per-index part is the case in which it is not.
+- Both are added after the gain and before the ADC, in the units of the signal there. Each
+  gain change still turns the phase by an assumed angle (`gain_states`).
+- The register-level details of the tracking (event mask 0x18B, shifts 0x190 to 0x192) were
+  read from a third-party mirror of UG-671 and are not used by the model; the mirror and
+  the driver's documentation disagree on the order of the event bits. To be read from
+  Analog Devices' own copy when R1 configures the chip.
+
+**Gate (G1):** `cargo test -p radio-phy --test g1_agc` — 14 pass at this point; the new one is
+`dc_follows_the_gain_index_and_the_gain`: on a trace written by hand (gains 70, 60, 70,
+60, 40 dB) the before-gain part is the input offset times 10^3.5, 10³ and 10²; the
+per-index part has its magnitude at every state, the same value when an index returns,
+another at another index and with another seed, whole-decibel indices; both parts add;
+through `agc_transient` the settled stretch keeps its offset to the last sample; gains,
+ends and phases equal `gain_states` with the same random stream; a trace without a change
+is one state. It is the definition worked by hand, tied to the published statement in
+the table's first row: a consistency gate of a simulator primitive, like `agc_transient`'s.
+
+**Mutations** (10, each fails that test; `cp` + `touch` to restore): the offset taken at
+the relative gain; the settled state's offset at index 0; the settled state ending with
+the trace; the index floored; the before-gain part scaled as a power; the seed ignored;
+the index ignored; the imaginary part from the cosine; the before-gain part missing from
+Q; the phases not those of `gain_states`. The test was written with the model and passed
+at once, so these ten runs are what shows it can fail.
+
+**After the pre-PR review (2026-11-19):** `FastAttackAgc::run_dc` adds the offset after the
+gain inside the control's loop, where its detectors measure (the first measurement ran the
+control on the signal alone). Test `the_gain_control_sees_the_dc_offset`: silence with an
+offset before the gain of −50 dB is, to the detectors, the constant of the first
+hand-worked case and gives its trace change for change; an offset of 1.5 at every index
+steps the gain down 2 dB every third sample to its lowest; without an offset `run_dc` is
+`run`. The first test gained: directions over the indices 0 to 73 in every quadrant with a
+mean near the centre; a negative gain is another index than its mirror; a gain that is not
+a number gives index 0 without the before-gain part. `g1_agc`: 15 pass. Mutations (6 more,
+each fails): the offset not added in the control; not updated at a gain change; directions
+over half a circle; the index's sign dropped; either guard against a gain that is not a
+number removed. The reviewer's five survivors are among these and the DC blocker's
+(`rx_front.md`).
+
+**Measured with it:** `rxfront agcdc`, `docs/gates/rx_front.md` (2026-11-19, the DC blocker
+at a gain change).

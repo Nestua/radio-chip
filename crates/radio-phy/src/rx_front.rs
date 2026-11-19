@@ -251,6 +251,7 @@ pub struct DcBlocker {
     shift: u32,
     m: Sample,
     n: u64,
+    held: bool,
 }
 
 impl DcBlocker {
@@ -260,18 +261,49 @@ impl DcBlocker {
             shift: shift.min(30),
             m: (0.0, 0.0),
             n: 0,
+            held: false,
         }
     }
 
     /// The output for the next input sample.
     pub fn push(&mut self, x: Sample) -> Sample {
+        let y = sub(x, self.m);
+        if self.held {
+            return y;
+        }
         // ⌊log₂(n + 1)⌋, saturating at the steady-state shift.
         let k = (u64::BITS - 1 - (self.n.saturating_add(1)).leading_zeros()).min(self.shift);
         let mu = 1.0 / f64::from(1u32 << k);
-        let y = sub(x, self.m);
         self.m = add(self.m, (mu * y.0, mu * y.1));
         self.n = self.n.saturating_add(1);
         y
+    }
+
+    // What a gain control could tell the blocker at a gain change. Candidates measured for
+    // ADR 0008 (`rxfront agcdc`, `docs/gates/rx_front.md`); the fixed-point blocker and
+    // `hw/rtl/dc_block.sv` have none of them yet.
+
+    /// While held the estimate and the gear do not move (y = x − m still): for the samples
+    /// in which the gain is searching and the input clips.
+    pub fn hold(&mut self, on: bool) {
+        self.held = on;
+    }
+
+    /// Scales the estimate by a gain change of `gain_db` (amplitude 10^(g/20)): exact for
+    /// the part of the DC offset that arises before the gain that changed. A change that is
+    /// not a finite number is ignored. It acts while held too.
+    pub fn rescale(&mut self, gain_db: f64) {
+        let g = 10f64.powf(gain_db / 20.0);
+        if gain_db.is_finite() && g.is_finite() {
+            self.m = (self.m.0 * g, self.m.1 * g);
+        }
+    }
+
+    /// Restarts the gear from the present estimate (a hold stays as it is) at μ = 2^(−k) (`k` capped at the
+    /// steady-state shift): 2^k samples at 2^(−k), 2^(k+1) at the next, as at start-up from
+    /// its sample 2^k − 1.
+    pub fn restart(&mut self, k: u32) {
+        self.n = (1u64 << k.min(self.shift)) - 1;
     }
 }
 

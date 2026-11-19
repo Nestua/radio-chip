@@ -274,7 +274,8 @@ own |C| is an equivalent mutation (|C| unchanged), so the lag was mutated instea
 5. **AGC interface** (+ R0-08b G2: idle noise must stay ≥ ≈ 1 LSB rms, −65 dBFS, or the ADC
    makes it sparse and the detector false-alarms): on a gain step the DC estimate should be rescaled by the same step (the
    AGC knows it) and detection blanked while gain settles; today the LTF stage absorbs the
-   transient detections. Defined with the AGC (R1/R3).
+   transient detections. Defined with the AGC (R1/R3). Measured on 2026-11-19 (the entry
+   "the DC blocker at a gain change" below): a rescale or a restart matters only for large offsets.
 6. **TDMA mode** (slot-gated, relaxed false-alarm budget): exact-tap B is 0.83 vs 0.23 at 0 dB
    AWGN; with a gated window either detector's threshold can drop. Re-measure in the MAC design.
 7. **Fixed point (R0-08b)**: the 128-tap complex LTF correlator over a 240-position search is
@@ -1296,3 +1297,144 @@ already below 460 Hz and are now slightly worse), the AWGN cost given per SNR in
 one point, the report column still called "combined", the old report kept for ADR 0007's
 figures, the two separate weight parameters stated. Not verified by the reviewer: the
 mutation table and `scripts/check.sh` (both run here).
+
+## 2026-11-19 · G1 + measurements · R0-07e, second half: the DC blocker at a gain change
+
+**Question** (ADR 0007's backlog item, open question 5 above, the phase review's finding 8):
+should the DC blocker be told about a gain change, and what does a DC offset that changes
+with the gain cost a packet? Until now nothing measured it: `rxper` hands the decoder the
+samples before the blocker, and no scene carried a DC offset into the data symbols.
+
+**New in the float model:** three controls on `rx_front::DcBlocker`, candidates for ADR 0008.
+The fixed-point blocker and `hw/rtl/dc_block.sv` are unchanged (no vector changes).
+- `hold(on)`: the estimate and the gear do not move; y = x − m still.
+- `rescale(gain_db)`: the estimate times 10^(g/20); acts while held too.
+- `restart(k)`: the gear restarted from the present estimate at 2^(−k); a hold stays.
+
+**Gate:** `cargo test -p radio-phy --test g1_rx_front dc_blocker` — 6 pass (4 new; the
+first three were seen failing before the controls existed: they did not compile). The
+reference is the definition worked by hand on inputs of a few samples: a consistency gate
+of the model, not an outside reference. **Mutations** (10, each fails its test): the gear
+advancing while held; the hold ignored; the rescale as a power ratio; its guard against a
+step that is not a number removed; the restart one sample on; its cap removed; the estimate
+cleared by it; and after the review a step of −∞ zeroing the estimate (the guard had let
+it through), the rescale ignored while held, the restart releasing the hold.
+
+**Measurement:** `rxfront agcdc 2000` → `reports/rx_front_agcdc.txt`. Packets of 1000
+random octets through `FastAttackAgc` (power over 16 samples, the lock left on a large
+overload), a DC offset per gain state from `channel::GainDc` (`channel.md`) which the gain
+control's detectors see with the signal (`run_dc`), a phase jump within ±30° per gain
+change (assumed), a 12-bit ADC, the **float** receiver (`RxFront` and `rx_ofdm` with its
+defaults). Noise at −30 dBFS at the largest gain. Without an offset the packet settles at
+−10 dBFS at every SNR; at 25 dB that is one change of −5 dB at the lock, on average 74
+samples into the STF (the reviewer's count on the first run), from 30 dB up several steps.
+The gain is held from the first lock inside the packet (see the last finding).
+Frames lost of 2000, 54 Mb/s, the four SNRs (25 / 30 / 40 / 60 dB):
+
+| DC offset | no blocker | blocker as it is | hold | rescale | restart at 2⁻⁴ | frozen after acquisition |
+|---|---|---|---|---|---|---|
+| none | 0 / 0 / 0 / 0 | 8 / 1 / 2 / 0 | 8 / 0 / 2 / 2 | 8 / 1 / 1 / 1 | 13 / 1 / 2 / 1 | 35 / 15 / 9 / 13 |
+| per index, −40 dBFS | 0 / 0 / 0 / 0 | 5 / 0 / 1 / 1 | 5 / 2 / 0 / 1 | 5 / 1 / 0 / 2 | 13 / 3 / 1 / 3 | 47 / 23 / 11 / 13 |
+| per index, −30 dBFS | 198 / 86 / 56 / 76 | 13 / 3 / 2 / 1 | 13 / 5 / 4 / 1 | 12 / 3 / 1 / 2 | 18 / 3 / 1 / 3 | 59 / 23 / 13 / 13 |
+| per index, −20 dBFS | 1600 / 1519 / 1526 / 1477 | 88 / 18 / 16 / 22 | 88 / 21 / 35 / 29 | 51 / 9 / 10 / 13 | 17 / 6 / 1 / 4 | 135 / 55 / 54 / 34 |
+| before the gain, −30 dBFS at the largest gain | 8 / 0 / 0 / 0 | 6 / 4 / 0 / 2 | 6 / 2 / 3 / 3 | 6 / 4 / 0 / 2 | 11 / 4 / 2 / 3 | 43 / 21 / 12 / 16 |
+| before the gain, −20 dBFS | 1000 / 92 / 0 / 0 | 12 / 2 / 1 / 6 | 12 / 3 / 3 / 10 | 5 / 3 / 0 / 2 | 13 / 1 / 0 / 2 | 51 / 18 / 14 / 21 |
+| before the gain, −10 dBFS | 1901 / 1486 / 74 / 0 | 810 / 49 / 40 / 42 | 851 / 87 / 117 / 200 | 693 / 0 / 1 / 2 | 707 / 2 / 2 / 2 | 869 / 109 / 89 / 99 |
+
+("Blocker as it is" is the column `free`: the decoder is handed the blocker's output. At
+25 dB the hold is the blocker as it is by construction: the one gain change is the lock's.
+The report also has −50 dBFS rows, hold followed by a restart, a restart with freezing,
+and `free/raw`, the blocker before the acquisition only, which at 54 Mb/s loses what "no
+blocker" loses.)
+
+- **The decoder must be handed samples without the DC offset.** With none removed, an
+  offset of −30 dBFS (20 dB below the packet) loses 3 to 10 % of the 54 Mb/s frames and one
+  of −20 dBFS three quarters. 6 Mb/s tolerates everything but an offset above the packet
+  (10 dB SNR, the packet at −20 dBFS: half the frames at −20 dBFS, where the acquisition
+  itself fails without a blocker; with the blocker before the acquisition only, none are
+  lost there, and 1715 of 2000 under the largest offset). What the hand-off delivers is
+  ADR 0008's to decide; this is its first number.
+- **The blocker in the decoder's path is not free:** with no offset at all it loses 8 of
+  2000 frames at 25 dB where the samples before it lose none, and 0 to 2 at 30 dB and above.
+  Its estimate follows the signal (pole 2⁻⁷). Not measured: a slower pole once the packet
+  is acquired.
+- **Freezing the estimate once the packet is acquired is worse, not better** (35 of 2000
+  at 25 dB against 8, 9 to 15 against 0 to 2 above): the frozen value keeps the error it
+  had at that sample for the whole packet. I expected the opposite.
+- **Told nothing, the blocker shows no loss up to a per-index offset of −30 dBFS and an
+  offset before the gain of −30 dBFS at the largest gain.** At −20 dBFS before the gain the
+  totals are still small (12 / 2 / 1 / 6), but the columns are paired (the same frames),
+  and on the first run the reviewer's count of frames lost by one column only already
+  separated them there (rescale against the blocker as it is 5 : 19 over the four SNRs;
+  hold worse at 40 dB, 7 : 0). The paired counts were not redone for this run.
+- **Beyond that a restart at each gain change is the control that works for both kinds**
+  (per index −20 dBFS: 17 / 6 / 1 / 4 against 88 / 18 / 16 / 22; before the gain −10 dBFS
+  from 30 dB up: 2 against 40 to 49). At 25 dB without an offset it loses 13 against 8, and
+  11 to 15 against 5 to 7 in the other small-offset rows: there it is one restart at 2⁻⁴
+  some 74 samples into the STF, which is the late case, not a general cost; no pair is
+  significant alone.
+- **Rescaling is exact for the offset before the gain and half a cure for the per-index
+  one** (51 / 9 / 10 / 13), and costs nothing measurable without an offset. It needs the
+  size of the step from the gain control, a restart only the fact.
+- **Holding the estimate while the gain searches never helps and hurts with a large
+  offset** of either kind (before the gain −10 dBFS: 200 lost at 60 dB against 42; per
+  index −20 dBFS: 35 against 16 at 40 dB): the estimate stays at the idle gain's offset
+  and has the whole change to work off after the lock.
+- **A large offset blinds the gain control itself.** Before the gain at −10 dBFS and a
+  packet at 25 dB (−5 dBFS at the largest gain): about 450 of 2000 frames get a timing one
+  long symbol early in every column, and 700 to 870 are lost whatever the blocker does.
+  The control is locked on the offset, the packet is not 10 dB above it, and nothing
+  unlocks the gain until a peak overloads: in the frames probed (100, the rescale column)
+  the first gain change came at samples 169 to 243, inside the long training field, which
+  is the case ADR 0007 already names (a step there puts the timing a symbol off). A probe of
+  the control alone (8 frames, no CFO, the offset on I) had its first change at sample 6:
+  whether the peak comes early depends on how signal and offset add. The power
+  detector of a real control must not see the offset, or the lock must be left on less
+  than 10 dB; the published state machine does neither by itself.
+- **Without a hold on the gain the model's control leaves the lock inside the packet** on a
+  peak of the data: in 2 to 4 % of the 54 Mb/s frames (3400 samples; 8 to 9 % with a
+  per-index offset of −20 dBFS) and 37 to 60 % of the 6 Mb/s ones at 30 and 60 dB (27 000
+  samples; none at 10 dB, where the gain does not move). The measurement holds the gain
+  from the first lock inside the packet, which no receiver here does yet (`channel.md`,
+  R0-07e, open item 3; the column `held` of the report). The fixed 0x5a payload of
+  `rxfront agcmodel` did not show it.
+
+**What this is not.** No level of the AD9361's residual offset is published (`channel.md`),
+so the rows are a tolerance, not a prediction: which row R1's captures land in decides
+whether the blocker needs a control at all. The receiver is the float one; the fixed
+blocker rounds and the fixed OFDM receiver (R0-09 G2) does not exist yet. The phase jumps
+and the hold on the gain are assumptions. One seed per cell. The columns of a row are the
+same frames, so a difference inside a row can be real where the totals look alike; between
+rows a difference of a few frames is noise. `dc_block_told` and `dc_block_frozen` in the
+tool have no test of their own (the reviewer read their indexing against the trace).
+
+**For ADR 0008** (inputs, nothing decided here): (1) the decoder's samples come after a DC
+removal; (2) if the gain control tells the blocker anything, "the gain changed" (restart)
+covers both kinds of offset and "by this much" (rescale) is the cheaper one for the offset
+before the gain; a hold is not worth a wire; (3) the receiver must hold the gain once it
+has acquired; (4) the gain control's power measurement needs the offset removed before it;
+(5) the cost of the blocker's own pole on 64-QAM near its sensitivity (8 of 2000 at 25 dB)
+wants a look with R0-09 G2.
+
+**Pre-PR review (fresh agent, the diff and the report), 2026-11-19**, on the first run,
+in which the gain control did not see the offset. It reran the tool instrumented (same
+seeds, identical output) and found no defect in the indexing, the units, the random
+streams or the accounting, and the table equal to the report. Found and corrected: the
+control ran on the signal without the offset (now `FastAttackAgc::run_dc`; the run above
+is the new one, and the finding on the blinded control exists because of it); "at 25 dB
+the gain barely moves" was wrong (one −5 dB change at the lock, about sample 74); "less
+than the run can resolve" ignored that the columns are paired; the hold also hurts with a
+per-index offset; two cells, not one, had timing misses; `free/raw` equals "no blocker"
+only at 54 Mb/s; the 38 % at 6 Mb/s was for 30 and 60 dB; `rescale(−∞)` zeroed the
+estimate against its own comment; five mutations of the reviewer's survived (tests added,
+`channel.md`); the usage line lacked the command; hold-then-restart restarted only when
+the lock itself changed the gain. The five UG-570 quotes in `channel.md` matched the
+document's text and pages. Not checked by the reviewer: the 6 Mb/s rows beyond the first,
+`scripts/check.sh`, the listed mutations, the register remarks.
+
+**Open**
+- The same through the fixed receiver, with R0-09 G2 (`BACKLOG.md`, R0-07e).
+- Paired counts printed by the tool; a slower pole after acquisition; a restart at 2⁻⁵ or
+  2⁻⁶ at each change (only after a hold was tried here).
+- The chip's own tracking in front of ours (R1): its transient at a gain change is what the
+  per-index rows stand in for.

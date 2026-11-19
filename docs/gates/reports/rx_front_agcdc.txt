@@ -1,0 +1,90 @@
+# rxfront agcdc: channel::FastAttackAgc (power over 16 samples, lock left on a large
+# overload, 2 detector clocks per sample), 2000 frames per point (rounded up to the threads), a new
+# PSDU of 1000 octets per frame, noise at -30 dBFS at the largest gain, CFO uniform in
+# ±235 kHz, phase jump ±30° per gain change (assumed), 12-bit ADC, the float receiver
+# (RxFront without its own blocker + rx_ofdm with its defaults) on the ADC's samples.
+# DC per gain state: channel::GainDc, levels in dBFS at the ADC (0 dBFS = full-scale
+# amplitude 1); 'per index' has that size at every gain with a direction per index,
+# 'before the gain' has that size at the largest gain (73 dB) and falls with the gain.
+# The gain control's detectors see the offset with the signal.
+# Columns, the DC blocker (pole 2^-7): none = no blocker; free/raw = the blocker as it
+# is before the acquisition, the decoder handed the samples before it (what rxper
+# does); free = the decoder handed the blocker's output, as in all further columns;
+# hold = estimate held from the first gain change to the lock; rescale = estimate
+# scaled by each gain change; restart4 = gear restarted at 2^-4 at each change;
+# hold+r4, hold+r6 = held, then restarted at 2^-4 or 2^-6 at the lock; freeze,
+# r4+freeze = free or restart4, the estimate frozen from the sample at which the
+# acquisition is declared (the decoder's stream; the acquisition sees the unfrozen).
+# Each cell: frames lost (not decoded to the PSDU) / of those, not acquired with the
+# exact timing. The gain is held from the first lock inside the packet (assumed: a
+# hold driven by the receiver); held = frames in which it would otherwise have
+# changed again before the packet's end.
+
+## 54 Mb/s
+# DC                                          SNR frames  held      none  free/raw      free      hold   rescale  restart4   hold+r4   hold+r6    freeze r4+freeze
+  no DC                                        25   2000    70       0/0       0/0       8/0       8/0       8/0      13/0       8/0       8/0      35/0      56/0
+  no DC                                        30   2000    50       0/0       0/0       1/0       0/0       1/0       1/0       0/0       1/0      15/0      13/0
+  no DC                                        40   2000    47       0/0       0/0       2/0       2/0       1/0       2/0       2/0       2/0       9/0      11/0
+  no DC                                        60   2000    60       0/0       0/0       0/0       2/0       1/0       1/0       1/0       2/0      13/0      13/0
+  per index −50 dBFS                           25   2000    60       0/0       0/0       8/0       8/0       8/0      13/0       8/0       8/0      48/0      63/0
+  per index −50 dBFS                           30   2000    66       0/0       0/0       3/0       4/0       4/0       4/0       4/0       3/0      14/0      14/0
+  per index −50 dBFS                           40   2000    53       0/0       0/0       0/0       0/0       0/0       1/0       0/0       0/0      18/0      17/0
+  per index −50 dBFS                           60   2000    72       0/0       0/0       0/0       1/0       0/0       0/0       0/0       0/0       6/0       8/0
+  per index −40 dBFS                           25   2000    82       0/0       0/0       5/0       5/0       5/0      13/0       5/0       5/0      47/0      54/0
+  per index −40 dBFS                           30   2000    63       0/0       0/0       0/0       2/0       1/0       3/0       4/0       2/0      23/0      22/0
+  per index −40 dBFS                           40   2000    53       0/0       0/0       1/0       0/0       0/0       1/0       1/0       0/0      11/0      11/0
+  per index −40 dBFS                           60   2000    51       0/0       0/0       1/0       1/0       2/0       3/0       3/0       2/0      13/0      16/0
+  per index −30 dBFS                           25   2000    70     198/0     197/0      13/0      13/0      12/0      18/0      13/0      13/0      59/0      60/0
+  per index −30 dBFS                           30   2000    63      86/0      86/0       3/0       5/0       3/0       3/0       4/0       2/0      23/0      21/0
+  per index −30 dBFS                           40   2000    79      56/0      57/0       2/0       4/0       1/0       1/0       1/0       3/0      13/0       6/0
+  per index −30 dBFS                           60   2000    65      76/0      73/0       1/0       1/0       2/0       3/0       2/0       2/0      13/0      21/0
+  per index −20 dBFS                           25   2000   173    1600/0    1593/0      88/0      88/0      51/0      17/0      88/0      88/0     135/0      60/0
+  per index −20 dBFS                           30   2000   157    1519/0    1533/0      18/0      21/0       9/0       6/0       8/0       9/0      55/0      22/0
+  per index −20 dBFS                           40   2000   159    1526/0    1531/0      16/0      35/0      10/0       1/0       1/0       6/0      54/0      16/0
+  per index −20 dBFS                           60   2000   183    1477/0    1480/0      22/0      29/0      13/0       4/0       4/0       9/0      34/0      11/0
+  before the gain, −40 dBFS at the largest     25   2000    69       0/0       0/0       7/0       7/0       7/0      15/0       7/0       7/0      50/0      65/0
+  before the gain, −40 dBFS at the largest     30   2000    64       0/0       0/0       0/0       1/0       1/0       2/0       2/0       1/0      19/0      20/0
+  before the gain, −40 dBFS at the largest     40   2000    68       0/0       0/0       2/0       2/0       2/0       3/0       3/0       2/0      15/0      16/0
+  before the gain, −40 dBFS at the largest     60   2000    65       0/0       0/0       1/0       1/0       1/0       3/0       3/0       1/0      16/0      18/0
+  before the gain, −30 dBFS at the largest     25   2000    59       8/0       8/0       6/0       6/0       6/0      11/0       6/0       6/0      43/0      55/0
+  before the gain, −30 dBFS at the largest     30   2000    65       0/0       0/0       4/0       2/0       4/0       4/0       4/0       3/0      21/0      19/0
+  before the gain, −30 dBFS at the largest     40   2000    63       0/0       0/0       0/0       3/0       0/0       2/0       2/0       1/0      12/0      14/0
+  before the gain, −30 dBFS at the largest     60   2000    58       0/0       0/0       2/0       3/0       2/0       3/0       4/0       2/0      16/0      17/0
+  before the gain, −20 dBFS at the largest     25   2000    81    1000/0    1001/0      12/0      12/0       5/0      13/0      12/0      12/0      51/0      58/0
+  before the gain, −20 dBFS at the largest     30   2000    74      92/0      87/0       2/0       3/0       3/0       1/0       1/0       0/0      18/0      16/0
+  before the gain, −20 dBFS at the largest     40   2000    67       0/0       0/0       1/0       3/0       0/0       0/0       1/0       1/0      14/0      12/0
+  before the gain, −20 dBFS at the largest     60   2000    67       0/0       0/0       6/0      10/0       2/0       2/0       4/0       9/0      21/0      13/0
+  before the gain, −10 dBFS at the largest     25   2000    78  1901/475  1918/452   810/452   851/451   693/452   707/453   721/449   754/450   869/452   752/453
+  before the gain, −10 dBFS at the largest     30   2000   117    1486/0    1489/0      49/0      87/0       0/0       2/0       3/0      24/0     109/0      21/0
+  before the gain, −10 dBFS at the largest     40   2000    68      74/0      78/0      40/0     117/0       1/0       2/0       2/0      23/0      89/0      11/0
+  before the gain, −10 dBFS at the largest     60   2000    41       0/0       0/0      42/0     200/3       2/0       2/0       7/0      43/0      99/0      14/0
+
+## 6 Mb/s
+# DC                                          SNR frames  held      none  free/raw      free      hold   rescale  restart4   hold+r4   hold+r6    freeze r4+freeze
+  no DC                                        10   2000     0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  no DC                                        30   2000   800       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  no DC                                        60   2000   769       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −50 dBFS                           10   2000     0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −50 dBFS                           30   2000   771       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −50 dBFS                           60   2000   740       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −40 dBFS                           10   2000     0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −40 dBFS                           30   2000   773       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −40 dBFS                           60   2000   770       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −30 dBFS                           10   2000     0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −30 dBFS                           30   2000   800       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −30 dBFS                           60   2000   768       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −20 dBFS                           10   2000     0   953/920       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −20 dBFS                           30   2000  1200       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  per index −20 dBFS                           60   2000  1210       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −40 dBFS at the largest     10   2000     0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −40 dBFS at the largest     30   2000   744       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −40 dBFS at the largest     60   2000   797       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −30 dBFS at the largest     10   2000     0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −30 dBFS at the largest     30   2000   770       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −30 dBFS at the largest     60   2000   763       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −20 dBFS at the largest     10   2000     0   921/892       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −20 dBFS at the largest     30   2000   795       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −20 dBFS at the largest     60   2000   772       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −10 dBFS at the largest     10   2000     0 2000/2000    1715/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −10 dBFS at the largest     30   2000  1000       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0
+  before the gain, −10 dBFS at the largest     60   2000   796       0/0       0/0       0/0       3/3       0/0       0/0       0/0       0/0       0/0       0/0

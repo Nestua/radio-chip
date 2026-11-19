@@ -30,6 +30,9 @@
 //! - `agcmodel <frames per point>`: the same, with the gain steps placed by the gain control
 //!   model (`channel::FastAttackAgc`) instead of by hand: when the gain is still, where the
 //!   packet's level ends, and what the fixed receiver makes of it.
+//! - `agcdc <frames per point>`: packets through the gain control model with a DC offset per
+//!   gain state, decoded by the float receiver, for what the DC blocker could do at a gain
+//!   change (nothing, hold, rescale, restart) and for which samples the decoder is handed.
 //! - `level <frames per point>`: float and fixed receiver on the same ADC samples against the
 //!   packet's level in the ADC, at three SNRs.
 //!
@@ -40,17 +43,18 @@ use std::process::ExitCode;
 
 use radio_phy::channel::{
     add_tone, agc_transient, awgn, fractional_delay, frequency_offset, gain_step, mean_power,
-    tgn_taps, Doppler, FastAttackAgc, GainState, Multipath, Rng, TgnModel,
+    tgn_taps, AgcTrace, Doppler, FastAttackAgc, GainDc, GainState, Multipath, Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{
-    acquire, acquisitions, backoff_samples, detect, detections, detector_metric, front, Detector,
-    RxConfig,
+    acquire, acquisitions, backoff_samples, correct, detect, detections, detector_metric, front,
+    DcBlocker, Detector, RxConfig,
 };
 use radio_phy::rx_front_fixed::{
     acquire_fixed, acquisitions_fixed, detections_fixed, to_adc, FixedRxConfig, ADC_FULL_SCALE,
 };
+use radio_phy::rx_ofdm::{decode_ppdu, RxOfdmConfig};
 
 type C = (f64, f64);
 
@@ -1345,6 +1349,295 @@ fn agcmodel(frames: usize) {
     }
 }
 
+/// What the DC blocker does with what the gain control tells it (`agcdc`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DcPolicy {
+    /// No blocker at all.
+    Off,
+    /// The blocker as it is: it is told nothing.
+    Free,
+    /// Held from the first gain change of a search to the lock.
+    Hold,
+    /// The estimate scaled by every gain change.
+    Rescale,
+    /// The gear restarted at 2^(−k) at every gain change.
+    Restart(u32),
+    /// Held during the search, then restarted at 2^(−k) at the lock.
+    HoldRestart(u32),
+}
+
+/// The stream `x` (after the gain, pole 2^(−7)) through the DC blocker under `policy`, the
+/// gain control's changes and locks taken from `t`.
+fn dc_block_told(x: &[C], t: &AgcTrace, policy: DcPolicy) -> Vec<C> {
+    dc_block_frozen(x, t, policy, usize::MAX)
+}
+
+/// [`dc_block_told`] with the estimate frozen from sample `from` on (the receiver has
+/// acquired a packet: from there the offset is a constant to subtract).
+fn dc_block_frozen(x: &[C], t: &AgcTrace, policy: DcPolicy, from: usize) -> Vec<C> {
+    if policy == DcPolicy::Off {
+        return x.to_vec();
+    }
+    let mut b = DcBlocker::new(7);
+    let mut change = t.changes.windows(2).map(|w| (w[1].0, w[1].1 - w[0].1));
+    let mut next = change.next();
+    let mut locks = t.locks.iter().copied().peekable();
+    // Whether a search is under way (a gain change since the last lock).
+    let mut held = false;
+    x.iter()
+        .enumerate()
+        .map(|(n, &v)| {
+            let step = next.filter(|c| c.0 == n).map(|c| c.1);
+            if step.is_some() {
+                next = change.next();
+            }
+            let lock = locks.next_if_eq(&n).is_some();
+            match policy {
+                DcPolicy::Rescale => {
+                    if let Some(db) = step {
+                        b.rescale(db);
+                    }
+                }
+                DcPolicy::Restart(k) => {
+                    if step.is_some() {
+                        b.restart(k);
+                    }
+                }
+                DcPolicy::Hold | DcPolicy::HoldRestart(_) => {
+                    if lock {
+                        b.hold(false);
+                        if let (DcPolicy::HoldRestart(k), true) = (policy, held) {
+                            b.restart(k);
+                        }
+                        held = false;
+                    } else if step.is_some() {
+                        b.hold(true);
+                        held = true;
+                    }
+                }
+                DcPolicy::Off | DcPolicy::Free => {}
+            }
+            if n >= from {
+                b.hold(true);
+            }
+            b.push(v)
+        })
+        .collect()
+}
+
+/// Packets through the gain control model (power over 16 samples, the lock left on a large
+/// overload: the working variant of `agcmodel`) with a DC offset per gain state
+/// (`channel::GainDc`), through a 12-bit ADC, acquired and decoded by the float receiver.
+/// Columns: what the DC blocker does at a gain change, and whether the decoder is handed the
+/// blocker's output or the samples before it.
+fn agcdc(frames: usize) {
+    const IDLE_DBFS: f64 = -30.0;
+    const JUMP_DEG: f64 = 30.0;
+    const OCTETS: usize = 1000;
+    let cfg = RxConfig {
+        dc_shift: None,
+        ..RxConfig::new(FS)
+    };
+    let ofdm = RxOfdmConfig::default();
+    let tx = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << tx.data.frac_bits());
+    let full = f64::from(ADC_FULL_SCALE);
+    let b = backoff_samples(&cfg);
+    let agc = FastAttackAgc {
+        power_samples: 16,
+        unlock_on_overload: true,
+        ..FastAttackAgc::ad9361_reset(2)
+    };
+    // (front, decoder): the policy whose output the acquisition sees, and the one whose
+    // output is corrected and decoded.
+    let columns: [(&str, DcPolicy, DcPolicy); 10] = [
+        ("none", DcPolicy::Off, DcPolicy::Off),
+        ("free/raw", DcPolicy::Free, DcPolicy::Off),
+        ("free", DcPolicy::Free, DcPolicy::Free),
+        ("hold", DcPolicy::Hold, DcPolicy::Hold),
+        ("rescale", DcPolicy::Rescale, DcPolicy::Rescale),
+        ("restart4", DcPolicy::Restart(4), DcPolicy::Restart(4)),
+        (
+            "hold+r4",
+            DcPolicy::HoldRestart(4),
+            DcPolicy::HoldRestart(4),
+        ),
+        (
+            "hold+r6",
+            DcPolicy::HoldRestart(6),
+            DcPolicy::HoldRestart(6),
+        ),
+        ("freeze", DcPolicy::Free, DcPolicy::Free),
+        ("r4+freeze", DcPolicy::Restart(4), DcPolicy::Restart(4)),
+    ];
+    // Columns from this one on: the estimate is frozen from the sample the acquisition is
+    // declared at to the end of the stream.
+    const FREEZE_FROM: usize = 8;
+    // (name, per-index level dBFS, before-gain level dBFS at the largest gain).
+    let none = f64::NEG_INFINITY;
+    let cases: [(&str, f64, f64); 9] = [
+        ("no DC", none, none),
+        ("per index −50 dBFS", -50.0, none),
+        ("per index −40 dBFS", -40.0, none),
+        ("per index −30 dBFS", -30.0, none),
+        ("per index −20 dBFS", -20.0, none),
+        ("before the gain, −40 dBFS at the largest", none, -40.0),
+        ("before the gain, −30 dBFS at the largest", none, -30.0),
+        ("before the gain, −20 dBFS at the largest", none, -20.0),
+        ("before the gain, −10 dBFS at the largest", none, -10.0),
+    ];
+    println!(
+        "# rxfront agcdc: channel::FastAttackAgc (power over 16 samples, lock left on a large\n\
+         # overload, 2 detector clocks per sample), {frames} frames per point (rounded up to the threads), a new\n\
+         # PSDU of {OCTETS} octets per frame, noise at {IDLE_DBFS} dBFS at the largest gain, CFO uniform in\n\
+         # ±235 kHz, phase jump ±{JUMP_DEG}° per gain change (assumed), 12-bit ADC, the float receiver\n\
+         # (RxFront without its own blocker + rx_ofdm with its defaults) on the ADC's samples.\n\
+         # DC per gain state: channel::GainDc, levels in dBFS at the ADC (0 dBFS = full-scale\n\
+         # amplitude 1); 'per index' has that size at every gain with a direction per index,\n\
+         # 'before the gain' has that size at the largest gain (73 dB) and falls with the gain.\n\
+         # The gain control's detectors see the offset with the signal.\n\
+         # Columns, the DC blocker (pole 2^-7): none = no blocker; free/raw = the blocker as it\n\
+         # is before the acquisition, the decoder handed the samples before it (what rxper\n\
+         # does); free = the decoder handed the blocker's output, as in all further columns;\n\
+         # hold = estimate held from the first gain change to the lock; rescale = estimate\n\
+         # scaled by each gain change; restart4 = gear restarted at 2^-4 at each change;\n\
+         # hold+r4, hold+r6 = held, then restarted at 2^-4 or 2^-6 at the lock; freeze,\n\
+         # r4+freeze = free or restart4, the estimate frozen from the sample at which the\n\
+         # acquisition is declared (the decoder's stream; the acquisition sees the unfrozen).\n\
+         # Each cell: frames lost (not decoded to the PSDU) / of those, not acquired with the\n\
+         # exact timing. The gain is held from the first lock inside the packet (assumed: a\n\
+         # hold driven by the receiver); held = frames in which it would otherwise have\n\
+         # changed again before the packet's end."
+    );
+    for (ri, rate) in [Rate::R54, Rate::R6].into_iter().enumerate() {
+        let snrs: &[f64] = if ri == 0 {
+            &[25.0, 30.0, 40.0, 60.0]
+        } else {
+            &[10.0, 30.0, 60.0]
+        };
+        println!(
+            "\n## {} Mb/s\n# {:<42} {:>4} {:>6} {:>5} {}",
+            if ri == 0 { 54 } else { 6 },
+            "DC",
+            "SNR",
+            "frames",
+            "held",
+            columns
+                .iter()
+                .map(|c| format!("{:>9}", c.0))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        for (ci, (name, per_index, before)) in cases.iter().enumerate() {
+            for (si, &snr) in snrs.iter().enumerate() {
+                let per_thread = frames.div_ceil(threads());
+                let r = par(|th| {
+                    let mut rng = Rng::new(
+                        0xa6cd_0000 + ((ri * 100 + ci) * 100 + si) as u64 * 4096 + th as u64,
+                    );
+                    let mut lost = [0usize; 10];
+                    let mut miss = [0usize; 10];
+                    let mut data = 0usize;
+                    for _ in 0..per_thread {
+                        let psdu: Vec<u8> =
+                            (0..OCTETS).map(|_| (rng.next_u64() & 0xff) as u8).collect();
+                        let frame: Vec<C> = build_ppdu(&psdu, rate, 0x5d, &tx)
+                            .map(|f| {
+                                f.iter()
+                                    .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let p = mean_power(&frame);
+                        let k = (10f64.powf((IDLE_DBFS - agc.max_gain_db + snr) / 10.0) / p).sqrt();
+                        let lead = 600 + (rng.uniform() * 50.0) as usize;
+                        let mut x = vec![(0.0, 0.0); lead];
+                        x.extend_from_slice(&frame);
+                        x.extend(vec![(0.0, 0.0); 100]);
+                        let cfo = (2.0 * rng.uniform() - 1.0) * 235e3;
+                        let x = frequency_offset(&x, cfo, FS, 2.0 * PI * rng.uniform());
+                        let x: Vec<C> = awgn(&x, snr, p, &mut rng)
+                            .iter()
+                            .map(|s| (s.0 * k, s.1 * k))
+                            .collect();
+                        let a = 10f64.powf((before - agc.max_gain_db) / 20.0);
+                        let th0 = 2.0 * PI * rng.uniform();
+                        let dc = GainDc {
+                            per_index: 10f64.powf(per_index / 20.0),
+                            seed: rng.next_u64(),
+                            before_gain: (a * th0.cos(), a * th0.sin()),
+                        };
+                        // The control's detectors see the offset with the signal.
+                        let mut t = agc.run_dc(&x, Some(&dc));
+                        // The gain is held from the first lock inside the packet (the
+                        // chip has a pin for it; who drives it is ADR 0008's question):
+                        // without that a peak of the data unlocks it again.
+                        let end = lead + frame.len();
+                        if let Some(&held) = t.locks.iter().find(|l| **l > lead) {
+                            data += usize::from(t.changes.iter().any(|c| c.0 > held && c.0 < end));
+                            t.changes.retain(|c| c.0 <= held);
+                            t.locks.retain(|l| *l <= held);
+                            t.unlocks.retain(|u| *u < held);
+                        }
+                        let (settled, states) = t.gain_states_dc(JUMP_DEG, &dc, &mut rng);
+                        let g = 10f64.powf(settled / 20.0);
+                        let at_settled: Vec<C> = x.iter().map(|s| (s.0 * g, s.1 * g)).collect();
+                        let adc: Vec<C> = to_adc(&agc_transient(&at_settled, &states), full)
+                            .iter()
+                            .map(|s| (f64::from(s.0) / full, f64::from(s.1) / full))
+                            .collect();
+                        let mut cache: Vec<(DcPolicy, Vec<C>)> = Vec::new();
+                        for pol in columns.iter().flat_map(|c| [c.1, c.2]) {
+                            if cache.iter().all(|c| c.0 != pol) {
+                                cache.push((pol, dc_block_told(&adc, &t, pol)));
+                            }
+                        }
+                        let stream =
+                            |pol: DcPolicy| cache.iter().position(|c| c.0 == pol).unwrap_or(0);
+                        for (col, (_, front, dec)) in columns.iter().enumerate() {
+                            let (fi, di) = (stream(*front), stream(*dec));
+                            let acq = acquire(&cache[fi].1, 0, &cfg);
+                            let exact = acq.is_some_and(|a| a.fft_start == lead + T1 - b);
+                            let ok = acq.is_some_and(|a| {
+                                let frozen;
+                                let dec = if col >= FREEZE_FROM {
+                                    frozen = dc_block_frozen(&adc, &t, *dec, a.decided_at);
+                                    &frozen
+                                } else {
+                                    &cache[di].1
+                                };
+                                let y = correct(dec, a.cfo_hz, FS);
+                                decode_ppdu(&y, a.fft_start, &ofdm).is_ok_and(|d| d.psdu == psdu)
+                            });
+                            lost[col] += usize::from(!ok);
+                            miss[col] += usize::from(!ok && !exact);
+                        }
+                    }
+                    (lost, miss, data)
+                });
+                let total = per_thread * threads();
+                let mut lost = [0usize; 10];
+                let mut miss = [0usize; 10];
+                let mut data = 0;
+                for (l, m, d) in &r {
+                    for c in 0..10 {
+                        lost[c] += l[c];
+                        miss[c] += m[c];
+                    }
+                    data += d;
+                }
+                println!(
+                    "  {name:<42} {snr:>4} {total:>6} {data:>5} {}",
+                    (0..10)
+                        .map(|c| format!("{:>9}", format!("{}/{}", lost[c], miss[c])))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+        }
+    }
+}
+
 /// A Hamming-windowed sinc low-pass filter, cutoff in cycles per sample, unit DC gain.
 fn lowpass(cutoff: f64, taps: usize) -> Vec<f64> {
     let mid = (taps - 1) as f64 / 2.0;
@@ -1505,9 +1798,10 @@ fn main() -> ExitCode {
         "agc" => agc(n.unwrap_or(500)),
         "tailbw" => tailbw(n.unwrap_or(400)),
         "agcmodel" => agcmodel(n.unwrap_or(400)),
+        "agcdc" => agcdc(n.unwrap_or(200)),
         "level" => level(n.unwrap_or(400)),
         _ => {
-            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency|agc|agcmodel|tailbw|level [n]");
+            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency|agc|agcmodel|agcdc|tailbw|level [n]");
             return ExitCode::from(2);
         }
     }
