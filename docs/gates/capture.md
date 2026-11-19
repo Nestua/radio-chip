@@ -126,10 +126,7 @@ reader and writer.
   the checksum catches a torn pair.
 
 **Open questions**
-1. Validation by the SigMF project's own library (`sigmf` on PyPI, its JSON schema) is not
-   done: installing a package needs the founder's permission, which was not available during
-   the session. It would be a sixth reference; until then the field names rest on references
-   4 and 5, both written from our reading of the specification.
+1. Closed 2026-11-19 (entry below): validation by the SigMF project's own library.
 2. Time: `core:datetime` is kept as text. A field capture needs the time base (GPS, NTP, the
    SDR's clock) defined before it means anything; that is R1's.
 3. Recording from an SDR is not here: R1 chooses the SDR and its driver. This block is what
@@ -137,3 +134,39 @@ reader and writer.
 4. `rcap replay` runs the front only. The decode of what it finds comes with R0-09.
 5. Captures live outside git (`/captures/`); a journal entry names a capture by its
    `core:sha512`.
+
+## 2026-11-19 · G1 · the SigMF project's own library as a reference
+
+The founder allowed the install. `tools/ref/capture_sigmf.py` runs `sigmf` 1.11.1 from PyPI
+(LGPL-3.0; installed in a throw-away virtual environment and run as a black box, nothing
+read or copied, ADR 0005) with numpy 2.0.2 on Python 3.9.6. The fixtures are committed, so CI
+needs neither.
+
+| Reference | Test (`radio-capture/tests/g1_capture.rs`) |
+|---|---|
+| A recording written by the library (`sg.sigmf-*`: two segments, an annotation with frequency edges, a 400-sample ramp, its checksum) | `reads_the_recording_the_sigmf_library_wrote` |
+| The library's verdict on the recording we write (`sg_verdict.txt` on the committed `rs.sigmf-*`): valid against the project's JSON schema, checksum verified on load, 500 samples, the first four read back, rate, frequency, annotation | `the_sigmf_library_accepts_the_recording_we_write` |
+
+- Both tests passed on the first run: the writer and reader of #34 needed no change.
+- "Valid" is shown to mean something inside the verdict: the same metadata is refused by the
+  library with `core:datatype` missing or unknown (`ci17_le`), the sample rate or the
+  frequency as text, `core:sample_start` missing or negative (six lines, all `True`).
+- The library writes `core:num_channels: 1` and `core:offset: 0` on its own. Our reader keeps
+  both among the other fields (one channel and no offset are what it assumes; other values
+  are refused, #34).
+- Regenerate: `UPDATE_FIXTURES=1 cargo test -p radio-capture`, then both `check` commands
+  (`capture_python.py`, `capture_sigmf.py`).
+
+**Mutations of the writer** (fixtures regenerated, both verdicts rerun, then everything restored)
+| Mutation | CPython verdict (reference 5) | `sigmf` library |
+|---|---|---|
+| `core:sample_count` written as text `"320"` | passes: it prints the same | refuses (the library fails on it), the verdict is not produced and the test fails |
+| datatype written as `ci16` (no byte order) | fails (`ci16` ≠ `ci16_le`) | **accepts** |
+| `core:version` written as `1.2` | fails | **accepts** (the library overwrites the version on load) |
+
+The two references cover different mistakes: the library knows the types of the fields, the
+CPython verdict the exact texts. Neither replaces the other. The library is lenient where
+the specification is not (a multi-byte datatype without `_le`/`_be`): its "valid" is weaker
+than the specification's.
+
+**Evidence:** `cargo test -p radio-capture` — 10 tests pass; this entry's pull request.
