@@ -1,13 +1,25 @@
 # ADR 0007 — Receiver front after the phase review: CFO output, hand-off, order of work
 
-Status: **proposed** · 2026-11-19 · PHY architecture (risk point): needs the founder's decision.
+Status: **accepted** · proposed 2026-11-19, accepted by the founder 2026-11-19 · PHY architecture
+(risk point).
 Source: the independent review of 2026-11-19 (`docs/reviews/2026-11-19-r0-phase-review.md`) and
 the reruns in `docs/gates/reports/rx_front_agc.txt`, `rx_front_tailbw.txt`, `rx_front_level.txt`
 (journal: `docs/gates/rx_front.md`, 2026-11-19, measurements).
 
-Three decisions are asked for. Each has a recommendation; none is taken yet, and no model
-behaviour has been changed. The measurements were reviewed by a second fresh reviewer, whose
-corrections are included.
+## Decided
+
+1. **CFO output: option B.** The acquisition hands on the fine estimate; the weight of the
+   coarse estimate stays a parameter of the model (default 0), so the combination can be
+   measured again once a real AGC has been captured (R1).
+2. **ADR 0006 is amended (as ADR 0008, with its own review) before the decision engine:**
+   hand-off of samples to the rest of the receiver, the latency budget to SIGNAL and the ACK,
+   multiplier folding with the area and timing figures of `docs/gates/silicon_probe.md`.
+3. **Order of work: the model first, then more receiver-front RTL.** Part d steps 2–4 wait.
+   Step 2 (the search) depends on none of the findings, but it is scheduled after the model
+   work as well: the founder accepted the order "model, then front RTL" as a whole.
+
+The measurements were reviewed by a second fresh reviewer, whose corrections are included.
+The text below is the proposal as it was put to the founder.
 
 ## Decision 1 — which CFO the acquisition hands on
 
@@ -89,16 +101,18 @@ R0-08c is already a planned retune of a block whose RTL exists.
 5. R0-08c's retune of `det_a` before its RTL is touched again, with band-limited noise and an
    adjacent-channel STF in its false-alarm measurements (finding 5).
 
-**Proposed backlog items** (not added until this ADR is accepted):
+**Backlog items** (added to `BACKLOG.md` with this ADR's acceptance, except where noted):
 - AGC model and its gate, with its two requirements: still from the end of the STF, and a
   target window for the packet's level (the fixed model's CFO estimate keeps its budget from
   −3 to −15 dBFS and is +6 % at −30 dBFS, `rx_front_level.txt`; the upper edge comes from
   what the data symbols tolerate, R0-09).
-- A hash-only Annex I.1 fixture so the strongest TX reference runs in CI (finding 7).
-- A check of the IHP SG13G2 memory macros against the wrapper's read/write contract.
+- A hash-only Annex I.1 fixture so the strongest TX reference runs in CI (finding 7): not
+  added, it waits for a licence decision (risk point).
+- A check of the IHP SG13G2 memory macros against the wrapper's read/write contract: done,
+  `docs/gates/memory.md` (2026-11-19).
 - DC blocker hold or rescale at a gain step.
 
-## Consequences if accepted as recommended
+## Consequences
 
 - One model change (decision 1, option B) with G1/G2 reruns. `hw/vectors/` do not change: no
   vector contains the combined CFO yet.
