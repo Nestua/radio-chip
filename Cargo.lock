@@ -9,6 +9,9 @@ version = "0.0.1"
 [[package]]
 name = "radio-phy"
 version = "0.0.1"
+dependencies = [
+ "radio-capture",
+]
 
 [[package]]
 name = "radio-tools"

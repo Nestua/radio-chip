@@ -6,6 +6,8 @@
 //! `target/ext/annex_i1.fixture` (gitignored); point `ANNEX_I1_FIXTURE` elsewhere if needed.
 //! The tests are `#[ignore]`d so CI (which has no copy) stays green; run them with
 //! `cargo test -p radio-phy --test g1_annex_i1 -- --ignored`. Evidence: `docs/gates/ppdu.md`.
+//! CI holds the same example by the hashes of its tables (`g1_annex_i1_hashes.rs`); this gate
+//! compares value by value and says where a difference is.
 
 // Helpers outside #[test] parse a fixture we control; a malformed line should just fail the test.
 #![allow(clippy::unwrap_used)]

@@ -10,3 +10,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# SHA-512 for the hash-only gate against Annex I.1 (tests/g1_annex_i1_hashes.rs); a workspace
+# crate without dependencies of its own.
+radio-capture = { path = "../radio-capture" }

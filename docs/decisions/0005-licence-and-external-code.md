@@ -29,7 +29,10 @@ approach is shown to a lawyer once before a public release or an MPW.
 - **Worked examples are not reproduced; their hashes are.** Annex I.1 (tens of pages of
   tables) is a substantial part of the document, not a parameter. The repository holds the
   SHA-512 of each table (R0-06b) so that CI can compare the model's output; the tables
-  themselves stay in a local fixture extracted from a licensed copy.
+  themselves stay in a local fixture extracted from a licensed copy. One exception, decided
+  separately the same day: the example's input, the 100-octet PSDU of Table I-1, is in the
+  repository, because no test of the example can run without it (a printed reference
+  sequence a test needs, as the decision above already allows).
 - Patents on what the parameters describe are not touched by this addendum (see below).
 
 ## Consequences

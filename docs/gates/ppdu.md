@@ -86,6 +86,61 @@ at sample 0; SIGNAL parity inverted → SIGNAL and frame fail.
 This closes the transmit half of the R0 exit gate ("encodes the standard's worked example frame
 bit-exactly"); the decode-back half waits for R0-07…R0-10.
 
+## 2026-11-19 · G1 · R0-06b: Annex I.1 in CI, by hashes
+
+Until today the strongest reference of the transmitter ran only where a licensed copy of the
+standard was at hand (`g1_annex_i1`, `#[ignore]`d in CI). Decided by the founder on
+2026-11-19 (ADR 0005, addendum): the repository holds the SHA-512 of each table, not the
+tables; and, asked separately, the example's input (the 100-octet PSDU of Table I-1), without
+which nothing downstream of the SIGNAL field can be computed.
+
+- `tools/ref/annex_i1_hash.py` (CPython hashlib, run on the local fixture of
+  `annex_i1_extract.py`) → `crates/radio-phy/tests/fixtures/annex_i1_hashes.txt`: the PSDU
+  and 21 hashes, each over a canonical text of one table (bit tables by index, octet tables
+  in transmission order, the composition of the two interleaver permutations I-17 and I-18,
+  frequency-domain tables with X for an empty pilot, the nine tables of time samples; values
+  with three decimals, −0.000 written 0.000).
+- `tests/g1_annex_i1_hashes.rs` (runs in CI): the model computes each table from the PSDU,
+  writes the same text and must reach the same hash. Hashing is `radio-capture`'s SHA-512
+  (itself held to hashlib, `docs/gates/capture.md`), a dev-dependency inside the workspace.
+
+| Test | Tables |
+|---|---|
+| `signal_field` | I-7, I-8, I-9 (bits), I-10, I-11 (subcarriers without and with pilots) |
+| `data_bits_and_scrambler` | I-13, I-15, I-16 (864, 864, 1152 bits), I-14 (exactly one of the 127 seeds gives the sequence: 0x5D), I-17 ∘ I-18, I-19, I-20 |
+| `whole_ppdu_is_the_printed_waveform` | I-22 … I-30: all 881 samples, 1762 numbers, equal to the print in every third decimal |
+| `printed_waveform_decodes` | the receive half: that waveform, rounded to the printed digits, through `decode_ppdu` at five window positions gives the PSDU, 36 Mb/s, length 100, seed 0x5D |
+
+**What the hash of the waveform rests on**
+- It holds the 24-bit transmitter (`IfftConfig::with_word_bits(24)`): measured before
+  writing the gate, the number of printed values the model does not round to is 303 of
+  1762 at W = 13, 65 at W = 16, 3 at W = 20 and 0 at W = 24. The 13-bit transmitter of the
+  design is still held to the print within its tolerance by the local gate only.
+- The transmitter is integer arithmetic, so the text is the same on every machine. 12 of
+  the 1762 values sit exactly on a rounding boundary of the print (dyadic values); the
+  nearest other one is 2.4·10⁻⁷ from a boundary, about two LSB of the 24-bit word. A change
+  of the IFFT's rounding can therefore break a hash while the print still holds: the hash
+  says "different", the local gate (`cargo test -p radio-phy --test g1_annex_i1 --
+  --ignored`) says where and by how much. A false alarm is possible; a missed difference in
+  a printed digit is not.
+- Not hashed (the local gate does not use them either): I-2 … I-6 and I-12 (the preamble and
+  SIGNAL in pieces; their samples are inside I-22 and I-23) and I-21.
+- A hash of a short table is not secrecy: I-7's 24 bits can be found by search. The tables
+  are kept out because they are the document's text, and the model reproduces them anyway.
+
+**Mutations** (each fails the tests named; `cp` + `touch` to restore)
+| Mutation | Fails |
+|---|---|
+| encoder generator 171 → 175 (octal) | `signal_field`, `data_bits_and_scrambler`, waveform |
+| scrambler x⁷ ⊕ x⁴ → x⁷ ⊕ x³ | `data_bits_and_scrambler`, waveform, decode |
+| interleaver, second permutation off by one | `data_bits_and_scrambler`, waveform |
+| sign of one pilot | `signal_field`, `data_bits_and_scrambler`, waveform |
+| 16-QAM normalisation 1/√10 → 1/√9 | `data_bits_and_scrambler`, waveform |
+
+**Evidence:** `cargo test -p radio-phy --test g1_annex_i1_hashes` — 4 pass; the local
+`g1_annex_i1 -- --ignored` — 5 pass on the same tree; `scripts/check.sh` green; this entry's
+pull request.
+
 ## Open questions
 1. Annex worked example: done (entry above, commit the test + extractor, numbers stay local).
    Keep in mind: the free public draft IEEE 802.11-99/107 (April 1999) is **not usable as a
