@@ -1,0 +1,36 @@
+{
+    "global": {
+        "core:datatype": "ci16_le",
+        "core:sample_rate": 20000000,
+        "core:version": "1.2.0",
+        "core:sha512": "21fea618c7d05abb82e7eaa3cef304dff77f33dd09a5e64f1e52276573572a4a7d8be38504246791134e6ba2827a02210bb83450207b5b098b5cd5c0ff642561",
+        "core:description": "ramp written by tools/ref/capture_python.py, \"quoted\", \u041a\u0438\u0457\u0432",
+        "core:hw": "none (synthetic)",
+        "core:author": "capture_python.py",
+        "nestua:adc_bits": 12
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 5805000000,
+            "core:datetime": "2026-11-19T00:00:00Z"
+        },
+        {
+            "core:sample_start": 300,
+            "core:frequency": 5825000000.5
+        }
+    ],
+    "annotations": [
+        {
+            "core:sample_start": 100,
+            "core:sample_count": 50,
+            "core:label": "burst",
+            "core:comment": "first",
+            "other:field": [
+                1,
+                2,
+                3
+            ]
+        }
+    ]
+}

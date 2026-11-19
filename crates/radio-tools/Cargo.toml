@@ -20,8 +20,13 @@ path = "src/bin/g2.rs"
 name = "rxfront"
 path = "src/bin/rxfront.rs"
 
+[[bin]]
+name = "rcap"
+path = "src/bin/rcap.rs"
+
 [dependencies]
 radio-phy = { path = "../radio-phy" }
+radio-capture = { path = "../radio-capture" }
 
 [lints]
 workspace = true
