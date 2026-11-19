@@ -1211,7 +1211,26 @@ fn dc_blocker_rescale_moves_the_estimate_by_the_gain_step() {
     b.push((8.0, -4.0));
     b.rescale(f64::NAN);
     b.rescale(f64::INFINITY);
+    b.rescale(f64::NEG_INFINITY);
     assert_eq!(b.push((8.0, -4.0)), (0.0, 0.0));
+}
+
+#[test]
+fn dc_blocker_controls_combine() {
+    use radio_phy::rx_front::DcBlocker;
+    // Held at m = 8: a rescale by −20 dB still acts (m = 0.8), a restart does not release
+    // the hold; released, the restarted gear runs (μ = 1/2: m = 0.8 + 3.6 = 4.4).
+    let mut b = DcBlocker::new(7);
+    b.push((8.0, 0.0));
+    b.hold(true);
+    b.rescale(-20.0);
+    assert!((b.push((8.0, 0.0)).0 - 7.2).abs() < 1e-12);
+    b.restart(1);
+    assert!((b.push((8.0, 0.0)).0 - 7.2).abs() < 1e-12);
+    assert!((b.push((8.0, 0.0)).0 - 7.2).abs() < 1e-12);
+    b.hold(false);
+    assert!((b.push((8.0, 0.0)).0 - 7.2).abs() < 1e-12);
+    assert!((b.push((8.0, 0.0)).0 - 3.6).abs() < 1e-12);
 }
 
 #[test]

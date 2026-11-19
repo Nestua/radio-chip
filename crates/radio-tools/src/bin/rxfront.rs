@@ -1382,6 +1382,8 @@ fn dc_block_frozen(x: &[C], t: &AgcTrace, policy: DcPolicy, from: usize) -> Vec<
     let mut change = t.changes.windows(2).map(|w| (w[1].0, w[1].1 - w[0].1));
     let mut next = change.next();
     let mut locks = t.locks.iter().copied().peekable();
+    // Whether a search is under way (a gain change since the last lock).
+    let mut held = false;
     x.iter()
         .enumerate()
         .map(|(n, &v)| {
@@ -1404,11 +1406,13 @@ fn dc_block_frozen(x: &[C], t: &AgcTrace, policy: DcPolicy, from: usize) -> Vec<
                 DcPolicy::Hold | DcPolicy::HoldRestart(_) => {
                     if lock {
                         b.hold(false);
-                        if let (DcPolicy::HoldRestart(k), true) = (policy, step.is_some()) {
+                        if let (DcPolicy::HoldRestart(k), true) = (policy, held) {
                             b.restart(k);
                         }
+                        held = false;
                     } else if step.is_some() {
                         b.hold(true);
+                        held = true;
                     }
                 }
                 DcPolicy::Off | DcPolicy::Free => {}
@@ -1491,6 +1495,7 @@ fn agcdc(frames: usize) {
          # DC per gain state: channel::GainDc, levels in dBFS at the ADC (0 dBFS = full-scale\n\
          # amplitude 1); 'per index' has that size at every gain with a direction per index,\n\
          # 'before the gain' has that size at the largest gain (73 dB) and falls with the gain.\n\
+         # The gain control's detectors see the offset with the signal.\n\
          # Columns, the DC blocker (pole 2^-7): none = no blocker; free/raw = the blocker as it\n\
          # is before the acquisition, the decoder handed the samples before it (what rxper\n\
          # does); free = the decoder handed the blocker's output, as in all further columns;\n\
@@ -1555,7 +1560,15 @@ fn agcdc(frames: usize) {
                             .iter()
                             .map(|s| (s.0 * k, s.1 * k))
                             .collect();
-                        let mut t = agc.run(&x);
+                        let a = 10f64.powf((before - agc.max_gain_db) / 20.0);
+                        let th0 = 2.0 * PI * rng.uniform();
+                        let dc = GainDc {
+                            per_index: 10f64.powf(per_index / 20.0),
+                            seed: rng.next_u64(),
+                            before_gain: (a * th0.cos(), a * th0.sin()),
+                        };
+                        // The control's detectors see the offset with the signal.
+                        let mut t = agc.run_dc(&x, Some(&dc));
                         // The gain is held from the first lock inside the packet (the
                         // chip has a pin for it; who drives it is ADR 0008's question):
                         // without that a peak of the data unlocks it again.
@@ -1566,13 +1579,6 @@ fn agcdc(frames: usize) {
                             t.locks.retain(|l| *l <= held);
                             t.unlocks.retain(|u| *u < held);
                         }
-                        let a = 10f64.powf((before - agc.max_gain_db) / 20.0);
-                        let th0 = 2.0 * PI * rng.uniform();
-                        let dc = GainDc {
-                            per_index: 10f64.powf(per_index / 20.0),
-                            seed: rng.next_u64(),
-                            before_gain: (a * th0.cos(), a * th0.sin()),
-                        };
                         let (settled, states) = t.gain_states_dc(JUMP_DEG, &dc, &mut rng);
                         let g = 10f64.powf(settled / 20.0);
                         let at_settled: Vec<C> = x.iter().map(|s| (s.0 * g, s.1 * g)).collect();
@@ -1795,7 +1801,7 @@ fn main() -> ExitCode {
         "agcdc" => agcdc(n.unwrap_or(200)),
         "level" => level(n.unwrap_or(400)),
         _ => {
-            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency|agc|agcmodel|tailbw|level [n]");
+            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency|agc|agcmodel|agcdc|tailbw|level [n]");
             return ExitCode::from(2);
         }
     }

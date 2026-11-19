@@ -523,6 +523,25 @@ fn dc_follows_the_gain_index_and_the_gain() {
     for (a, b) in with.iter().zip(&without) {
         assert_eq!((a.until, a.gain_db, a.phase), (b.until, b.gain_db, b.phase));
     }
+    // Directions cover the circle: over the indices 0 … 73 every quadrant occurs and the
+    // mean is near the centre (|mean| of 74 unit vectors: 0.116 expected, 0.35 is 3σ).
+    let unit = GainDc {
+        per_index: 1.0,
+        seed: 5,
+        before_gain: (0.0, 0.0),
+    };
+    let d: Vec<Sample> = (0..74).map(|g| unit.at(f64::from(g))).collect();
+    for (sx, sy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+        assert!(d.iter().any(|v| v.0 * sx > 0.0 && v.1 * sy > 0.0));
+    }
+    let m = d.iter().fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1));
+    assert!(m.0.hypot(m.1) / 74.0 < 0.35, "{m:?}");
+    // A gain below 0 dB is another index than its mirror; a gain that is not a number is
+    // index 0 without the before-gain part, never a value that is not a number.
+    assert!(apart(left.at(-3.0), left.at(3.0)));
+    for g in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(both.at(g), left.at(0.0), "{g}");
+    }
     // No gain change at all: one state, the idle chain's offset.
     let idle = AgcTrace {
         gain_db: Vec::new(),
@@ -533,4 +552,34 @@ fn dc_follows_the_gain_index_and_the_gain() {
     let (settled, s) = idle.gain_states_dc(0.0, &left, &mut Rng::new(3));
     assert_eq!((settled, s.len(), s[0].until), (70.0, 1, usize::MAX));
     assert_eq!(s[0].dc, left.at(70.0));
+}
+
+#[test]
+fn the_gain_control_sees_the_dc_offset() {
+    use radio_phy::channel::GainDc;
+    // Silence with an offset before the gain of 10^(−50/20) on I is, to the detectors, the
+    // constant of the first hand-worked case: the same trace, change for change.
+    let silence = vec![(0.0, 0.0); 120];
+    let before = GainDc {
+        per_index: 0.0,
+        seed: 1,
+        before_gain: (10f64.powf(-50.0 / 20.0), 0.0),
+    };
+    let t = agc().run_dc(&silence, Some(&before));
+    assert_eq!(t, agc().run(&level(-50.0, 120)));
+    assert_eq!(t.changes.last(), Some(&(45, 40.0)));
+    // An offset of 1.5 at every index (between the large and the both threshold) is a
+    // large overload at every examined sample: 2 dB down every third sample to the lowest
+    // gain, no lock. Without the offset silence changes nothing before its lock.
+    let per = GainDc {
+        per_index: 1.5,
+        seed: 1,
+        before_gain: (0.0, 0.0),
+    };
+    let t = agc().run_dc(&silence, Some(&per));
+    assert_eq!(&t.changes[..3], [(0, 70.0), (1, 68.0), (4, 66.0)]);
+    assert_eq!(*t.gain_db.last().unwrap(), 0.0);
+    assert!(t.locks.is_empty());
+    assert_eq!(agc().run_dc(&silence, None), agc().run(&silence));
+    assert_eq!(agc().run(&silence).changes[..1], [(0, 70.0)]);
 }

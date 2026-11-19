@@ -385,6 +385,12 @@ impl FastAttackAgc {
     /// The gain the control gives each sample of `x` (the signal before the gain), starting
     /// in peak detection at the maximum gain. A decision at sample n acts from n + 1.
     pub fn run(&self, x: &[Sample]) -> AgcTrace {
+        self.run_dc(x, None)
+    }
+
+    /// [`FastAttackAgc::run`] with the chain's DC offset at each gain added after the gain,
+    /// where the detectors measure: an offset is a signal to them like any other.
+    pub fn run_dc(&self, x: &[Sample], dc: Option<&GainDc>) -> AgcTrace {
         enum State {
             /// Peak detection and power measurement; `since` is the first sample at the
             /// present gain (or of the state), `look` the first sample the peak detectors
@@ -413,12 +419,13 @@ impl FastAttackAgc {
         };
         // Power after the gain, per sample, for the locked state's window.
         let mut powers: Vec<f64> = Vec::with_capacity(x.len());
+        let mut offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
         for (n, s) in x.iter().enumerate() {
             t.gain_db.push(gain);
             let g = 10f64.powf(gain / 20.0);
             // A sample that is not a number is no signal.
             let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
-            let (re, im) = (finite(g * s.0), finite(g * s.1));
+            let (re, im) = (finite(g * s.0 + offset.0), finite(g * s.1 + offset.1));
             let peak = re.abs().max(im.abs());
             let power = re * re + im * im;
             powers.push(power);
@@ -509,6 +516,7 @@ impl FastAttackAgc {
             }
             if next != gain {
                 gain = next;
+                offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
                 t.changes.push((n + 1, gain));
             }
         }

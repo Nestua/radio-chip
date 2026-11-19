@@ -399,7 +399,7 @@ archive copy, read by a research agent on 2026-11-19; pages as it reported them)
   the driver's documentation disagree on the order of the event bits. To be read from
   Analog Devices' own copy when R1 configures the chip.
 
-**Gate (G1):** `cargo test -p radio-phy --test g1_agc` — 14 pass; the new one is
+**Gate (G1):** `cargo test -p radio-phy --test g1_agc` — 14 pass at this point; the new one is
 `dc_follows_the_gain_index_and_the_gain`: on a trace written by hand (gains 70, 60, 70,
 60, 40 dB) the before-gain part is the input offset times 10^3.5, 10³ and 10²; the
 per-index part has its magnitude at every state, the same value when an index returns,
@@ -415,6 +415,20 @@ the trace; the index floored; the before-gain part scaled as a power; the seed i
 the index ignored; the imaginary part from the cosine; the before-gain part missing from
 Q; the phases not those of `gain_states`. The test was written with the model and passed
 at once, so these ten runs are what shows it can fail.
+
+**After the pre-PR review (2026-11-19):** `FastAttackAgc::run_dc` adds the offset after the
+gain inside the control's loop, where its detectors measure (the first measurement ran the
+control on the signal alone). Test `the_gain_control_sees_the_dc_offset`: silence with an
+offset before the gain of −50 dB is, to the detectors, the constant of the first
+hand-worked case and gives its trace change for change; an offset of 1.5 at every index
+steps the gain down 2 dB every third sample to its lowest; without an offset `run_dc` is
+`run`. The first test gained: directions over the indices 0 to 73 in every quadrant with a
+mean near the centre; a negative gain is another index than its mirror; a gain that is not
+a number gives index 0 without the before-gain part. `g1_agc`: 15 pass. Mutations (6 more,
+each fails): the offset not added in the control; not updated at a gain change; directions
+over half a circle; the index's sign dropped; either guard against a gain that is not a
+number removed. The reviewer's five survivors are among these and the DC blocker's
+(`rx_front.md`).
 
 **Measured with it:** `rxfront agcdc`, `docs/gates/rx_front.md` (2026-11-19, the DC blocker
 at a gain change).

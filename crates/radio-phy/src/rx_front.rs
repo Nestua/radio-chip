@@ -291,15 +291,15 @@ impl DcBlocker {
 
     /// Scales the estimate by a gain change of `gain_db` (amplitude 10^(g/20)): exact for
     /// the part of the DC offset that arises before the gain that changed. A change that is
-    /// not a finite number is ignored.
+    /// not a finite number is ignored. It acts while held too.
     pub fn rescale(&mut self, gain_db: f64) {
         let g = 10f64.powf(gain_db / 20.0);
-        if g.is_finite() {
+        if gain_db.is_finite() && g.is_finite() {
             self.m = (self.m.0 * g, self.m.1 * g);
         }
     }
 
-    /// Restarts the gear from the present estimate at μ = 2^(−k) (`k` capped at the
+    /// Restarts the gear from the present estimate (a hold stays as it is) at μ = 2^(−k) (`k` capped at the
     /// steady-state shift): 2^k samples at 2^(−k), 2^(k+1) at the next, as at start-up from
     /// its sample 2^k − 1.
     pub fn restart(&mut self, k: u32) {
