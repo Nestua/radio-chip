@@ -57,3 +57,36 @@ Mutation: 3/4 pattern 111001 → 110110 fails I-16 and the whole-frame samples.
 ## Open questions
 1. G3 (RTL) belongs to R2. Puncturing makes the output rate uneven, so the RTL needs a
    valid/ready output or a documented fixed duty cycle.
+
+## 2026-11-19 · G3 · RTL (for the silicon probe, R0-14a)
+
+**Block:** `hw/rtl/conv_encoder.sv`, the rate-1/2 encoder (golden:
+`ConvolutionalEncoder::encode_bit`). One bit per `in_valid`, the pair (A, B) one clock edge
+later; `clear` returns the state to zero for the next frame. Puncturing is not in the block:
+it steals output bits and belongs to the consumer.
+
+**Vectors** (`rvec conv_encoder`): 65 frames, each from state 0: all zeros, all ones, a single
+one (the impulse response, which is the generators), alternating bits, one bit, and 60 random
+frames of 1 to 600 bits.
+
+**Evidence** (`make -C hw conv_encoder`): 17 941 bits, 0 mismatches.
+- An idle cycle after every 3rd bit and two after every 7th, with the inverted bit on the
+  idle input; each pair exactly one edge after its input; no output on an idle cycle.
+- A reset instead of `clear` before every third frame, with a bit in flight that must not come
+  out.
+- A frame ending in ones fed twice without `clear`: the second pass must differ from the run
+  from state 0 (the first form of this check used the last random frame, which happens to
+  end in six zeros, and failed for that reason).
+- The stub fails with 13 330 mismatches.
+
+**Mutations** (each built from scratch)
+| Mutation | Mismatches |
+|---|---|
+| A reads D4 instead of D5 | 8788 |
+| B without D1 | 8949 |
+| A and B swapped | 8845 |
+| shift direction | 13 337 |
+| `clear` ignored | 177 |
+| state moves on idle cycles | 13 318 |
+| valid not cleared by reset | 17 |
+| state not cleared by reset or `clear` | 266 |

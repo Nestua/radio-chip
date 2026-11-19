@@ -16,13 +16,14 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler round_sat ltf_corr cordic nco det latch
+VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch
 BLOCKS    := ram $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
 GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
 # Sources and top module per block, packages first.
 TOP_ram       := ram_bank
 TOP_scrambler := scrambler
+TOP_conv_encoder := conv_encoder
 TOP_round_sat := round_sat_bank
 TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
@@ -31,6 +32,7 @@ TOP_det       := det_chain
 TOP_latch     := latch_chain
 SRC_ram       := rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv tb/ram_bank.sv
 SRC_scrambler := rtl/scrambler.sv
+SRC_conv_encoder := rtl/conv_encoder.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
 SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
 SRC_cordic    := $(GEN_RTL) rtl/cordic.sv
@@ -61,6 +63,12 @@ scrambler: vectors/scrambler.txt
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/scrambler --top-module scrambler \
 		$(SRC_scrambler) tb/tb_scrambler.cpp -o sim_scrambler
 	./obj_dir/scrambler/sim_scrambler vectors/scrambler.txt
+
+conv_encoder: vectors/conv_encoder.txt
+	rm -rf obj_dir/conv_encoder && mkdir -p obj_dir/conv_encoder
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/conv_encoder --top-module conv_encoder \
+		$(SRC_conv_encoder) tb/tb_conv_encoder.cpp -o sim_conv_encoder
+	./obj_dir/conv_encoder/sim_conv_encoder vectors/conv_encoder.txt
 
 round_sat: vectors/round_sat.txt
 	rm -rf obj_dir/round_sat && mkdir -p obj_dir/round_sat
