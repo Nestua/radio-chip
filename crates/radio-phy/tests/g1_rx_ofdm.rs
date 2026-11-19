@@ -674,7 +674,7 @@ fn pilots_track_a_sample_clock_offset() {
                 "{rate:?} {octets} octets at {ppm:+} ppm: {} symbols, drift {last:+.2} samples, worst tracking error {worst:.3} samples",
                 d.timing.len()
             );
-            assert!(worst < 0.05, "{rate:?} at {ppm} ppm: {worst}");
+            assert!(worst < 0.004, "{rate:?} at {ppm} ppm: {worst}");
             let untracked = RxOfdmConfig {
                 timing_tracking: false,
                 ..cfg
@@ -690,5 +690,107 @@ fn pilots_track_a_sample_clock_offset() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn timing_loop_from_zero_has_no_standing_error() {
+    // Started from zero at +40 ppm the drift is a ramp of 0.0032 samples per symbol. The
+    // integral term must learn it: without it the loop would trail the ramp by rate/gain =
+    // 0.1 samples for ever.
+    let psdu = random_psdu(4095, &mut Rng::new(0x0f09_000a));
+    let mut x = frame(&psdu, Rate::R6, 0x33);
+    x.extend(vec![(0.0, 0.0); 16]);
+    let y = resample(&x, 40.0);
+    let d = decode_ppdu(&y, T1 - 4, &RxOfdmConfig::default()).unwrap();
+    assert_eq!(d.psdu, psdu);
+    let err = |i: usize| {
+        let dn = (128 + 16 + 80 * i + 32) as f64 - 64.0;
+        (d.timing[i] - 40e-6 * dn).abs()
+    };
+    let early = (0..200).map(err).fold(0.0, f64::max);
+    let late = (700..d.timing.len()).map(err).fold(0.0, f64::max);
+    println!("from zero at +40 ppm: worst error {early:.3} samples in the first 200 symbols, {late:.4} after 700");
+    assert!(late < 0.01, "standing error {late}");
+    assert!(early < 0.2, "pull-in error {early}");
+}
+
+#[test]
+fn window_follows_a_drift_longer_than_the_guard_interval() {
+    // Within the standard's ±40 ppm and 4095 octets the drift stays under 4.4 samples, which a
+    // window with a back-off survives without moving (with some inter-symbol interference at
+    // the end). To gate the move itself: ten times the worst case, ±400 ppm over 5.5 ms, a
+    // drift of 44 samples, almost three guard intervals. Only a window that walks decodes it.
+    let mut rng = Rng::new(0x0f09_000b);
+    let cfg = RxOfdmConfig::default();
+    let psdu = random_psdu(4095, &mut rng);
+    let mut x = frame(&psdu, Rate::R6, 0x1c);
+    x.extend(vec![(0.0, 0.0); 80]);
+    for ppm in [400.0, -400.0] {
+        let y = resample(&x, ppm);
+        let d = decode_ppdu_from(&y, T1 - 4, &cfg, Tracking::from_clock_offset(ppm)).unwrap();
+        assert_eq!(d.psdu, psdu, "{ppm} ppm");
+        let last = d.timing.last().copied().unwrap();
+        let dn = (128 + 16 + 80 * (d.timing.len() - 1) + 32) as f64 - 64.0;
+        println!("{ppm:+} ppm: drift tracked to {last:+.2} samples");
+        assert!((last - ppm * 1e-6 * dn).abs() < 0.02, "{ppm} ppm: {last}");
+        assert!(last.abs() > 43.0);
+    }
+}
+
+#[test]
+fn slope_and_phase_on_unequal_pilots() {
+    // One symbol built in the frequency domain: Z(k) = H(k)·X(k)·e^(j(φ + kθ)) with a known
+    // common phase φ and slope θ (a window 0.3 samples late), a channel whose pilots at ±21 are
+    // in a null (and carry garbage) and whose pilots at ±7 differ fivefold in gain. The loop,
+    // with its gain at 1, must return θ, φ and the transmitted points.
+    let mut rng = Rng::new(0x0f09_000c);
+    let m = Modulation::Qam16;
+    let groups: Vec<usize> = (0..48).map(|_| (rng.next_u64() % 16) as usize).collect();
+    let points: Vec<_> = groups
+        .iter()
+        .map(|&g| map_group(&bits(g, 4), m).unwrap())
+        .collect();
+    let clean = modulate_symbol_f64(&points, m, 5).unwrap();
+    let x = radio_phy::channel::fft(&clean[16..]).unwrap();
+    let mut h: ChannelEstimate = [(0.0, 0.0); 64];
+    for k in (-26i8..=26).filter(|k| *k != 0) {
+        let (mag, ph) = (0.3 + 1.2 * rng.uniform(), 2.0 * PI * rng.uniform());
+        h[fft_bin(k)] = (mag * ph.cos(), mag * ph.sin());
+    }
+    h[fft_bin(21)] = (1e-4, 2e-4);
+    h[fft_bin(-21)] = (-2e-4, 1e-4);
+    h[fft_bin(7)] = (1.5, 0.0);
+    h[fft_bin(-7)] = (0.0, 0.3);
+    let (phi, theta) = (0.4, 0.3 * 2.0 * PI / 64.0);
+    let mut z = vec![(0.0, 0.0); 64];
+    for k in (-26i8..=26).filter(|k| *k != 0) {
+        let b = fft_bin(k);
+        let a = phi + f64::from(k) * theta;
+        let v = (
+            x[b].0 * h[b].0 - x[b].1 * h[b].1,
+            x[b].0 * h[b].1 + x[b].1 * h[b].0,
+        );
+        z[b] = (v.0 * a.cos() - v.1 * a.sin(), v.0 * a.sin() + v.1 * a.cos());
+    }
+    z[fft_bin(21)] = (0.02, -0.05);
+    z[fft_bin(-21)] = (-0.04, 0.01);
+    let window = ifft(&z).unwrap();
+    let cfg = RxOfdmConfig {
+        timing_gain: 1.0,
+        timing_rate_gain: 0.0,
+        ..RxOfdmConfig::default()
+    };
+    let mut tracking = Tracking::default();
+    let eq = equalise(&window, &h, 5, m, &cfg, &mut tracking).unwrap();
+    println!(
+        "slope {:.6} (true {theta:.6}), common phase {:.6} (true {phi})",
+        tracking.slope, eq.common_phase
+    );
+    assert!((tracking.slope - theta).abs() < 1e-4);
+    assert!((eq.common_phase - phi).abs() < 1e-3);
+    assert_eq!(tracking.shift, 0);
+    for (v, p) in eq.points.iter().zip(&points) {
+        assert!((v.0 - f64::from(p.i)).abs() < 0.02 && (v.1 - f64::from(p.q)).abs() < 0.02);
     }
 }

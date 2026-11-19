@@ -8,7 +8,8 @@
 //! - `tgn`: the same through static TGn B and D channels, a new channel per frame.
 //! - `sfo`: frames lost against the sample-clock offset and the frame's duration.
 //! - `timing`: candidates for the timing loop's gains near 10 % PER.
-//! - `soft`: PER against the soft values' width and clip level, AWGN and TGn B and D.
+//! - `soft`, `soft2`: PER against the soft values' width and clip level, AWGN and TGn B and D
+//!   (a wide survey, then the candidates around a step of 0.1).
 //!
 //! Every frame has a clock offset between the two ends (uniform in ±40 ppm unless stated) that
 //! sets both its CFO and its sample-clock offset, at a 5.8 GHz carrier.
@@ -430,10 +431,10 @@ fn main() -> ExitCode {
                 );
             }
         }
-        "soft" => {
+        "soft" | "soft2" => {
             // Soft-value width and clip: what the Viterbi decoder is handed. Fine soft first.
-            let mut rx = vec![receiver("fine", true, fine())];
-            for (name, soft_max, clip) in [
+            // `soft` is the wide survey; `soft2` the candidates around a step of 0.1.
+            let wide: &[(&'static str, i32, f64)] = &[
                 ("4b/1.5", 7, 1.5),
                 ("4b/3", 7, 3.0),
                 ("4b/6", 7, 6.0),
@@ -442,7 +443,19 @@ fn main() -> ExitCode {
                 ("5b/6", 15, 6.0),
                 ("6b/3", 31, 3.0),
                 ("6b/6", 31, 6.0),
-            ] {
+            ];
+            let near: &[(&'static str, i32, f64)] = &[
+                ("4b/0.75", 7, 0.75),
+                ("4b/1", 7, 1.0),
+                ("5b/1", 15, 1.0),
+                ("5b/1.5", 15, 1.5),
+                ("5b/2", 15, 2.0),
+                ("6b/1.5", 31, 1.5),
+                ("6b/2", 31, 2.0),
+                ("6b/3", 31, 3.0),
+            ];
+            let mut rx = vec![receiver("fine", true, fine())];
+            for &(name, soft_max, clip) in if cmd == "soft" { wide } else { near } {
                 rx.push(receiver(
                     name,
                     true,
@@ -480,7 +493,7 @@ fn main() -> ExitCode {
         "sfo" => sfo(n.unwrap_or(40)),
         "timing" => timing(n.unwrap_or(300)),
         _ => {
-            eprintln!("usage: rxper awgn|tgn|sfo|timing|soft [frames]");
+            eprintln!("usage: rxper awgn|tgn|sfo|timing|soft|soft2 [frames]");
             return ExitCode::from(2);
         }
     }
