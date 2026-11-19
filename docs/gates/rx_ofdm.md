@@ -21,8 +21,8 @@ float. Mirror of `ppdu.rs` (R0-06); feeds `viterbi.rs` (R0-10); fed by `rx_front
 - **The loop's start:** from the clock offset the front's CFO implies, ppm = −CFO / carrier
   (`Tracking::from_clock_offset`). Both ends derive carrier and sample clock from one
   oscillator (§17.3.9.5–6 for the transmitter; our receiver by design). Started from zero
-  (`decode_ppdu`) the loop still pulls in, slowly: enough for BPSK to 16-QAM at ±40 ppm, not
-  for 64-QAM.
+  (`decode_ppdu`) the loop still pulls in, slowly: at ±40 ppm that costs 64-QAM frames near
+  the sensitivity limit (measurements below).
 - **Common phase:** φ = ∠Σ P(k)·e^(−j·k·slope), removed from every data subcarrier.
 - **Equaliser:** point(k) = Z(k)·H*(k)·e^(−j(φ + k·slope)) / (|H(k)|²·K_MOD), on the integer
   grid of the mapper (±1, ±3, ±5, ±7). Weight w(k) = |H(k)|² over the mean |H|² of the 52 used
@@ -55,7 +55,8 @@ tracking, a SIGNAL plausibility check beyond parity, anything for HT/HE.
 | 5 | Textbook loss of a two-symbol least-squares estimate: error vector 1.5 σ², 1.76 dB | `least_squares_estimate_raises_the_error_vector_by_1_76_db` |
 | 6 | CommPy's soft-decision Viterbi BER (black box, ADR 0005) through demapper, deinterleaver, depuncturer and decoder | `coded_bit_error_rate_matches_commpy` |
 | 7 | A known residual CFO: the common phase reported per symbol | `pilots_track_a_residual_frequency_offset` |
-| 8 | A known sample-clock offset: the timing drift reported per symbol | `pilots_track_a_sample_clock_offset` |
+| 8 | A known sample-clock offset: the timing drift reported per symbol | `pilots_track_a_sample_clock_offset`, `timing_loop_from_zero_has_no_standing_error`, `window_follows_a_drift_longer_than_the_guard_interval` |
+| 9 | A symbol built in the frequency domain with a known slope and common phase, on a channel with two pilots in a null and two of unequal gain | `slope_and_phase_on_unequal_pilots` |
 
 This closes the receive half of the R0 exit gate on a clean channel: the model decodes the
 standard's worked example from the standard's own samples.
@@ -81,12 +82,49 @@ standard's worked example from the standard's own samples.
   0.2 ppm off: all decoded; the tracked drift (up to ±4.38 samples over 1367 symbols, with
   window moves) within 0.001 samples of ppm·Δn; lost without the timing loop. Started from
   zero, 6 and 24 Mb/s still decode.
+- Started from zero at +40 ppm: the loop trails by at most 0.073 samples while it pulls in and
+  by 0.0009 after 700 symbols (no standing error: the integral term learns the ramp).
+- The window move: within the standard's limits (±40 ppm, 4095 octets) the drift stays under
+  4.4 samples, and a window with a back-off decodes clean frames without moving. Its gate is
+  therefore ten times the worst case: ±400 ppm over 5.5 ms, 43.7 samples of drift, decoded.
+- Slope and common phase on unequal pilots: slope 0.029452 for 0.029452, phase 0.399999 for
+  0.4, every point within 0.02 of the grid.
 - Soft-value contract: a noiseless BPSK point on a mean-gain subcarrier is ±5, 1.5 and beyond
   ±7, weight 0 gives 0 (`soft_value_contract`), and the values come back in coded order.
 - Channel-state weights: two equal paths two samples apart (nulls near k = ±16), 12 Mb/s at
   7 dB: 0 of 150 frames lost; 130 of 150 without the weights (mutation).
 - Through the float front (acquisition, CFO correction) at every modulation, AWGN and TGn D:
   `through_the_front_and_a_channel`.
+
+**Mutations** (`rx_ofdm.rs`, one at a time; every one fails the tests named)
+| Mutation | Fails |
+|---|---|
+| estimate from T1 only | error vector |
+| sign of bit 0 | 8 tests |
+| last fold of 64-QAM | 5 tests |
+| deinterleaving direction | 6 tests |
+| pilot base signs ignored | CFO tracking, through the front |
+| pilot polarity ignored | 3 tests |
+| no channel-state weights | notched channel (130 of 150 frames lost) |
+| weights not normalised | CommPy BER |
+| symbol start without the guard interval | 5 tests |
+| termination without the tail | 4 tests |
+| no parity check | SIGNAL errors |
+| LENGTH MSB first | 5 tests |
+| octets MSB first | 3 tests |
+| grid without K_MOD | true-channel error rate, all rates, through the front |
+| soft scale ignores the clip | CommPy BER, soft-value contract |
+| no derotation; derotation sign | CFO tracking, through the front |
+| slope error sign | all rates, SFO tracking |
+| slope not applied to the data | SFO tracking |
+| window moves the wrong way; no move; one way only | SFO tracking; long drift |
+| rate never updated | no standing error |
+| start with half the rate; start without the drift before SIGNAL | SFO tracking (bound 0.004 samples) |
+| inner pilot pair ignored; pairs unweighted; common phase before the slope is removed | unequal pilots |
+
+The first run of the timing loop's mutations left six alive ("no window move", "rate never
+updated", both start errors, "inner pair ignored", "common phase before slope removal"); the
+three tests of references 8 and 9 beyond the first were written for them.
 
 **Two tests were wrong before the receiver was, and the receiver showed it**
 - The first form of reference 5 expected the 1.76 dB in BPSK hard decisions. It is not there:
@@ -127,7 +165,35 @@ frame)
   subcarriers round to 0 (erasures) and strong ones clip, and a rate-3/4 code has no
   redundancy to spare. At 9 Mb/s in TGn B the 4-bit curve does not reach 1 % by 20 dB. This is
   open question 1 of `viterbi.md`, answered: the format has to be chosen again on the whole
-  receiver in fading. `reports/rx_ofdm_soft.txt` is the first sweep for that choice.
+  receiver in fading.
+
+**Soft-value formats** (`rxper soft`, `rxper soft2`; `reports/rx_ofdm_soft.txt`,
+`rx_ofdm_soft2.txt`; 200 and 300 frames per point). Loss against fine soft values (8 bits,
+clip 6) at 10 % PER, the worst of the eight rates in each channel:
+
+| Format (bits / clip) | Step | AWGN | TGn B | TGn D |
+|---|---|---|---|---|
+| 4 / 1.5 (today) | 0.21 | 0.23 dB | 1.3 dB | 3.2 dB |
+| 4 / 1 | 0.14 | 0.56 | 0.58 | 1.07 |
+| 4 / 0.75 | 0.11 | 1.04 | 0.35 | 0.72 |
+| 4 / 3 | 0.43 | 0.38 | no crossing | no crossing |
+| 5 / 1 | 0.067 | 0.55 | 0.19 | 0.31 |
+| 5 / 1.5 | 0.10 | 0.14 | 0.35 | 0.71 |
+| 5 / 2 | 0.13 | 0.14 | 0.50 | 0.96 |
+| 5 / 3 | 0.20 | 0.09 | 0.96 | 2.5 |
+| 6 / 1.5 | 0.048 | 0.22 | 0.07 | 0.20 |
+| 6 / 2 | 0.065 | 0.09 | 0.10 | 0.33 |
+| 6 / 3 | 0.097 | 0.08 | 0.35 | 0.71 |
+
+- Fading needs a small step: the weak subcarriers' values must not round to 0. AWGN needs
+  the clip at 1.5 or more for 16- and 64-QAM. Four bits cannot have both; five nearly;
+  six bits with a clip of 1.5 to 2 is the first format within about 0.2 dB everywhere.
+- The figures carry about ±0.15 dB of statistical noise (200–300 frames per point, crossings
+  interpolated on 1 and 3 dB grids). They rank the formats; the G2 decision needs the paired
+  method of `g2 viterbi` on this receiver.
+- Six-bit soft values widen the decoder's path metrics from 9 to 11 bits (2·24·31 < 2¹¹).
+- Not tried: a format with less dynamic range to cover (weights limited or compressed) at
+  four or five bits.
 
 **Sample-clock offset** (40 frames per cell, high SNR): with the timing loop, no frame is lost
 at any length, rate or offset up to ±40 ppm, started from the CFO or from zero. Without it,
