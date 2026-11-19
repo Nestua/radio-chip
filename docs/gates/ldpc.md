@@ -1,7 +1,8 @@
 # Gate journal: HT LDPC codes (R0-12)
 
-Block: the twelve LDPC codes of 802.11n, their encoder, the PPDU encoding process, and (next)
-the decoder. Model: `crates/radio-phy/src/ldpc.rs`, tables `ldpc_tables.rs`.
+Block: the twelve LDPC codes of 802.11n, their encoder, the PPDU encoding process, and the
+decoders. Model: `crates/radio-phy/src/ldpc.rs`, tables `ldpc_tables.rs`, decoders
+`ldpc_decoder.rs`.
 
 ## 2026-11-19 · G0 · definitions
 
@@ -112,3 +113,106 @@ the local fixture: `ANNEX_LDPC_FIXTURE=… cargo test … -- --include-ignored`,
    R0's scope; the plan takes N_CBPS and m_STBC as numbers.
 4. `ldpc_tables.rs` is generated from a document CI does not have, so CI cannot regenerate
    it as it does `hw/vectors/`: the outside copy's hashes are its guard there.
+
+## 2026-11-19 · G0 · decoder definitions
+
+The standard defines the codes, not a decoder. Ours, in `ldpc_decoder.rs`:
+
+- **Soft value:** a log-likelihood ratio ln(P(0)/P(1)): positive says 0, 0 is an erasure.
+- **Float reference** (`decode_float`): belief propagation with the exact check rule
+  2·atanh(Π tanh(m/2)) or min-sum with a scale, on a flooding schedule (all checks, then
+  all bits) or a layered one (check after check, each using the totals the checks before it
+  updated). Stops when every check holds on the hard decisions; 0 iterations if the input
+  already is a codeword.
+- **Hardware algorithm** (`decode_fixed`, `MinSumConfig`): layered normalised min-sum in
+  integers. Checks in the order of `LdpcCode::checks` (block row after block row; the Z
+  checks of a block row share no bit). Per check: a bit's message is its total minus this
+  check's last message, saturated to the total's width; the new message is the sign product
+  of the others (0 counts as positive) and `(min · scale_num) >> scale_shift`, saturated to
+  the message width; the new total is message plus new message, saturated. Hard decision 1
+  where the total is negative. Two minima and the position of the first are all a check
+  needs to keep. Widths, the factor and the iteration count are parameters: G2 chooses.
+- **PPDU side** (`LdpcPlan::soft_codewords`, `payload`): shortened bits enter as a sure 0,
+  punctured bits as 0, the soft values of repeated bits are added to their originals.
+
+## 2026-11-19 · G1 · decoders
+
+**References we did not write**
+| # | Reference | Test (`radio-phy/tests/g1_ldpc_decoder.rs`) |
+|---|---|---|
+| 1 | The check rules by enumeration: the exact rule is the log-ratio of the probabilities that the other bits of a check have even and odd parity, summed over all their 2^(d−1) values; min-sum is the same with the best even and the best odd assignment. 400 random checks of 2 to 10 bits, some with an erasure | `check_rules_are_the_enumerated_ones` |
+| 2 | An outside decoder as a black box: CommPy 0.8.0 `ldpc_bp_decode` (sum-product and min-sum, flooding, 50 iterations) on matrices expanded from the outside copy of the prototypes, so nothing of our model is on that side (`tools/ref/ldpc_ber_commpy.py`; all-zero codeword, BPSK, AWGN; 5000 blocks per point). Ten points of three codes, block error rates 0.4 % to 73 % | `flooding_error_rates_match_commpy` |
+| 3 | The encoder (held by the standard's worked examples): six PPDUs, among them both examples' shapes, come back through puncturing, shortening and repetition, in the float and in the fixed decoder | `a_ppdu_comes_back_through_shortening_puncturing_and_repetition`, `soft_codewords_put_every_value_in_its_place` |
+
+**Float flooding decoder against CommPy.** The test runs 400 to 4000 blocks per point (enough
+for about twenty block errors where the reference has few) and asks for agreement within
+four standard errors of both sides, on the block error rate at every point and on the bit
+error rate where at least ten blocks were wrong. Run once with 5000 blocks at every point
+(the same test with its block count raised, release build, 35 s; not committed that way):
+
+| Code | Rule | Eb/N0 | BER ours | BER CommPy | BLER ours | BLER CommPy |
+|---|---|---|---|---|---|---|
+| (648, 1/2) | sum-product | 1.0 dB | 3.46·10⁻² ± 0.07 | 3.44·10⁻² ± 0.07 | 0.350 | 0.348 |
+| | | 1.5 dB | 6.24·10⁻³ ± 0.35 | 6.49·10⁻³ ± 0.35 | 0.072 | 0.073 |
+| | | 2.0 dB | 6.4·10⁻⁴ ± 1.1 | 4.0·10⁻⁴ ± 0.8 | 0.009 | 0.006 |
+| (648, 1/2) | min-sum | 1.5 dB | 5.21·10⁻² ± 0.10 | 5.29·10⁻² ± 0.10 | 0.376 | 0.378 |
+| | | 2.0 dB | 8.10·10⁻³ ± 0.46 | 8.37·10⁻³ ± 0.46 | 0.067 | 0.069 |
+| | | 2.5 dB | 3.4·10⁻⁴ ± 1.0 | 5.2·10⁻⁴ ± 1.2 | 0.003 | 0.004 |
+| (648, 5/6) | sum-product | 3.0 dB | 1.26·10⁻² ± 0.02 | 1.30·10⁻² ± 0.02 | 0.430 | 0.443 |
+| | | 3.5 dB | 2.20·10⁻³ ± 0.11 | 2.24·10⁻³ ± 0.11 | 0.084 | 0.088 |
+| (1296, 3/4) | sum-product | 2.0 dB | 3.40·10⁻² ± 0.03 | 3.39·10⁻² ± 0.03 | 0.727 | 0.727 |
+| | | 2.5 dB | 4.85·10⁻³ ± 0.19 | 5.13·10⁻³ ± 0.19 | 0.128 | 0.135 |
+
+(± in units of the last power of ten.) The largest differences are about two standard
+errors. On the first run with 400 blocks two points looked better than CommPy by up to 3σ
+(1.5 dB sum-product, 2.0 dB min-sum); with 5000 blocks they are 0.5σ: noise, not a
+difference. The reference covers three of the twelve codes; the other nine share the
+decoder and differ in the matrix, which part 1 holds.
+
+**What has no outside reference** (held to the float flooding decoder, which has one)
+- The layered schedule: `layered_and_fixed_decoders_are_held_to_the_flooding_one`, (648, 1/2)
+  at 2.0 dB, 400 blocks, normalised min-sum 0.75: block errors flooding/50 9, layered/25 9,
+  layered/50 9, fixed/25 12; mean iterations of the decoded blocks 10.2, 5.7, 5.7, 5.8.
+  Layered needs 0.56 of flooding's iterations for the same result.
+- The fixed decoder: the same test (input at 8 units per unit of LLR, 10-bit messages,
+  12-bit totals: fine enough for rounding not to matter), and
+  `fixed_decoder_is_its_written_definition`: a second writing of the G0 definition without
+  the two-minima shortcut, compared bit for bit and in its iteration count on three codes ×
+  five width sets (down to 2-bit messages and 4-bit totals) × six noisy blocks. Our own
+  second reading, like the plan cases of part 1.
+- With the default widths and an input of 2 units per unit of LLR the fixed decoder loses
+  visibly (4 block errors of 300 against 1 at 2.5 dB in a first run): the input scale and
+  the widths are G2's subject, not decided here. `MinSumConfig::default()` is a
+  placeholder until then.
+
+**Mutations** (each fails the tests named; `cp` + `touch` to restore)
+| Mutation | Fails |
+|---|---|
+| exact rule: tanh(x) for tanh(x/2) | enumeration, CommPy |
+| float min-sum: a bit's own magnitude not excluded | enumeration, CommPy, schedules |
+| fixed: own magnitude not excluded; own sign not excluded | PPDU round trip, schedules (and the definition test, added later) |
+| fixed: no normalisation | schedules, refusals |
+| fixed: message, total, or message to the check not saturated | survived at first; `fixed_decoder_is_its_written_definition` |
+| fixed: a zero message counts as negative | definition test, schedules |
+| fixed: input not saturated | survives: equivalent (a bit's total is first read by a check, which saturates it; nothing else reads it before) |
+| float layered reads the input instead of the running totals | schedules |
+| flooding reads the running totals (becomes layered) | schedules (iteration ratio) |
+| float: the stop test ignored | schedules (iteration counts) |
+| punctured bits entered as a sure zero | value placement, PPDU round trip |
+| repeated values not added | value placement |
+
+**Evidence:** `cargo test -p radio-phy --test g1_ldpc_decoder` — 7 pass (6 s in a debug
+build); `scripts/check.sh` green; this entry's pull request.
+
+**Open questions** (decoder)
+1. G2: the input scale (units per LLR, what the demapper delivers), message and total
+   widths, the normalisation factor, the iteration count; loss in dB against float
+   sum-product at a block error rate of 10 % and 1 %, on the codes and lengths the TDMA
+   profile will use. The widths are the founder's to approve, as the Viterbi's were.
+2. No fading or real demapper yet: the LLRs here are exact for BPSK in AWGN. The decoder
+   meets the receiver (R0-09) when the HT mapping exists or the TDMA profile is defined.
+3. The stop rule tests every check after each pass. Hardware will want it cheaper (the
+   checks of the last layers, or the syndrome computed on the fly): equivalent or not is to
+   be decided with the RTL.
+4. An error floor cannot be seen at these block counts (the lowest point has 21 wrong
+   blocks of 5000).
