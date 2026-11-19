@@ -1,9 +1,11 @@
 //! G1 gate of the fast-attack gain control model (R0-07e, `radio_phy::channel::FastAttackAgc`).
 //!
-//! Reference we did not write: the published behaviour of the AD9361's fast-attack mode
-//! (Analog Devices UG-570, "Fast Attack AGC Mode", Fig. 25 and Table 20), as tabulated in
-//! `docs/gates/channel.md` (G0, R0-07e). The cases below are worked by hand from that table
-//! in the comments; the model must give every gain change at its sample.
+//! Reference: the published behaviour of the AD9361's fast-attack mode (Analog Devices
+//! UG-570, "Fast Attack AGC Mode", Fig. 25 and Table 20), as tabulated in
+//! `docs/gates/channel.md` (G0, R0-07e). The states, steps and counts are the document's;
+//! the exact sample each falls on is our reading of it (G0 lists what the model defines).
+//! The cases below are worked by hand from that table in the comments; the model must give
+//! every gain change at its sample. A capture of the chip (R1) is the reference this lacks.
 
 #![allow(clippy::unwrap_used)]
 
@@ -114,9 +116,10 @@ fn a_packet_after_noise_unlocks_the_gain() {
             (246, 40.0)
         ]
     );
-    // Without it, by the power: the mean of the last 64 samples is 10 dB above −30 dBFS
-    // from the first strong sample on ((100 + 63·0.001)/64 = 1.56 ≥ 0.01); eight samples in
-    // a row, 200 … 207: unlocked at 207, state 1 from 208, locked 45 samples later.
+    // Without it, by the power, which updates once per 64 samples from the lock at 26:
+    // 26 … 89, 90 … 153, 154 … 217. The third holds 18 strong samples, a mean of 28, far
+    // more than 10 dB above −30 dBFS: stronger from 217, stands eight samples, 217 … 224:
+    // unlocked at 224, state 1 from 225, locked 45 samples later.
     let t = FastAttackAgc {
         unlock_on_overload: false,
         ..agc()
@@ -124,35 +127,36 @@ fn a_packet_after_noise_unlocks_the_gain() {
     .run(&x);
     assert_eq!(
         (t.locks.clone(), t.unlocks.clone()),
-        (vec![26, 253], vec![207])
+        (vec![26, 270], vec![224])
     );
-    assert_eq!(changes(&t)[1], (209, 65.0));
+    assert_eq!(changes(&t)[1], (226, 65.0));
 }
 
 #[test]
 fn the_end_of_a_packet_unlocks_the_gain() {
     // −50 dB for 150 samples (locked at 40 from 45, −10 dBFS, a power of 0.1), then nothing.
-    // The mean of the last 64 samples is 0.1·(64 − k)/64 after k empty samples; 10 dB down
-    // is 0.01: k = 58 (0.0094; k = 57 gives 0.0109), sample 207. Eight in a row, 207 … 214:
-    // unlocked at 214, the maximum gain from 215. Then silence: quiet 215 … 218, power over
-    // 225 … 240 is nothing, no change, locked from 241.
+    // The power updates over 45 … 108, 109 … 172 and 173 … 236. The second holds 41 full
+    // samples of 64: a mean of 0.064, 2 dB down, not lost. The third is empty: lost from
+    // 236, stands eight samples, 236 … 243: unlocked at 243, the maximum gain from 244. Then
+    // silence: power over 254 … 269 is nothing, no change, locked from 270 on nothing, and
+    // nothing does not unlock it again.
     let mut x = level(-50.0, 150);
-    x.extend(vec![(0.0, 0.0); 150]);
+    x.extend(vec![(0.0, 0.0); 450]);
     let t = agc().run(&x);
     assert_eq!(
         (t.locks.clone(), t.unlocks.clone()),
-        (vec![45, 241], vec![214])
+        (vec![45, 270], vec![243])
     );
-    assert_eq!(changes(&t).last(), Some(&(215, 70.0)));
+    assert_eq!(changes(&t).last(), Some(&(244, 70.0)));
     // Staying instead of returning to the maximum.
     let t = FastAttackAgc {
         unlock_to_max: false,
         ..agc()
     }
     .run(&x);
-    assert_eq!(t.unlocks, [214]);
+    assert_eq!(t.unlocks, [243]);
     // In silence the lock change is the largest increase the range allows.
-    assert_eq!(changes(&t).last(), Some(&(241, 70.0)));
+    assert_eq!(changes(&t).last(), Some(&(270, 70.0)));
 }
 
 #[test]
@@ -250,8 +254,8 @@ fn gain_states_describe_the_transient_relative_to_the_last_gain() {
 #[test]
 fn the_locked_power_waits_for_a_whole_window() {
     // Locked from 26 on −100 dB; −50 dB from sample 30, the overload exit off. The power
-    // is first looked at when 64 samples have passed since the lock, at sample 89 (26 … 89);
-    // it is far above by then: eight in a row, 89 … 96, unlocked at 96.
+    // first updates when 64 samples have passed since the lock, at sample 89 (26 … 89); it
+    // is far above: the comparison stands eight samples, 89 … 96, unlocked at 96.
     let mut x = level(-100.0, 30);
     x.extend(level(-50.0, 100));
     let t = FastAttackAgc {
@@ -296,7 +300,15 @@ fn packets_are_still_by_the_end_of_the_stf_and_inside_the_level_window() {
     const IDLE_DBFS: f64 = -30.0;
     let frame = packet();
     let p = mean_power(&frame);
-    let agc = FastAttackAgc::ad9361_reset(2);
+    // The reset values with the power measured over 16 samples, the shortest the chip
+    // allows (the reset value, 512, outlasts the preamble: see the last test), and the lock
+    // left on a large overload (by the power alone a strong packet clips for up to 72
+    // samples before the gain moves, and frames are lost: `rxfront agcmodel`).
+    let agc = FastAttackAgc {
+        power_samples: 16,
+        unlock_on_overload: true,
+        ..FastAttackAgc::ad9361_reset(2)
+    };
     let (cfg, fx) = (RxConfig::new(FS), FixedRxConfig::default());
     let mut rng = Rng::new(0xa6c2);
     for snr in [5.0, 12.0, 20.0, 30.0, 45.0, 60.0] {
@@ -343,5 +355,84 @@ fn packets_are_still_by_the_end_of_the_stf_and_inside_the_level_window() {
             let a = acquire_fixed(&adc, &cfg, &fx).unwrap();
             assert_eq!(a.fft_start, lead + 192 - backoff_samples(&cfg), "{snr} dB");
         }
+    }
+}
+
+#[test]
+fn details_the_first_cases_do_not_reach() {
+    // A settling delay shorter than the energy-detect count: the measurement still waits
+    // for the count. Quiet 0 … 3, power over 4 … 19, locked from 20.
+    let short = FastAttackAgc {
+        settling_delay: 2,
+        ..agc()
+    };
+    assert_eq!(short.run(&level(-90.0, 60)).locks, [20]);
+    // A decision at the last sample has no sample to act on: one sample of the strong
+    // signal decides a step that is not recorded, and 45 samples do not reach the lock.
+    assert_eq!(changes(&agc().run(&level(-50.0, 1))), [(0, 70.0)]);
+    let t = agc().run(&level(-50.0, 45));
+    assert!(t.locks.is_empty());
+    assert_eq!(changes(&t).last(), Some(&(19, 47.0)));
+    assert_eq!(agc().run(&[]).gain_db.len(), 0);
+    // The two thresholds are separate: locked at −10 dBFS (gain 40 from 45), the signal
+    // drops by 5 dB at sample 60. With 3 dB to lose it unlocks (the update at 108 holds 49
+    // of 64 samples 5 dB down: 3.4 dB; stands 108 … 115), with 10 dB it does not.
+    let mut x = level(-50.0, 60);
+    x.extend(level(-55.0, 200));
+    let quick = FastAttackAgc {
+        lost_db: 3.0,
+        ..agc()
+    };
+    assert_eq!(quick.run(&x).unlocks, [115]);
+    assert!(agc().run(&x).unlocks.is_empty());
+    // The overload exit is the large overload's: a rise of 9 dB after the lock (a peak of
+    // 0.89, above the small threshold and below the large; less than 10 dB) unlocks nothing.
+    let mut x = level(-50.0, 60);
+    x.extend(level(-41.0, 200));
+    assert!(agc().run(&x).unlocks.is_empty());
+    // A comparison must stand: with 100 samples to stand and 64 between updates, one
+    // strong window (154 … 217, as above) followed by quiet ones does not unlock.
+    let mut x = level(-100.0, 200);
+    x.extend(level(-50.0, 18));
+    x.extend(level(-100.0, 400));
+    let slow = FastAttackAgc {
+        unlock_on_overload: false,
+        exit_count: 100,
+        ..agc()
+    };
+    assert!(slow.run(&x).unlocks.is_empty());
+    // Nor do two strong windows with a quiet one between them add up: bursts in the
+    // windows 154 … 217 and 282 … 345 each stand 64 samples, never 100.
+    let mut x = level(-100.0, 200);
+    for _ in 0..2 {
+        x.extend(level(-50.0, 18));
+        x.extend(level(-100.0, 82));
+    }
+    x.extend(level(-100.0, 100));
+    assert!(slow.run(&x).unlocks.is_empty());
+    // Parameters given the wrong way round and samples that are not numbers do not panic.
+    let odd = FastAttackAgc {
+        min_gain_db: 80.0,
+        ..agc()
+    };
+    let _ = odd.run(&level(-90.0, 100));
+    let mut x = level(-50.0, 120);
+    // (Sample 35 is inside the power measurement, 29 … 44: 15 samples of 16 measure
+    // 0.3 dB less, and the lock change is the same.)
+    x[35] = (f64::NAN, f64::NAN);
+    let t = agc().run(&x);
+    assert!(t.gain_db.iter().all(|g| g.is_finite()));
+    assert_eq!(t.gain_db[119], 40.0);
+}
+
+#[test]
+fn the_reset_value_of_the_power_measurement_outlasts_the_preamble() {
+    // 512 samples of power from the last change: no lock inside 320 samples of preamble,
+    // whatever the level. This is why a receiver of 802.11 shortens it.
+    let reset = FastAttackAgc::ad9361_reset(2);
+    assert_eq!(reset.power_samples, 512);
+    for db in [-95.0, -70.0, -40.0] {
+        let t = reset.run(&level(db, 600));
+        assert!(t.locks[0] >= 522, "{db}: {:?}", t.locks);
     }
 }

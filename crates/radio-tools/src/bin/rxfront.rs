@@ -1202,54 +1202,74 @@ fn agcmodel(frames: usize) {
     const JUMP_DEG: f64 = 30.0;
     let cfg = RxConfig::new(FS);
     let fx = FixedRxConfig::default();
-    let frame = preamble();
+    // A packet long enough for its data symbols to matter: 1000 octets at 54 Mb/s.
+    let tx = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << tx.data.frac_bits());
+    let frame: Vec<C> = build_ppdu(&[0x5a; 1000], Rate::R54, 0x5d, &tx)
+        .map(|f| {
+            f.iter()
+                .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+                .collect()
+        })
+        .unwrap_or_default();
     let p = mean_power(&frame);
     let full = f64::from(ADC_FULL_SCALE);
     let b = backoff_samples(&cfg);
     let reset = FastAttackAgc::ad9361_reset(2);
-    let variants: [(&str, FastAttackAgc); 4] = [
-        ("reset values (unlock by power)", reset),
+    let short = |power_samples, unlock_on_overload| FastAttackAgc {
+        power_samples,
+        unlock_on_overload,
+        ..reset
+    };
+    let variants: [(&str, FastAttackAgc); 7] = [
         (
-            "reset values, unlock on a large overload",
+            "reset values (power over 512 samples, unlock by power)",
+            reset,
+        ),
+        ("power over 16 samples, unlock by power", short(16, false)),
+        (
+            "power over 16 samples, unlock on a large overload",
+            short(16, true),
+        ),
+        (
+            "power over 32 samples, unlock on a large overload",
+            short(32, true),
+        ),
+        (
+            "power over 64 samples, unlock on a large overload",
+            short(64, true),
+        ),
+        (
+            "power over 16 samples, unlock on a large overload, 1 clock per sample",
             FastAttackAgc {
+                power_samples: 16,
                 unlock_on_overload: true,
-                ..reset
+                ..FastAttackAgc::ad9361_reset(1)
             },
         ),
         (
-            "lock window 16, exit count 2, unlock on a large overload",
+            "power over 16 samples, unlock on a large overload, lock level −14 dBFS",
             FastAttackAgc {
-                unlock_on_overload: true,
-                lock_window: 16,
-                exit_count: 2,
-                ..reset
-            },
-        ),
-        (
-            "the same, stronger-signal threshold 6 dB",
-            FastAttackAgc {
-                unlock_on_overload: true,
-                lock_window: 16,
-                exit_count: 2,
-                stronger_db: 6.0,
-                ..reset
+                lock_dbfs: -14.0,
+                ..short(16, true)
             },
         ),
     ];
     println!(
         "# rxfront agcmodel: channel::FastAttackAgc (AD9361 reset values at 2 detector clocks per\n\
-         # sample unless stated), {frames} frames per point, noise at {IDLE_DBFS} dBFS at the largest\n\
+         # sample except where the section says otherwise), {frames} frames per point, noise at {IDLE_DBFS} dBFS at the largest\n\
          # gain, CFO uniform in ±235 kHz, RxFrontFixed behind a 12-bit ADC, phase jump ±{JUMP_DEG}° per\n\
          # gain change (assumed). Samples count from the STF's first (STF 0…159, LTF 160…319).\n\
          # moved = frames whose gain changed during the packet; last change: median / 95th\n\
          # percentile / latest, over those; ≤159 = frames whose gain is still from the end of the\n\
          # STF (unmoved frames count); level = the packet's RMS after the last change, dBFS,\n\
          # lowest / mean / highest; window = frames inside −15 … −3 dBFS; early = frames whose\n\
-         # gain changed in the 400 samples of noise before the packet."
+         # gain changed in the 400 samples of noise before the packet; data = frames whose gain\n\
+         # changed after the LTF (sample 320 on). The packet: 1000 octets at 54 Mb/s."
     );
     for (vi, (name, agc)) in variants.iter().enumerate() {
         println!(
-            "\n## {name}\n#  SNR  moved   last change (med/95%/max)  ≤159   level dBFS (min/mean/max)  window  early  acquired  timing   fine Hz"
+            "\n## {name}\n#  SNR  moved   last change (med/95%/max)  ≤159   level dBFS (min/mean/max)  window  early   data  acquired  timing   fine Hz"
         );
         for (si, snr) in [5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0]
             .into_iter()
@@ -1259,7 +1279,7 @@ fn agcmodel(frames: usize) {
             // Noise power p / 10^(snr/10) is IDLE_DBFS at the largest gain.
             let k = (10f64.powf((IDLE_DBFS - agc.max_gain_db + snr) / 10.0) / p).sqrt();
             let mut last: Vec<usize> = Vec::new();
-            let (mut still, mut window, mut early) = (0usize, 0usize, 0usize);
+            let (mut still, mut window, mut early, mut data) = (0usize, 0usize, 0usize, 0usize);
             let (mut lo, mut hi, mut sum) = (f64::INFINITY, f64::NEG_INFINITY, 0.0);
             let (mut acq, mut tim) = (0usize, 0usize);
             let mut sf = 0.0f64;
@@ -1285,6 +1305,7 @@ fn agcmodel(frames: usize) {
                     last.push(at);
                 }
                 still += usize::from(at.is_none_or(|a| a <= 159));
+                data += usize::from(at.is_some_and(|a| a >= 320));
                 let (settled, states) = t.gain_states(JUMP_DEG, &mut rng);
                 let level = 10.0 * (p * k * k).log10() + settled;
                 lo = lo.min(level);
@@ -1309,7 +1330,7 @@ fn agcmodel(frames: usize) {
                     .map_or("-".to_string(), |v| v.to_string())
             };
             println!(
-                "  {snr:>4} {:>6} {:>12} {:>6} {:>6} {:>6} {:>10.1} {:>7.1} {:>7.1} {window:>7} {early:>6} {acq:>9} {tim:>7} {:>9.0}",
+                "  {snr:>4} {:>6} {:>12} {:>6} {:>6} {:>6} {:>10.1} {:>7.1} {:>7.1} {window:>7} {early:>6} {data:>6} {acq:>9} {tim:>7} {:>9.0}",
                 last.len(),
                 pick(0.5),
                 pick(0.95),

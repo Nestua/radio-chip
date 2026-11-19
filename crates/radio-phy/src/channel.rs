@@ -321,9 +321,10 @@ pub struct FastAttackAgc {
     pub power_samples: usize,
     /// Level the lock change aims at, dBFS.
     pub lock_dbfs: f64,
-    /// Samples of the power measurement while locked.
+    /// Samples of the power measurement while locked: the power is compared once per
+    /// window, counted from the lock.
     pub lock_window: usize,
-    /// Samples in a row beyond a threshold that unlock the gain.
+    /// Samples a power comparison must stand to unlock the gain.
     pub exit_count: usize,
     /// Rise of the power that unlocks, dB.
     pub stronger_db: f64,
@@ -350,9 +351,12 @@ pub struct AgcTrace {
 
 impl FastAttackAgc {
     /// The AD9361's register reset values (UG-672) at `per_sample` detector clocks (ClkRF)
-    /// per sample, counts rounded up: 4, 8 and 20 clocks, 16 samples of power, lock level
-    /// −10 dBFS, 10 dB to unlock over 16 clocks, steps of 5, 2 and 2 dB. The peak thresholds
-    /// are the model's: full scale, 1 dB below it, and 6 dB above it for both detectors.
+    /// per sample, counts rounded up: 4, 8 and 20 clocks, 512 samples of power (64 while
+    /// locked), lock level −10 dBFS, 10 dB to unlock over 16 clocks, steps of 5, 2 and 2 dB.
+    /// The peak thresholds are the model's: full scale, 1 dB below it, and 6 dB above it for
+    /// both detectors. The overload exit is off (the documents are not clear on its reset
+    /// state, `docs/gates/channel.md`). A receiver of short packets shortens the power
+    /// measurement: `FastAttackAgc { power_samples: 16, ..FastAttackAgc::ad9361_reset(2) }`.
     pub fn ad9361_reset(per_sample: usize) -> Self {
         let per = per_sample.max(1);
         Self {
@@ -367,7 +371,7 @@ impl FastAttackAgc {
             peak_wait: 4usize.div_ceil(per),
             energy_detect: 8usize.div_ceil(per),
             settling_delay: 20usize.div_ceil(per),
-            power_samples: 16,
+            power_samples: 512,
             lock_dbfs: -10.0,
             lock_window: 64,
             exit_count: 16usize.div_ceil(per),
@@ -386,12 +390,13 @@ impl FastAttackAgc {
             /// present gain (or of the state), `look` the first sample the peak detectors
             /// examine (they are held in reset after a change), `sum` the power so far.
             Seeking { since: usize, look: usize, sum: f64 },
-            /// Locked from `since`, aiming at `level` (power); `beyond` counts the samples
-            /// in a row beyond a threshold, signed by the direction.
+            /// Locked from `since`, aiming at `level` (power); `stands` is the last power
+            /// comparison (1 stronger, −1 lost, 0 neither), `stood` the samples it has stood.
             Locked {
                 since: usize,
                 level: f64,
-                beyond: i64,
+                stands: i64,
+                stood: usize,
             },
         }
         let mut gain = self.max_gain_db;
@@ -411,7 +416,9 @@ impl FastAttackAgc {
         for (n, s) in x.iter().enumerate() {
             t.gain_db.push(gain);
             let g = 10f64.powf(gain / 20.0);
-            let (re, im) = (g * s.0, g * s.1);
+            // A sample that is not a number is no signal.
+            let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
+            let (re, im) = (finite(g * s.0), finite(g * s.1));
             let peak = re.abs().max(im.abs());
             let power = re * re + im * im;
             powers.push(power);
@@ -443,12 +450,14 @@ impl FastAttackAgc {
                         if n + 1 == measure_from + self.power_samples.max(1) {
                             let mean = *sum / self.power_samples.max(1) as f64;
                             let change = (self.lock_dbfs - 10.0 * mean.log10()).round();
-                            next = (gain + change).clamp(self.min_gain_db, self.max_gain_db);
+                            // Not `clamp`: it panics on a range given the wrong way round.
+                            next = (gain + change).min(self.max_gain_db).max(self.min_gain_db);
                             t.locks.push(n + 1);
                             state = State::Locked {
                                 since: n + 1,
                                 level: mean * 10f64.powf((next - gain) / 10.0),
-                                beyond: 0,
+                                stands: 0,
+                                stood: 0,
                             };
                         }
                     }
@@ -456,25 +465,34 @@ impl FastAttackAgc {
                 State::Locked {
                     since,
                     level,
-                    beyond,
+                    stands,
+                    stood,
                 } => {
                     let w = self.lock_window.max(1);
                     let mut unlock = self.unlock_on_overload && peak >= self.large_peak;
-                    if !unlock && n + 1 >= *since + w {
+                    // The power value updates once per window, counted from the lock; the
+                    // comparison stands until the next update.
+                    if (n + 1 - *since).is_multiple_of(w) {
                         let mean = powers[n + 1 - w..=n].iter().sum::<f64>() / w as f64;
-                        let dir = if mean >= *level * 10f64.powf(self.stronger_db / 10.0) {
+                        // A lock on nothing (level 0) is left by any power, never by less.
+                        let dir = if mean > 0.0
+                            && mean >= *level * 10f64.powf(self.stronger_db / 10.0)
+                        {
                             1
-                        } else if mean <= *level * 10f64.powf(-self.lost_db / 10.0) {
+                        } else if *level > 0.0 && mean <= *level * 10f64.powf(-self.lost_db / 10.0)
+                        {
                             -1
                         } else {
                             0
                         };
-                        *beyond = if dir != 0 && dir == beyond.signum() {
-                            *beyond + dir
-                        } else {
-                            dir
-                        };
-                        unlock = beyond.unsigned_abs() as usize >= self.exit_count.max(1);
+                        if dir != *stands {
+                            (*stands, *stood) = (dir, 0);
+                        }
+                    }
+                    if *stands != 0 {
+                        // Samples the comparison has stood, the update's own included.
+                        *stood += 1;
+                        unlock |= *stood >= self.exit_count.max(1);
                     }
                     if unlock {
                         t.unlocks.push(n);
