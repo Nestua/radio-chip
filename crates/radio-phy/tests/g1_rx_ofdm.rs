@@ -20,8 +20,8 @@
 use std::f64::consts::PI;
 
 use radio_phy::channel::{
-    awgn, erfc, fractional_delay, frequency_offset, ifft, mean_power, tgn_taps, Doppler, Multipath,
-    Rng, TgnModel,
+    awgn, erfc, fractional_delay, frequency_offset, ifft, mean_power, resample, tgn_taps, Doppler,
+    Multipath, Rng, TgnModel,
 };
 use radio_phy::mapper::{map_group, mean_energy};
 use radio_phy::modulation::Modulation;
@@ -29,8 +29,9 @@ use radio_phy::ofdm::{fft_bin, modulate_symbol_f64, IfftConfig};
 use radio_phy::ppdu::{build_ppdu, data_bits, long_training_sequence, Rate};
 use radio_phy::rx_front::{acquire, correct, RxConfig};
 use radio_phy::rx_ofdm::{
-    decode_data_bits, decode_ppdu, decode_signal, demap, equalise, estimate_channel, soft_bits,
-    ChannelEstimate, Equalised, RxOfdmConfig, RxOfdmError, Signal,
+    decode_data_bits, decode_ppdu, decode_ppdu_from, decode_signal, demap, equalise,
+    estimate_channel, soft_bits, ChannelEstimate, Equalised, RxOfdmConfig, RxOfdmError, Signal,
+    SymbolLog, Tracking,
 };
 
 type C = (f64, f64);
@@ -306,7 +307,15 @@ fn symbol_errors(
         };
         for (i, groups) in sent.iter().enumerate() {
             let start = 160 + 80 * i + 16;
-            let eq = equalise(&y[start..start + 64], &h, i + 1, m, &cfg).unwrap();
+            let eq = equalise(
+                &y[start..start + 64],
+                &h,
+                i + 1,
+                m,
+                &cfg,
+                &mut Tracking::default(),
+            )
+            .unwrap();
             assert_eq!(eq.points.len(), 48);
             for (v, &gidx) in eq.points.iter().zip(groups) {
                 let d = |p: &C| (p.0 - v.0).powi(2) + (p.1 - v.1).powi(2);
@@ -385,6 +394,8 @@ fn coded_bit_error_rate_matches_commpy() {
         soft_max: 255,
         clip: 4.0,
         pilot_tracking: false,
+        timing_tracking: false,
+        ..RxOfdmConfig::default()
     };
     let mut rng = Rng::new(0x0f09_0005);
     let mut h = [(0.0, 0.0); 64];
@@ -422,7 +433,16 @@ fn coded_bit_error_rate_matches_commpy() {
             let signal = Signal { rate, length: 125 };
             match decode_signal(&y, T1, &h, &cfg) {
                 Ok(s) if s == signal => {
-                    let (got, _) = decode_data_bits(&y, T1, &h, signal, &cfg).unwrap();
+                    let got = decode_data_bits(
+                        &y,
+                        T1,
+                        &h,
+                        signal,
+                        &cfg,
+                        &mut Tracking::default(),
+                        &mut SymbolLog::default(),
+                    )
+                    .unwrap();
                     errors += got[..1016]
                         .iter()
                         .zip(&sent[..1016])
@@ -616,5 +636,59 @@ fn pilots_track_a_residual_frequency_offset() {
             ..cfg
         };
         assert!(decode_ppdu(&y, T1 - 4, &untracked).map(|d| d.psdu) != Ok(psdu.clone()));
+    }
+}
+
+#[test]
+fn pilots_track_a_sample_clock_offset() {
+    // A receiver clock fast by p ppm reads the signal p·1e-6·Δn samples early Δn samples after
+    // the training field: the reference for the tracked timing. ±40 ppm is the standard's worst
+    // case (±20 ppm at each end, IEEE 802.11-2020 §17.3.9.5–6); the longest frames drift by more
+    // than four samples, past any fixed window.
+    let mut rng = Rng::new(0x0f09_0009);
+    let cfg = RxOfdmConfig::default();
+    for (rate, octets) in [
+        (Rate::R6, 4095usize),
+        (Rate::R24, 4095),
+        (Rate::R54, 4095),
+        (Rate::R54, 300),
+    ] {
+        let psdu = random_psdu(octets, &mut rng);
+        let mut x = frame(&psdu, rate, 0x61);
+        x.extend(vec![(0.0, 0.0); 16]);
+        for ppm in [40.0, -40.0, 13.0] {
+            let y = resample(&x, ppm);
+            // The loop starts from the clock offset, as it does from the front's CFO (0.2 ppm
+            // off here, a 1 kHz CFO error at 5.8 GHz).
+            let start = Tracking::from_clock_offset(ppm + 0.2);
+            let d = decode_ppdu_from(&y, T1 - 4, &cfg, start)
+                .unwrap_or_else(|e| panic!("{rate:?} {octets} octets at {ppm} ppm: {e}"));
+            assert_eq!(d.psdu, psdu, "{rate:?} {octets} octets at {ppm} ppm");
+            let mut worst = 0.0f64;
+            for (i, got) in d.timing.iter().enumerate() {
+                let dn = (128 + 16 + 80 * i + 32) as f64 - 64.0;
+                worst = worst.max((got - ppm * 1e-6 * dn).abs());
+            }
+            let last = d.timing.last().copied().unwrap_or(0.0);
+            println!(
+                "{rate:?} {octets} octets at {ppm:+} ppm: {} symbols, drift {last:+.2} samples, worst tracking error {worst:.3} samples",
+                d.timing.len()
+            );
+            assert!(worst < 0.05, "{rate:?} at {ppm} ppm: {worst}");
+            let untracked = RxOfdmConfig {
+                timing_tracking: false,
+                ..cfg
+            };
+            if octets == 4095 {
+                assert!(decode_ppdu(&y, T1 - 4, &untracked).map(|d| d.psdu) != Ok(psdu.clone()));
+            }
+            // Started from zero the loop still pulls in where the constellation leaves room.
+            if rate != Rate::R54 {
+                assert_eq!(
+                    decode_ppdu(&y, T1 - 4, &cfg).map(|d| d.psdu),
+                    Ok(psdu.clone())
+                );
+            }
+        }
     }
 }

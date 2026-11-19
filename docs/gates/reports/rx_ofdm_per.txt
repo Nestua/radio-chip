@@ -1,0 +1,87 @@
+# rxper sfo: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz
+
+## sample-clock offset: frames lost of 40 (rounded up), high SNR: loop started from the CFO / from zero / no loop
+# rate, octets (duration)    ppm:   0          10          20          40         -40
+ 6 Mb/s   100 ( 0.16 ms)        0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/0  
+ 6 Mb/s  1000 ( 1.36 ms)        0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/40    0/ 0/40 
+ 6 Mb/s  4095 ( 5.48 ms)        0/ 0/0     0/ 0/40    0/ 0/40    0/ 0/40    0/ 0/40 
+24 Mb/s   100 ( 0.06 ms)        0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/0  
+24 Mb/s  1000 ( 0.36 ms)        0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/18    0/ 0/19 
+24 Mb/s  4095 ( 1.39 ms)        0/ 0/0     0/ 0/37    0/ 0/40    0/ 0/40    0/ 0/40 
+54 Mb/s   100 ( 0.04 ms)        0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/0  
+54 Mb/s  1000 ( 0.17 ms)        0/ 0/0     0/ 0/0     0/ 0/0     0/ 0/40    0/ 0/40 
+54 Mb/s  4095 ( 0.63 ms)        0/ 0/0     0/ 0/40    0/ 0/40    0/ 0/40    0/ 0/40 
+# rxper timing: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz
+
+## timing loop: frames lost of 300 (rounded up), 1000 octets, clock offset uniform in ±40 ppm
+# columns: gains (proportional, integral) started from the CFO's clock offset | the same started from zero | at 0 ppm: no loop, the slowest loop, no pilot tracking at all
+# gains: 1/8, 1/250 ; 1/16, 1/1000 ; 1/32, 1/4000 ; 1/64, 1/16000
+AWGN  6 Mb/s  3.5 dB   |   52   46   43   39 |   53   46   43   48 |   26   31  287  of 300
+AWGN 54 Mb/s 20.0 dB   |   46   42   36   35 |   50   52   95  132 |   40   39  242  of 300
+AWGN 54 Mb/s 35.0 dB   |    0    0    0    0 |    0    0    0    2 |    0    0   14  of 300
+TGn D  6 Mb/s  8.5 dB  |   55   52   53   54 |   55   53   54   56 |   33   38  281  of 300
+TGn D 12 Mb/s 12.5 dB  |   40   40   37   36 |   40   40   39   42 |   25   26  256  of 300
+TGn D 48 Mb/s 24.5 dB  |   40   38   38   37 |   41   51   67   86 |   34   35  186  of 300
+TGn D 54 Mb/s 28.5 dB  |   26   25   23   21 |   28   35   44   78 |   21   21  151  of 300
+# rxper awgn: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz
+
+## AWGN, random fractional delay: PER of 1000-octet frames, 300 frames per point, clock offset uniform in ±40 ppm
+# receivers: 4-bit / fine soft
+ 6 Mb/s:   1.0 dB 1.000/1.000   2.0 dB 0.820/0.797   3.0 dB 0.307/0.283   4.0 dB 0.063/0.053   5.0 dB 0.003/0.003   6.0 dB 0.000/0.000   7.0 dB 0.000/0.000
+ 9 Mb/s:   4.0 dB 0.367/0.377   5.0 dB 0.060/0.050   6.0 dB 0.003/0.003   7.0 dB 0.000/0.000   8.0 dB 0.000/0.000   9.0 dB 0.000/0.000  10.0 dB 0.000/0.000
+12 Mb/s:   4.0 dB 1.000/1.000   5.0 dB 0.803/0.810   6.0 dB 0.353/0.340   7.0 dB 0.073/0.070   8.0 dB 0.003/0.003   9.0 dB 0.000/0.000  10.0 dB 0.000/0.000
+18 Mb/s:   7.0 dB 0.883/0.853   8.0 dB 0.390/0.323   9.0 dB 0.073/0.070  10.0 dB 0.010/0.013  11.0 dB 0.003/0.003  12.0 dB 0.000/0.000  13.0 dB 0.000/0.000
+24 Mb/s:  10.0 dB 0.737/0.647  11.0 dB 0.247/0.203  12.0 dB 0.063/0.047  13.0 dB 0.010/0.007  14.0 dB 0.003/0.000  15.0 dB 0.000/0.000  16.0 dB 0.000/0.000
+36 Mb/s:  13.5 dB 0.550/0.523  14.5 dB 0.140/0.117  15.5 dB 0.040/0.037  16.5 dB 0.000/0.000  17.5 dB 0.000/0.000  18.5 dB 0.000/0.000  19.5 dB 0.000/0.000
+48 Mb/s:  18.0 dB 0.350/0.260  19.0 dB 0.070/0.047  20.0 dB 0.020/0.020  21.0 dB 0.000/0.000  22.0 dB 0.000/0.000  23.0 dB 0.000/0.000  24.0 dB 0.000/0.000
+54 Mb/s:  19.5 dB 0.250/0.210  20.5 dB 0.057/0.053  21.5 dB 0.003/0.003  22.5 dB 0.000/0.000  23.5 dB 0.000/0.000  24.5 dB 0.000/0.000  25.5 dB 0.000/0.000
+# SNR at 10 % PER (dB), and the difference to the first receiver:
+#    6 Mb/s:  4-bit 3.7  fine soft 3.6 (-0.09)
+#    9 Mb/s:  4-bit 4.7  fine soft 4.7 (-0.06)
+#   12 Mb/s:  4-bit 6.8  fine soft 6.8 (-0.03)
+#   18 Mb/s:  4-bit 8.8  fine soft 8.8 (-0.05)
+#   24 Mb/s:  4-bit 11.7  fine soft 11.5 (-0.18)
+#   36 Mb/s:  4-bit 14.8  fine soft 14.6 (-0.14)
+#   48 Mb/s:  4-bit 18.8  fine soft 18.6 (-0.22)
+#   54 Mb/s:  4-bit 20.1  fine soft 20.0 (-0.08)
+# rxper tgn: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz
+
+## TGn B, static: PER of 1000-octet frames, 200 frames per point, clock offset uniform in ±40 ppm
+# receivers: 4-bit / fine soft
+ 6 Mb/s:   4.0 dB 0.515/0.500   7.0 dB 0.335/0.325  10.0 dB 0.140/0.135  13.0 dB 0.055/0.055  16.0 dB 0.005/0.005  19.0 dB 0.005/0.000  22.0 dB 0.010/0.010
+ 9 Mb/s:   8.0 dB 0.380/0.355  11.0 dB 0.265/0.235  14.0 dB 0.160/0.125  17.0 dB 0.060/0.030  20.0 dB 0.050/0.015  23.0 dB 0.020/0.005  26.0 dB 0.040/0.000
+12 Mb/s:   7.0 dB 0.565/0.555  10.0 dB 0.400/0.365  13.0 dB 0.130/0.130  16.0 dB 0.055/0.050  19.0 dB 0.005/0.005  22.0 dB 0.000/0.000  25.0 dB 0.005/0.000
+18 Mb/s:  11.0 dB 0.480/0.455  14.0 dB 0.310/0.265  17.0 dB 0.210/0.145  20.0 dB 0.070/0.040  23.0 dB 0.025/0.005  26.0 dB 0.020/0.010  29.0 dB 0.050/0.000
+24 Mb/s:  13.0 dB 0.485/0.470  16.0 dB 0.300/0.305  19.0 dB 0.105/0.100  22.0 dB 0.030/0.025  25.0 dB 0.000/0.000  28.0 dB 0.000/0.000  31.0 dB 0.000/0.000
+36 Mb/s:  18.0 dB 0.335/0.325  21.0 dB 0.215/0.180  24.0 dB 0.100/0.065  27.0 dB 0.065/0.045  30.0 dB 0.040/0.010  33.0 dB 0.040/0.000  36.0 dB 0.030/0.000
+48 Mb/s:  22.0 dB 0.365/0.345  25.0 dB 0.155/0.145  28.0 dB 0.040/0.035  31.0 dB 0.040/0.025  34.0 dB 0.010/0.000  37.0 dB 0.010/0.005  40.0 dB 0.005/0.000
+54 Mb/s:  24.0 dB 0.315/0.315  27.0 dB 0.190/0.180  30.0 dB 0.055/0.030  33.0 dB 0.060/0.020  36.0 dB 0.015/0.005  39.0 dB 0.010/0.005  42.0 dB 0.010/0.000
+# SNR at 10 % PER (dB), and the difference to the first receiver:
+#    6 Mb/s:  4-bit 11.1  fine soft 11.0 (-0.08)
+#    9 Mb/s:  4-bit 15.4  fine soft 14.5 (-0.97)
+#   12 Mb/s:  4-bit 13.9  fine soft 13.8 (-0.09)
+#   18 Mb/s:  4-bit 19.0  fine soft 17.9 (-1.16)
+#   24 Mb/s:  4-bit 19.1  fine soft 19.0 (-0.12)
+#   36 Mb/s:  4-bit 24.0  fine soft 22.7 (-1.27)
+#   48 Mb/s:  4-bit 26.0  fine soft 25.8 (-0.19)
+#   54 Mb/s:  4-bit 28.6  fine soft 28.0 (-0.57)
+
+## TGn D, static: PER of 1000-octet frames, 200 frames per point, clock offset uniform in ±40 ppm
+# receivers: 4-bit / fine soft
+ 6 Mb/s:   4.0 dB 0.520/0.515   7.0 dB 0.240/0.240  10.0 dB 0.045/0.035  13.0 dB 0.010/0.010  16.0 dB 0.005/0.005  19.0 dB 0.005/0.005  22.0 dB 0.000/0.000
+ 9 Mb/s:   8.0 dB 0.445/0.390  11.0 dB 0.230/0.125  14.0 dB 0.145/0.060  17.0 dB 0.055/0.005  20.0 dB 0.065/0.000  23.0 dB 0.050/0.000  26.0 dB 0.020/0.000
+12 Mb/s:   7.0 dB 0.625/0.610  10.0 dB 0.290/0.285  13.0 dB 0.090/0.080  16.0 dB 0.020/0.015  19.0 dB 0.005/0.000  22.0 dB 0.000/0.000  25.0 dB 0.000/0.000
+18 Mb/s:  11.0 dB 0.575/0.535  14.0 dB 0.295/0.220  17.0 dB 0.145/0.095  20.0 dB 0.065/0.005  23.0 dB 0.065/0.000  26.0 dB 0.045/0.000  29.0 dB 0.070/0.000
+24 Mb/s:  13.0 dB 0.460/0.470  16.0 dB 0.215/0.200  19.0 dB 0.030/0.025  22.0 dB 0.000/0.000  25.0 dB 0.000/0.000  28.0 dB 0.000/0.000  31.0 dB 0.000/0.000
+36 Mb/s:  18.0 dB 0.430/0.385  21.0 dB 0.160/0.095  24.0 dB 0.095/0.030  27.0 dB 0.030/0.000  30.0 dB 0.025/0.000  33.0 dB 0.050/0.000  36.0 dB 0.025/0.000
+48 Mb/s:  22.0 dB 0.270/0.270  25.0 dB 0.085/0.080  28.0 dB 0.045/0.020  31.0 dB 0.010/0.000  34.0 dB 0.010/0.005  37.0 dB 0.005/0.000  40.0 dB 0.010/0.000
+54 Mb/s:  24.0 dB 0.365/0.345  27.0 dB 0.130/0.080  30.0 dB 0.065/0.020  33.0 dB 0.030/0.000  36.0 dB 0.045/0.000  39.0 dB 0.045/0.000  42.0 dB 0.020/0.000
+# SNR at 10 % PER (dB), and the difference to the first receiver:
+#    6 Mb/s:  4-bit 8.6  fine soft 8.4 (-0.20)
+#    9 Mb/s:  4-bit 15.1  fine soft 11.9 (-3.24)
+#   12 Mb/s:  4-bit 12.7  fine soft 12.5 (-0.26)
+#   18 Mb/s:  4-bit 18.4  fine soft 16.8 (-1.57)
+#   24 Mb/s:  4-bit 17.2  fine soft 17.0 (-0.17)
+#   36 Mb/s:  4-bit 23.7  fine soft 20.9 (-2.81)
+#   48 Mb/s:  4-bit 24.6  fine soft 24.4 (-0.13)
+#   54 Mb/s:  4-bit 28.1  fine soft 26.5 (-1.59)

@@ -7,6 +7,8 @@
 //! includes the timing back-off). Definitions that the fixed-point model and the RTL will have
 //! to match — the soft-value scaling above all — are in `docs/gates/rx_ofdm.md`.
 
+use std::f64::consts::PI;
+
 use crate::channel::{fft, Sample};
 use crate::convolutional::CodeRate;
 use crate::interleaver::interleaved_index;
@@ -33,6 +35,14 @@ pub struct RxOfdmConfig {
     pub clip: f64,
     /// Remove the common phase of each symbol measured on its four pilots.
     pub pilot_tracking: bool,
+    /// Track the timing drift of a sample-clock offset on the pilots' phase slope (needs
+    /// `pilot_tracking`).
+    pub timing_tracking: bool,
+    /// Proportional gain of the timing loop: the share of a symbol's measured slope error that
+    /// corrects the slope at once.
+    pub timing_gain: f64,
+    /// Integral gain of the timing loop: the share that corrects the drift per symbol.
+    pub timing_rate_gain: f64,
 }
 
 impl Default for RxOfdmConfig {
@@ -42,7 +52,54 @@ impl Default for RxOfdmConfig {
             soft_max: SOFT_MAX,
             clip: SOFT_CLIP,
             pilot_tracking: true,
+            timing_tracking: true,
+            timing_gain: TIMING_GAIN,
+            timing_rate_gain: TIMING_RATE_GAIN,
         }
+    }
+}
+
+/// Default proportional gain of the timing loop (`docs/gates/rx_ofdm.md`).
+pub const TIMING_GAIN: f64 = 1.0 / 32.0;
+/// Default integral gain of the timing loop.
+pub const TIMING_RATE_GAIN: f64 = 1.0 / 4096.0;
+
+/// State of the timing loop across the symbols of a PPDU. The pilots of each symbol measure the
+/// slope of the phase across the subcarriers, which is the offset of the FFT window against
+/// the channel estimate's: a window late by δ samples turns subcarrier k by 2π·k·δ/64.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Tracking {
+    /// Phase slope removed from the last symbol, radians per subcarrier.
+    pub slope: f64,
+    /// Its drift, radians per subcarrier per symbol.
+    pub rate: f64,
+    /// Whole samples the FFT window has been moved (negative: earlier) to keep the slope
+    /// within half a sample.
+    pub shift: i64,
+}
+
+impl Tracking {
+    /// The loop's state before SIGNAL for a receiver whose sample clock is `ppm` fast against
+    /// the transmitter's: the drift per symbol and the drift since the middle of the long
+    /// training field. A transmitter derives its carrier and its symbol clock from one
+    /// oscillator (IEEE 802.11-2020 §17.3.9.5–6), and so does this receiver, so the front's CFO
+    /// gives it: ppm = −CFO / carrier · 10⁶.
+    pub fn from_clock_offset(ppm: f64) -> Self {
+        let per_sample = 2.0 * PI / FFT_SIZE as f64 * ppm * 1e-6;
+        let rate = per_sample * SYMBOL_LEN as f64;
+        // SIGNAL's window is centred 112 samples after the middle of T1 and T2; the first
+        // symbol's prediction adds one `rate`.
+        Self {
+            slope: per_sample * (FFT_SIZE + CP_LEN + FFT_SIZE / 2) as f64 - rate,
+            rate,
+            shift: 0,
+        }
+    }
+
+    /// How late the nominal window of the last symbol was, in samples (the drift since the
+    /// long training field).
+    pub fn timing(&self) -> f64 {
+        self.slope * FFT_SIZE as f64 / (2.0 * PI) - self.shift as f64
     }
 }
 
@@ -105,6 +162,8 @@ pub struct Decoded {
     pub scrambler_seed: u8,
     /// Common phase removed from each symbol (SIGNAL first), radians.
     pub common_phase: Vec<f64>,
+    /// Timing drift tracked at each symbol (SIGNAL first), samples: [`Tracking::timing`].
+    pub timing: Vec<f64>,
 }
 
 /// One equalised symbol: the 48 data points on the unnormalised constellation grid (±1, ±3, …)
@@ -191,36 +250,67 @@ pub fn demap(point: Sample, modulation: Modulation) -> Vec<f64> {
     out
 }
 
-/// Equalises one symbol: `window` is its 64-sample FFT window, `polarity_index` the pilot
-/// polarity index (0 for SIGNAL, k + 1 for DATA symbol k). `None` for a short window.
+/// Equalises one symbol: `window` is its 64-sample FFT window (moved by `tracking.shift`
+/// samples from its nominal place), `polarity_index` the pilot polarity index (0 for SIGNAL,
+/// k + 1 for DATA symbol k). `None` for a short window.
 ///
-/// With Z the window's FFT: the pilots give the common phase φ = ∠Σ Z(p)·H*(p)·s(p) (a
-/// maximum-ratio sum over the four pilots, s the transmitted ±1); each data point is
-/// Z(k)·H*(k)·e^(−jφ) / (|H(k)|²·K_MOD), back on the integer grid.
+/// With Z the window's FFT and P(k) = Z(k)·H*(k)·s(k) on the four pilots (s the transmitted
+/// ±1, so P is a maximum-ratio weighted phasor):
+/// 1. Timing loop: the slope predicted from the previous symbols is removed from the pilots;
+///    what is left between the pilots at ±21 and at ±7 is the slope error ε (least squares over
+///    the two pairs, weighted by their magnitudes); slope ← prediction + timing_gain·ε,
+///    rate ← rate + timing_rate_gain·ε. Beyond half a sample the window moves by one
+///    sample for the next symbol.
+/// 2. Common phase φ = ∠Σ P(k)·e^(−j·k·slope).
+/// 3. Each data point is Z(k)·H*(k)·e^(−j(φ + k·slope)) / (|H(k)|²·K_MOD), on the integer grid.
 pub fn equalise(
     window: &[Sample],
     h: &ChannelEstimate,
     polarity_index: usize,
     modulation: Modulation,
     cfg: &RxOfdmConfig,
+    tracking: &mut Tracking,
 ) -> Option<Equalised> {
     let z = fft64(window)?;
-    let common_phase = if cfg.pilot_tracking {
+    let turn = |v: Sample, angle: f64| cmul(v, (angle.cos(), angle.sin()));
+    let mut common_phase = 0.0;
+    if cfg.pilot_tracking {
         let polarity = f64::from(pilot_polarity(polarity_index));
-        let sum = PILOT_SUBCARRIERS
+        let mut p = [(0.0, 0.0); 4];
+        for ((slot, &c), &base) in p.iter_mut().zip(&PILOT_SUBCARRIERS).zip(&PILOT_BASE) {
+            let b = fft_bin(c);
+            let t = cmul(z[b], conj(h[b]));
+            let s = polarity * f64::from(base);
+            *slot = (s * t.0, s * t.1);
+        }
+        if cfg.timing_tracking {
+            let predicted = tracking.slope + tracking.rate;
+            let q: Vec<Sample> = p
+                .iter()
+                .zip(&PILOT_SUBCARRIERS)
+                .map(|(v, &c)| turn(*v, -f64::from(c) * predicted))
+                .collect();
+            // Pilots at −21, −7, 7, 21: the outer pair spans 42 subcarriers, the inner 14.
+            let outer = cmul(q[3], conj(q[0]));
+            let inner = cmul(q[2], conj(q[1]));
+            let (wo, wi) = (abs2(outer).sqrt(), abs2(inner).sqrt());
+            let den = 42.0 * 42.0 * wo + 14.0 * 14.0 * wi;
+            let error = if den > 0.0 {
+                (42.0 * wo * outer.1.atan2(outer.0) + 14.0 * wi * inner.1.atan2(inner.0)) / den
+            } else {
+                0.0
+            };
+            tracking.slope = predicted + cfg.timing_gain * error;
+            tracking.rate += cfg.timing_rate_gain * error;
+        }
+        let sum = p
             .iter()
-            .zip(&PILOT_BASE)
-            .fold((0.0, 0.0), |a, (&c, &base)| {
-                let b = fft_bin(c);
-                let t = cmul(z[b], conj(h[b]));
-                let s = polarity * f64::from(base);
-                (a.0 + s * t.0, a.1 + s * t.1)
-            });
-        sum.1.atan2(sum.0)
-    } else {
-        0.0
-    };
-    let derotate = (common_phase.cos(), -common_phase.sin());
+            .zip(&PILOT_SUBCARRIERS)
+            .map(|(v, &c)| turn(*v, -f64::from(c) * tracking.slope))
+            .fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1));
+        common_phase = sum.1.atan2(sum.0);
+    }
+    let slope = tracking.slope;
     let used = (-26i8..=26).filter(|&k| k != 0);
     let mean_gain = used.map(|k| abs2(h[fft_bin(k)])).sum::<f64>() / 52.0;
     let grid = f64::from(mean_energy(modulation)).sqrt();
@@ -228,7 +318,10 @@ pub fn equalise(
     for c in data_subcarriers() {
         let b = fft_bin(c);
         let gain = abs2(h[b]);
-        let v = cmul(cmul(z[b], conj(h[b])), derotate);
+        let v = turn(
+            cmul(z[b], conj(h[b])),
+            -(common_phase + f64::from(c) * slope),
+        );
         // A subcarrier with no gain carries no information: weight 0, any point.
         let scale = if gain > 0.0 { grid / gain } else { 0.0 };
         points.push((v.0 * scale, v.1 * scale));
@@ -237,6 +330,15 @@ pub fn equalise(
         } else {
             0.0
         });
+    }
+    // A window one sample later adds 2π/64 to the slope: keep it within half a sample.
+    let one = 2.0 * PI / FFT_SIZE as f64;
+    if tracking.slope > one / 2.0 {
+        tracking.slope -= one;
+        tracking.shift -= 1;
+    } else if tracking.slope < -one / 2.0 {
+        tracking.slope += one;
+        tracking.shift += 1;
     }
     Some(Equalised {
         points,
@@ -280,14 +382,16 @@ fn symbol_soft(
     h: &ChannelEstimate,
     modulation: Modulation,
     cfg: &RxOfdmConfig,
+    tracking: &mut Tracking,
 ) -> Result<(Vec<i32>, f64), RxOfdmError> {
-    let start = symbol_start(fft_start, i);
+    let nominal = symbol_start(fft_start, i);
     let truncated = RxOfdmError::Truncated {
-        needed: start + FFT_SIZE,
+        needed: nominal + FFT_SIZE,
         have: y.len(),
     };
+    let start = usize::try_from(nominal as i64 + tracking.shift).map_err(|_| truncated)?;
     let window = y.get(start..start + FFT_SIZE).ok_or(truncated)?;
-    let eq = equalise(window, h, i, modulation, cfg).ok_or(truncated)?;
+    let eq = equalise(window, h, i, modulation, cfg, tracking).ok_or(truncated)?;
     Ok((soft_bits(&eq, modulation, cfg), eq.common_phase))
 }
 
@@ -296,10 +400,11 @@ fn signal_with_phase(
     fft_start: usize,
     h: &ChannelEstimate,
     cfg: &RxOfdmConfig,
+    tracking: &mut Tracking,
 ) -> Result<(Signal, f64), RxOfdmError> {
     // IEEE 802.11-2020 §17.3.4: one BPSK rate-1/2 symbol; RATE, reserved, LENGTH (LSB first),
     // even parity over the first 17 bits, six tail zeros.
-    let (soft, phase) = symbol_soft(y, fft_start, 0, h, Modulation::Bpsk, cfg)?;
+    let (soft, phase) = symbol_soft(y, fft_start, 0, h, Modulation::Bpsk, cfg, tracking)?;
     let bits =
         decode(&soft, CodeRate::R1_2, Termination::ZeroAfter(24)).map_err(RxOfdmError::Viterbi)?;
     let field = bits.get(..18).ok_or(RxOfdmError::SignalParity)?;
@@ -326,18 +431,30 @@ pub fn decode_signal(
     h: &ChannelEstimate,
     cfg: &RxOfdmConfig,
 ) -> Result<Signal, RxOfdmError> {
-    signal_with_phase(y, fft_start, h, cfg).map(|s| s.0)
+    signal_with_phase(y, fft_start, h, cfg, &mut Tracking::default()).map(|s| s.0)
+}
+
+/// What the tracking loops did at each symbol.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SymbolLog {
+    /// Common phase removed, radians.
+    pub common_phase: Vec<f64>,
+    /// Timing drift tracked, samples ([`Tracking::timing`]).
+    pub timing: Vec<f64>,
 }
 
 /// The decoded DATA field before descrambling: N_SYM·N_DBPS bits (SERVICE, PSDU, tail, pad as
-/// the transmitter's [`crate::ppdu::data_bits`]), and the common phase of each DATA symbol.
+/// the transmitter's [`crate::ppdu::data_bits`]). `tracking` is the timing loop's state after
+/// SIGNAL (or its default); `log` receives one entry per DATA symbol.
 pub fn decode_data_bits(
     y: &[Sample],
     fft_start: usize,
     h: &ChannelEstimate,
     signal: Signal,
     cfg: &RxOfdmConfig,
-) -> Result<(Vec<u8>, Vec<f64>), RxOfdmError> {
+    tracking: &mut Tracking,
+    log: &mut SymbolLog,
+) -> Result<Vec<u8>, RxOfdmError> {
     let Signal { rate, length } = signal;
     let symbols = data_symbols(rate, length);
     let needed = symbol_start(fft_start, symbols) + FFT_SIZE;
@@ -347,18 +464,16 @@ pub fn decode_data_bits(
             have: y.len(),
         });
     }
-    let mut common_phase = Vec::with_capacity(symbols);
     let mut soft = Vec::with_capacity(symbols * 48 * rate.modulation().bits_per_subcarrier());
     for i in 1..=symbols {
-        let (s, phase) = symbol_soft(y, fft_start, i, h, rate.modulation(), cfg)?;
+        let (s, phase) = symbol_soft(y, fft_start, i, h, rate.modulation(), cfg, tracking)?;
         soft.extend(s);
-        common_phase.push(phase);
+        log.common_phase.push(phase);
+        log.timing.push(tracking.timing());
     }
     // §17.3.5.3: the encoder is back in state 0 after SERVICE, the PSDU and the six tail bits.
     let end = 16 + 8 * length + 6;
-    let bits = decode(&soft, rate.code_rate(), Termination::ZeroAfter(end))
-        .map_err(RxOfdmError::Viterbi)?;
-    Ok((bits, common_phase))
+    decode(&soft, rate.code_rate(), Termination::ZeroAfter(end)).map_err(RxOfdmError::Viterbi)
 }
 
 /// Decodes a PPDU with a given channel estimate (a genie's, in the gates).
@@ -368,10 +483,22 @@ pub fn decode_ppdu_with_channel(
     h: &ChannelEstimate,
     cfg: &RxOfdmConfig,
 ) -> Result<Decoded, RxOfdmError> {
-    let (signal, phase) = signal_with_phase(y, fft_start, h, cfg)?;
-    let (bits, data_phase) = decode_data_bits(y, fft_start, h, signal, cfg)?;
-    let mut common_phase = vec![phase];
-    common_phase.extend(data_phase);
+    decode_tracked(y, fft_start, h, cfg, Tracking::default())
+}
+
+fn decode_tracked(
+    y: &[Sample],
+    fft_start: usize,
+    h: &ChannelEstimate,
+    cfg: &RxOfdmConfig,
+    mut tracking: Tracking,
+) -> Result<Decoded, RxOfdmError> {
+    let (signal, phase) = signal_with_phase(y, fft_start, h, cfg, &mut tracking)?;
+    let mut log = SymbolLog {
+        common_phase: vec![phase],
+        timing: vec![tracking.timing()],
+    };
+    let bits = decode_data_bits(y, fft_start, h, signal, cfg, &mut tracking, &mut log)?;
     // §17.3.5.5: the first seven SERVICE bits are zero, so their scrambled values are the
     // scrambler's first seven outputs and identify its seed. (Hardware loads them as the state;
     // the model searches the 127 seeds.) An error in these seven bits loses the frame.
@@ -392,7 +519,8 @@ pub fn decode_ppdu_with_channel(
         signal,
         psdu,
         scrambler_seed,
-        common_phase,
+        common_phase: log.common_phase,
+        timing: log.timing,
     })
 }
 
@@ -402,6 +530,17 @@ pub fn decode_ppdu(
     fft_start: usize,
     cfg: &RxOfdmConfig,
 ) -> Result<Decoded, RxOfdmError> {
+    decode_ppdu_from(y, fft_start, cfg, Tracking::default())
+}
+
+/// [`decode_ppdu`] with the timing loop started from `tracking`
+/// ([`Tracking::from_clock_offset`]).
+pub fn decode_ppdu_from(
+    y: &[Sample],
+    fft_start: usize,
+    cfg: &RxOfdmConfig,
+    tracking: Tracking,
+) -> Result<Decoded, RxOfdmError> {
     let needed = fft_start + 2 * FFT_SIZE;
     let h = y
         .get(fft_start..needed)
@@ -410,5 +549,5 @@ pub fn decode_ppdu(
             needed,
             have: y.len(),
         })?;
-    decode_ppdu_with_channel(y, fft_start, &h, cfg)
+    decode_tracked(y, fft_start, &h, cfg, tracking)
 }
