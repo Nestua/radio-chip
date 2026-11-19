@@ -405,9 +405,11 @@ pub fn fractional_delay(x: &[Sample], delay: f64) -> Vec<Sample> {
         .collect()
 }
 
-/// What a receiver whose sample clock is `ppm` fast reads: y[n] = x(n·(1 + ppm·1e-6)).
-/// Same length as `x` (zero past its end). Use with [`frequency_offset`] at the same ppm, since
-/// one oscillator drives both (IEEE 802.11-2024 §17.3.9.5–6).
+/// What a receiver reads when the transmitter's clock is `ppm` fast against its own (or its
+/// own is slow): y[n] = x(n·(1 + ppm·1e-6)), every frequency of the signal scaled up by the
+/// same factor. Same length as `x` (zero past its end). Use with [`frequency_offset`] at
+/// +ppm of the carrier, since one oscillator drives both (IEEE 802.11-2024 §17.3.9.5–6).
+/// (This comment used to say "a receiver whose sample clock is ppm fast": the opposite.)
 pub fn resample(x: &[Sample], ppm: f64) -> Vec<Sample> {
     let ratio = 1.0 + ppm * 1e-6;
     (0..x.len())
