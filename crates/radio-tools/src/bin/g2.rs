@@ -4,6 +4,9 @@
 //! `ofdm`: per word length, the minimum and mean SQNR over random symbols of every modulation.
 //! `viterbi [blocks]` (default 3000 per point): Eb/N0 loss at BER 1e-4 of soft-input widths, clip levels and traceback windows
 //! against the full-traceback decoder on finely quantised soft values (same noise for all).
+//! `ldpc [blocks]` (default 1000 per point): Eb/N0 loss at a block error rate of 10 % of the
+//! integer layered min-sum decoder (input width and clip, message and total widths,
+//! normalisation, iterations) against float sum-product (same noise for all).
 //! The result goes into the block's gate journal; it is not a generated file.
 
 use std::process::ExitCode;
@@ -11,6 +14,10 @@ use std::process::ExitCode;
 use radio_phy::channel::Rng;
 use radio_phy::convolutional::{encode, CodeRate};
 use radio_phy::fixed::sqnr_db;
+use radio_phy::ldpc::{LdpcCode, LdpcLength, LdpcRate};
+use radio_phy::ldpc_decoder::{
+    CheckRule, LdpcDecoder, MinSumConfig, Schedule, LDPC_SOFT_BITS, LDPC_SOFT_CLIP,
+};
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, modulate_symbol_f64, IfftConfig};
@@ -250,6 +257,271 @@ fn viterbi(blocks: u64) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------------
+// LDPC
+// ---------------------------------------------------------------------------------------------
+
+/// Block error rates the loss is read at.
+const LDPC_TARGETS: [f64; 2] = [0.1, 0.01];
+
+#[derive(Clone, Copy, PartialEq)]
+enum LdpcCfg {
+    /// Float sum-product, flooding, 50 iterations, exact LLRs.
+    Reference,
+    /// Float layered normalised min-sum, exact LLRs.
+    Float { scale: f64, iters: usize },
+    /// The integer decoder. Its input is the matched-filter output y (signal amplitude 1)
+    /// as round(y · in_max / clip), saturated to ±in_max = ±(2^(in_bits−1) − 1): no noise
+    /// variance is needed, min-sum does not depend on the input's scale.
+    Fixed {
+        in_bits: u32,
+        clip: f64,
+        cfg: MinSumConfig,
+    },
+}
+
+impl LdpcCfg {
+    fn label(&self) -> String {
+        match self {
+            LdpcCfg::Reference => "reference: sum-product".into(),
+            LdpcCfg::Float { scale, iters } => format!("float layered x{scale}, {iters} it"),
+            LdpcCfg::Fixed { in_bits, clip, cfg } => format!(
+                "in {in_bits}b clip {clip} msg {} tot {} x{}/{}{} {} it",
+                cfg.msg_bits,
+                cfg.app_bits,
+                cfg.scale_num,
+                1 << cfg.scale_shift,
+                if cfg.scale_round { "r" } else { "" },
+                cfg.max_iter
+            ),
+        }
+    }
+}
+
+/// The chosen integer decoder (docs/gates/ldpc.md); the sweep moves one parameter at a time
+/// around it.
+const LDPC_CHOICE: (u32, f64, MinSumConfig) =
+    (LDPC_SOFT_BITS, LDPC_SOFT_CLIP, MinSumConfig::HARDWARE);
+
+fn ldpc_configs() -> Vec<LdpcCfg> {
+    let (in_bits, clip, cfg) = LDPC_CHOICE;
+    let fixed = |in_bits, clip, cfg| LdpcCfg::Fixed { in_bits, clip, cfg };
+    let mut v = vec![LdpcCfg::Reference];
+    // The algorithm's own cost, in floating point: the scale, then the iterations.
+    for scale in [1.0, 0.875, 0.8125, 0.75] {
+        v.push(LdpcCfg::Float { scale, iters: 50 });
+    }
+    for iters in [10, 15, 20, 30] {
+        v.push(LdpcCfg::Float {
+            scale: 0.8125,
+            iters,
+        });
+    }
+    v.push(fixed(in_bits, clip, cfg));
+    // Input: width and clip, with messages and totals wide enough not to interfere.
+    let wide = MinSumConfig {
+        msg_bits: 10,
+        app_bits: 12,
+        ..cfg
+    };
+    for b in [4, 5, 6, 7] {
+        for c in [1.0, 1.5, 2.0, 2.5, 3.0, 4.0] {
+            v.push(fixed(b, c, wide));
+        }
+    }
+    for msg_bits in [4, 5, 6, 7] {
+        for extra in [0, 1, 2, 3] {
+            let c = MinSumConfig {
+                msg_bits,
+                app_bits: msg_bits + extra,
+                ..cfg
+            };
+            if c != cfg {
+                v.push(fixed(in_bits, clip, c));
+            }
+        }
+    }
+    // The same with one bit less at the input, at the clip that suits it at the high rates
+    // (1.5): narrower messages may then do.
+    for msg_bits in [4, 5, 6] {
+        for extra in [1, 2, 3] {
+            let c = MinSumConfig {
+                msg_bits,
+                app_bits: msg_bits + extra,
+                ..cfg
+            };
+            v.push(fixed(in_bits - 1, 1.5, c));
+        }
+    }
+    // The factor, rounded down and to nearest.
+    for (scale_num, scale_shift) in [(1, 0), (15, 4), (7, 3), (13, 4), (3, 2), (11, 4)] {
+        for scale_round in [false, true] {
+            let c = MinSumConfig {
+                scale_num,
+                scale_shift,
+                scale_round,
+                ..cfg
+            };
+            if c != cfg && c.is_valid() {
+                v.push(fixed(in_bits, clip, c));
+            }
+        }
+    }
+    for max_iter in [6, 8, 10, 12, 15, 20, 25, 30, 50] {
+        let c = MinSumConfig { max_iter, ..cfg };
+        if c != cfg {
+            v.push(fixed(in_bits, clip, c));
+        }
+    }
+    v
+}
+
+/// (block errors, iterations summed over the blocks) per configuration.
+fn ldpc_point(
+    code: &LdpcCode,
+    rate: f64,
+    ebn0_db: f64,
+    configs: &[LdpcCfg],
+    seeds: std::ops::Range<u64>,
+) -> Result<Vec<(u64, u64)>, String> {
+    let dec = LdpcDecoder::new(code);
+    let sigma2 = 1.0 / (2.0 * rate * 10f64.powf(ebn0_db / 10.0));
+    let mut out = vec![(0u64, 0u64); configs.len()];
+    for seed in seeds {
+        let mut rng = Rng::new(seed);
+        let info: Vec<u8> = (0..code.k())
+            .map(|_| u8::from(rng.uniform() < 0.5))
+            .collect();
+        let word = code.encode(&info).map_err(|e| e.to_string())?;
+        let y: Vec<f64> = word
+            .iter()
+            .map(|&b| 1.0 - 2.0 * f64::from(b) + sigma2.sqrt() * rng.gaussian())
+            .collect();
+        let llr: Vec<f64> = y.iter().map(|v| 2.0 * v / sigma2).collect();
+        for (k, cfg) in configs.iter().enumerate() {
+            let got = match *cfg {
+                LdpcCfg::Reference => {
+                    dec.decode_float(&llr, CheckRule::SumProduct, Schedule::Flooding, 50)
+                }
+                LdpcCfg::Float { scale, iters } => {
+                    dec.decode_float(&llr, CheckRule::MinSum { scale }, Schedule::Layered, iters)
+                }
+                LdpcCfg::Fixed { in_bits, clip, cfg } => {
+                    let max = f64::from((1i32 << (in_bits - 1)) - 1);
+                    let q: Vec<i32> = y
+                        .iter()
+                        .map(|v| (v * max / clip).round().clamp(-max, max) as i32)
+                        .collect();
+                    dec.decode_fixed(&q, &cfg)
+                }
+            };
+            // A refused block would otherwise count as a correct one.
+            let d = got.map_err(|e| format!("{}: {e}", cfg.label()))?;
+            out[k].0 += u64::from(d.bits != word);
+            out[k].1 += d.iterations as u64;
+        }
+    }
+    Ok(out)
+}
+
+fn ldpc(blocks: u64) -> Result<(), String> {
+    let configs = ldpc_configs();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
+    println!(
+        "# G2 sweep: LDPC, {blocks} blocks per point, BPSK/AWGN, same noise for every \
+         configuration; loss = Eb/N0 at a block error rate of 10 % (and of 1 %) minus the reference's; \
+         a factor marked r is rounded to nearest"
+    );
+    println!(
+        "# columns: block error rate per Eb/N0; mean iterations at the grid point where the \
+         configuration's own block error rate is nearest 10 %"
+    );
+    for (length, rate, name, r, start) in [
+        (LdpcLength::N648, LdpcRate::R1_2, "(648, 1/2)", 0.5f64, 1.0),
+        (LdpcLength::N1944, LdpcRate::R1_2, "(1944, 1/2)", 0.5, 0.5),
+        (LdpcLength::N1944, LdpcRate::R3_4, "(1944, 3/4)", 0.75, 1.75),
+        (
+            LdpcLength::N648,
+            LdpcRate::R5_6,
+            "(648, 5/6)",
+            5.0 / 6.0,
+            2.75,
+        ),
+        (
+            LdpcLength::N1944,
+            LdpcRate::R5_6,
+            "(1944, 5/6)",
+            5.0 / 6.0,
+            2.5,
+        ),
+    ] {
+        let code = LdpcCode::new(length, rate).ok_or("no such code")?;
+        let grid: Vec<f64> = (0..8).map(|i| start + 0.25 * f64::from(i)).collect();
+        let mut bler = vec![vec![0.0; grid.len()]; configs.len()];
+        let mut iters = vec![vec![0.0; grid.len()]; configs.len()];
+        for (gi, &ebn0) in grid.iter().enumerate() {
+            let per = blocks.div_ceil(threads);
+            let base = ((code.n() as u64) << 44) | ((code.k() as u64) << 32) | ((gi as u64) << 24);
+            type Part = Option<Result<Vec<(u64, u64)>, String>>;
+            let results: Vec<Part> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let lo = base + (t * per).min(blocks);
+                        let hi = base + ((t + 1) * per).min(blocks);
+                        let (configs, code) = (&configs, &code);
+                        scope.spawn(move || ldpc_point(code, r, ebn0, configs, lo..hi))
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().ok()).collect()
+            });
+            for part in results {
+                let part = part.ok_or("a worker thread panicked")??;
+                for (k, (bad, it)) in part.iter().enumerate() {
+                    bler[k][gi] += *bad as f64 / blocks as f64;
+                    iters[k][gi] += *it as f64 / blocks as f64;
+                }
+            }
+        }
+        // The 10 % crossing must exist; the 1 % one may be missed by a thin run.
+        let reference = LDPC_TARGETS.map(|t| crossing(&grid, &bler[0], t));
+        let at = |x: Option<f64>| x.map_or("n/a".to_string(), |x| format!("{x:.3} dB"));
+        if reference[0].is_none() {
+            return Err("reference misses the target".into());
+        }
+        println!(
+            "\n## {name}: reference reaches a block error rate of 10 % at {}, of 1 % at {}",
+            at(reference[0]),
+            at(reference[1])
+        );
+        print!("# {:<40}", "config");
+        for g in &grid {
+            print!(" {g:>7.2}");
+        }
+        println!(" | loss 10 % |     1 % | iter");
+        for (k, cfg) in configs.iter().enumerate() {
+            print!("  {:<40}", cfg.label());
+            for b in &bler[k] {
+                print!(" {b:>7.4}");
+            }
+            let loss = |i: usize| {
+                crossing(&grid, &bler[k], LDPC_TARGETS[i])
+                    .zip(reference[i])
+                    .map_or("    n/a".to_string(), |(x, r)| format!("{:+7.3}", x - r))
+            };
+            // Iterations where this configuration's block error rate is nearest 10 %.
+            let near = (0..grid.len())
+                .min_by(|&a, &b| {
+                    (bler[k][a] - LDPC_TARGETS[0])
+                        .abs()
+                        .total_cmp(&(bler[k][b] - LDPC_TARGETS[0]).abs())
+                })
+                .unwrap_or(0);
+            println!(" |    {} | {} | {:>4.1}", loss(0), loss(1), iters[k][near]);
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let result = match block.as_str() {
@@ -260,8 +532,14 @@ fn main() -> ExitCode {
                 .and_then(|b| b.parse().ok())
                 .unwrap_or(3000),
         ),
+        "ldpc" => ldpc(
+            std::env::args()
+                .nth(2)
+                .and_then(|b| b.parse().ok())
+                .unwrap_or(1000),
+        ),
         _ => {
-            eprintln!("usage: g2 <block>\nblocks: ofdm, viterbi");
+            eprintln!("usage: g2 <block>\nblocks: ofdm, viterbi, ldpc");
             return ExitCode::from(2);
         }
     };
