@@ -7,7 +7,7 @@
 //!   and with fine ones.
 //! - `tgn`: the same through static TGn B and D channels, a new channel per frame.
 //! - `sfo`: frames lost against the sample-clock offset and the frame's duration.
-//! - `timing`: candidates for the timing loop's gains near 10 % PER.
+//! - `timing`: what the timing tracker costs and saves near 10 % PER.
 //! - `soft`, `soft2`: PER against the soft values' width and clip level, AWGN and TGn B and D
 //!   (a wide survey, then the candidates around a step of 0.1).
 //!
@@ -247,14 +247,6 @@ fn fine() -> RxOfdmConfig {
     }
 }
 
-fn gains(g: f64, r: f64) -> RxOfdmConfig {
-    RxOfdmConfig {
-        timing_gain: g,
-        timing_rate_gain: r,
-        ..base()
-    }
-}
-
 /// The receivers of the PER curves.
 fn standard() -> Vec<Receiver> {
     vec![
@@ -263,36 +255,20 @@ fn standard() -> Vec<Receiver> {
     ]
 }
 
-/// Timing-loop candidates at a few operating points near 10 % PER. Two runs per point, each
+/// What the timing tracker costs and what it saves, near 10 % PER. Two runs per point, each
 /// with every receiver on the same frames: with the clock offset drawn per frame, and at 0 ppm
-/// against a receiver without the loop (what the loop itself costs).
+/// against a receiver without the tracker.
 fn timing(frames: usize) {
-    let candidates = [
-        ("1/8, 1/250", 0.125, 0.004),
-        ("1/16, 1/1000", 0.0625, 0.001),
-        ("1/32, 1/4096", 1.0 / 32.0, 1.0 / 4096.0),
-        ("1/64, 1/16000", 0.015625, 0.0000625),
+    let rx = [
+        receiver("from the CFO", true, base()),
+        receiver("from zero", false, base()),
+        receiver("no tracker", false, no_loop()),
     ];
-    let mut rx = Vec::new();
-    for (name, g, r) in candidates {
-        rx.push(receiver(name, true, gains(g, r)));
-    }
-    let n = rx.len();
-    for (name, g, r) in candidates {
-        rx.push(receiver(name, false, gains(g, r)));
-    }
-    let mut zero = vec![receiver("no loop", false, no_loop())];
-    for (name, g, r) in candidates {
-        zero.push(receiver(name, false, gains(g, r)));
-    }
-    println!("\n## timing loop: frames lost of {frames} (rounded up), 1000 octets");
-    println!(
-        "# gains (proportional, integral): {}",
-        candidates.map(|c| c.0).join(" ; ")
-    );
-    println!("# columns: clock offset uniform in ±40 ppm, loop started from the CFO | the same frames, started from zero || 0 ppm: no loop | 0 ppm, the four gains (same frames as no loop)");
+    println!("\n## timing tracker: frames lost of {frames} (rounded up), 1000 octets");
+    println!("# columns: clock offset uniform in ±40 ppm: started from the CFO / from zero / no tracker || 0 ppm, the same three");
     for (label, rate, snr, ch) in [
         ("AWGN  6 Mb/s  3.5 dB", Rate::R6, 3.5, Channel::Awgn),
+        ("AWGN 24 Mb/s 11.5 dB", Rate::R24, 11.5, Channel::Awgn),
         ("AWGN 54 Mb/s 20.0 dB", Rate::R54, 20.0, Channel::Awgn),
         ("AWGN 54 Mb/s 35.0 dB", Rate::R54, 35.0, Channel::Awgn),
         (
@@ -329,20 +305,14 @@ fn timing(frames: usize) {
             ppm,
         };
         let (l, total) = lost(scene(None), &rx, frames, seed);
-        let (y, _) = lost(scene(Some(0.0)), &zero, frames, seed);
+        let (y, _) = lost(scene(Some(0.0)), &rx, frames, seed);
         let f = |v: &[usize]| {
             v.iter()
                 .map(|x| format!("{x:>4}"))
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        println!(
-            "{label:<22} | {} | {} || {:>4} | {}  of {total}",
-            f(&l[..n]),
-            f(&l[n..]),
-            y[0],
-            f(&y[1..])
-        );
+        println!("{label:<22} | {} || {}  of {total}", f(&l), f(&y));
     }
 }
 

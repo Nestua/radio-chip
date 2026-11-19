@@ -38,11 +38,6 @@ pub struct RxOfdmConfig {
     /// Track the timing drift of a sample-clock offset on the pilots' phase slope (needs
     /// `pilot_tracking`).
     pub timing_tracking: bool,
-    /// Proportional gain of the timing loop: the share of a symbol's measured slope error that
-    /// corrects the slope at once.
-    pub timing_gain: f64,
-    /// Integral gain of the timing loop: the share that corrects the drift per symbol.
-    pub timing_rate_gain: f64,
 }
 
 impl Default for RxOfdmConfig {
@@ -53,54 +48,118 @@ impl Default for RxOfdmConfig {
             clip: SOFT_CLIP,
             pilot_tracking: true,
             timing_tracking: true,
-            timing_gain: TIMING_GAIN,
-            timing_rate_gain: TIMING_RATE_GAIN,
         }
     }
 }
 
-/// Default proportional gain of the timing loop (`docs/gates/rx_ofdm.md`).
-pub const TIMING_GAIN: f64 = 1.0 / 32.0;
-/// Default integral gain of the timing loop.
-pub const TIMING_RATE_GAIN: f64 = 1.0 / 4096.0;
+/// Standard deviation assumed for one symbol's slope measurement, radians per subcarrier. It
+/// only sets how fast the measurements outweigh the prior on the drift.
+pub const TIMING_MEASUREMENT_STD: f64 = 0.005;
+/// Prior on the clock offset when nothing is known: the standard's worst case between two
+/// stations, ppm (IEEE 802.11-2020 §17.3.9.5–6: ±20 ppm each).
+pub const TIMING_PRIOR_PPM: f64 = 40.0;
+/// Prior on the error of a clock offset taken from the front's CFO, ppm.
+pub const TIMING_HINT_PPM: f64 = 2.0;
 
-/// State of the timing loop across the symbols of a PPDU. The pilots of each symbol measure the
-/// slope of the phase across the subcarriers, which is the offset of the FFT window against
-/// the channel estimate's: a window late by δ samples turns subcarrier k by 2π·k·δ/64.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// The timing tracker's state across the symbols of a PPDU.
+///
+/// The pilots of each symbol measure the slope of the phase across the subcarriers. A window
+/// late by δ samples against the channel estimate's turns subcarrier k by 2π·k·δ/64, so a
+/// sample-clock offset shows as a slope that grows linearly with time: slope(t) = rate·t, t in
+/// symbols from the middle of the long training field. But the measured slope also has a part
+/// that does not grow: the channel estimate's own noise on the four pilots looks like a
+/// constant slope (about 0.1 samples at the sensitivity limit). Following it would turn every
+/// data subcarrier by an error the pilots alone have. So the tracker fits both, measured(t) =
+/// offset + rate·t, by recursive least squares, and removes only rate·t from the data.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tracking {
-    /// Phase slope removed from the last symbol, radians per subcarrier.
-    pub slope: f64,
-    /// Its drift, radians per subcarrier per symbol.
+    /// Estimated drift of the slope, radians per subcarrier per symbol.
     pub rate: f64,
-    /// Whole samples the FFT window has been moved (negative: earlier) to keep the slope
-    /// within half a sample.
+    /// Estimated constant part of the measured slope (not removed from the data).
+    pub offset: f64,
+    /// Covariance of (offset, rate) in units of the measurement variance: [offset, cross, rate].
+    pub covariance: [f64; 3],
+    /// Whole samples the FFT window has been moved (negative: earlier) to keep the slope left
+    /// in the window within half a sample.
     pub shift: i64,
+    /// Slope removed from the last symbol's data, radians per subcarrier (rate·t, less what
+    /// the window's move took).
+    pub slope: f64,
+    /// The last symbol's measured slope against what was predicted, radians per subcarrier.
+    pub measured: f64,
+    /// rate·t of the last symbol, radians per subcarrier.
+    pub drift: f64,
+}
+
+/// Slope per subcarrier of one sample of timing offset.
+const ONE_SAMPLE: f64 = 2.0 * PI / FFT_SIZE as f64;
+
+/// Drift of the slope per symbol for a clock offset in ppm.
+fn rate_of(ppm: f64) -> f64 {
+    ONE_SAMPLE * SYMBOL_LEN as f64 * ppm * 1e-6
+}
+
+impl Default for Tracking {
+    /// Nothing known about the clock offset: [`TIMING_PRIOR_PPM`].
+    fn default() -> Self {
+        Self::with_prior(0.0, TIMING_PRIOR_PPM)
+    }
 }
 
 impl Tracking {
-    /// The loop's state before SIGNAL when the transmitter's clock is `ppm` fast against the
-    /// receiver's ([`crate::channel::resample`]'s parameter): the drift per symbol and the
-    /// drift since the middle of the long training field. A transmitter derives its carrier
-    /// and its symbol clock from one oscillator (IEEE 802.11-2020 §17.3.9.5–6), and so does
-    /// this receiver, so a fast transmitter is also high in frequency and the front's CFO
-    /// gives the offset: ppm = +CFO / carrier · 10⁶.
-    pub fn from_clock_offset(ppm: f64) -> Self {
-        let per_sample = 2.0 * PI / FFT_SIZE as f64 * ppm * 1e-6;
-        let rate = per_sample * SYMBOL_LEN as f64;
-        // SIGNAL's window is centred 112 samples after the middle of T1 and T2; the first
-        // symbol's prediction adds one `rate`.
+    fn with_prior(ppm: f64, std_ppm: f64) -> Self {
         Self {
-            slope: per_sample * (FFT_SIZE + CP_LEN + FFT_SIZE / 2) as f64 - rate,
-            rate,
+            rate: rate_of(ppm),
+            offset: 0.0,
+            // The offset's prior is flat: nothing is assumed about it.
+            covariance: [
+                1e6,
+                0.0,
+                (rate_of(std_ppm) / TIMING_MEASUREMENT_STD).powi(2),
+            ],
             shift: 0,
+            slope: 0.0,
+            measured: 0.0,
+            drift: 0.0,
+        }
+    }
+
+    /// The tracker's start when the transmitter's clock is `ppm` fast against the receiver's
+    /// ([`crate::channel::resample`]'s parameter), known to [`TIMING_HINT_PPM`]. A transmitter
+    /// derives its carrier and its symbol clock from one oscillator (IEEE 802.11-2020
+    /// §17.3.9.5–6), and so does this receiver, so a fast transmitter is also high in
+    /// frequency and the front's CFO gives the offset: ppm = +CFO / carrier · 10⁶.
+    pub fn from_clock_offset(ppm: f64) -> Self {
+        Self::with_prior(ppm, TIMING_HINT_PPM)
+    }
+
+    /// A tracker that applies the drift of a clock offset of `ppm` and learns nothing.
+    pub fn fixed(ppm: f64) -> Self {
+        Self {
+            covariance: [0.0; 3],
+            ..Self::with_prior(ppm, 0.0)
         }
     }
 
     /// How late the nominal window of the last symbol was, in samples (the drift since the
     /// long training field).
     pub fn timing(&self) -> f64 {
-        self.slope * FFT_SIZE as f64 / (2.0 * PI) - self.shift as f64
+        self.drift / ONE_SAMPLE
+    }
+
+    /// One symbol's measurement `error` (slope left after `predicted` was removed) at time `t`
+    /// symbols: the recursive least-squares step for measured = offset + rate·t.
+    fn update(&mut self, error: f64, predicted: f64, t: f64) {
+        let [pbb, pbr, prr] = self.covariance;
+        // Gain K = P·φ / (φᵀ·P·φ + 1), φ = (1, t).
+        let (gb, gr) = (pbb + pbr * t, pbr + prr * t);
+        let s = gb + gr * t + 1.0;
+        let (kb, kr) = (gb / s, gr / s);
+        let innovation = error + predicted - (self.offset + self.rate * t);
+        self.offset += kb * innovation;
+        self.rate += kr * innovation;
+        self.covariance = [pbb - kb * gb, pbr - kb * gr, prr - kr * gr];
+        self.measured = error;
     }
 }
 
@@ -253,15 +312,16 @@ pub fn demap(point: Sample, modulation: Modulation) -> Vec<f64> {
 
 /// Equalises one symbol: `window` is its 64-sample FFT window (moved by `tracking.shift`
 /// samples from its nominal place), `polarity_index` the pilot polarity index (0 for SIGNAL,
-/// k + 1 for DATA symbol k). `None` for a short window.
+/// k + 1 for DATA symbol k), which is also the symbol's place in time. `None` for a short
+/// window.
 ///
 /// With Z the window's FFT and P(k) = Z(k)·H*(k)·s(k) on the four pilots (s the transmitted
 /// ±1, so P is a maximum-ratio weighted phasor):
-/// 1. Timing loop: the slope predicted from the previous symbols is removed from the pilots;
-///    what is left between the pilots at ±21 and at ±7 is the slope error ε (least squares over
-///    the two pairs, weighted by their magnitudes); slope ← prediction + timing_gain·ε,
-///    rate ← rate + timing_rate_gain·ε. Beyond half a sample the window moves by one
-///    sample for the next symbol.
+/// 1. Timing: the slope predicted for this symbol (rate·t, less the window's moves) is
+///    removed from the pilots; what is left between the pilots at ±21 and at ±7 is the
+///    measurement (least squares over the two pairs, weighted by their magnitudes), which
+///    updates the tracker ([`Tracking`]). The data are then turned back by the updated rate·t.
+///    Beyond half a sample the window moves by one sample for the next symbol.
 /// 2. Common phase φ = ∠Σ P(k)·e^(−j·k·slope).
 /// 3. Each data point is Z(k)·H*(k)·e^(−j(φ + k·slope)) / (|H(k)|²·K_MOD), on the integer grid.
 pub fn equalise(
@@ -285,11 +345,16 @@ pub fn equalise(
             *slot = (s * t.0, s * t.1);
         }
         if cfg.timing_tracking {
-            let predicted = tracking.slope + tracking.rate;
+            // Middle of T1 and T2 to the middle of this symbol's window: 112 samples for
+            // SIGNAL, then 80 per symbol.
+            let t = (FFT_SIZE + CP_LEN + FFT_SIZE / 2) as f64 / SYMBOL_LEN as f64
+                + polarity_index as f64;
+            let moved = tracking.shift as f64 * ONE_SAMPLE;
+            let predicted = tracking.rate * t;
             let q: Vec<Sample> = p
                 .iter()
                 .zip(&PILOT_SUBCARRIERS)
-                .map(|(v, &c)| turn(*v, -f64::from(c) * predicted))
+                .map(|(v, &c)| turn(*v, -f64::from(c) * (predicted + moved)))
                 .collect();
             // Pilots at −21, −7, 7, 21: the outer pair spans 42 subcarriers, the inner 14.
             let outer = cmul(q[3], conj(q[0]));
@@ -301,8 +366,9 @@ pub fn equalise(
             } else {
                 0.0
             };
-            tracking.slope = predicted + cfg.timing_gain * error;
-            tracking.rate += cfg.timing_rate_gain * error;
+            tracking.update(error, predicted, t);
+            tracking.drift = tracking.rate * t;
+            tracking.slope = tracking.drift + moved;
         }
         let sum = p
             .iter()
@@ -332,13 +398,11 @@ pub fn equalise(
             0.0
         });
     }
-    // A window one sample later adds 2π/64 to the slope: keep it within half a sample.
-    let one = 2.0 * PI / FFT_SIZE as f64;
-    if tracking.slope > one / 2.0 {
-        tracking.slope -= one;
+    // A window one sample earlier takes 2π/64 off the slope left in it: keep that within half a
+    // sample.
+    if tracking.slope > ONE_SAMPLE / 2.0 {
         tracking.shift -= 1;
-    } else if tracking.slope < -one / 2.0 {
-        tracking.slope += one;
+    } else if tracking.slope < -ONE_SAMPLE / 2.0 {
         tracking.shift += 1;
     }
     Some(Equalised {

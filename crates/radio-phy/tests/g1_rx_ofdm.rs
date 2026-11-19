@@ -395,7 +395,6 @@ fn coded_bit_error_rate_matches_commpy() {
         clip: 4.0,
         pilot_tracking: false,
         timing_tracking: false,
-        ..RxOfdmConfig::default()
     };
     let mut rng = Rng::new(0x0f09_0005);
     let mut h = [(0.0, 0.0); 64];
@@ -742,8 +741,8 @@ fn window_follows_a_drift_longer_than_the_guard_interval() {
 fn slope_and_phase_on_unequal_pilots() {
     // One symbol built in the frequency domain: Z(k) = H(k)·X(k)·e^(j(φ + kθ)) with a known
     // common phase φ and slope θ (a window 0.3 samples late), a channel whose pilots at ±21 are
-    // in a null (and carry garbage) and whose pilots at ±7 differ fivefold in gain. The loop,
-    // with its gain at 1, must return θ, φ and the transmitted points.
+    // in a null (and carry garbage) and whose pilots at ±7 differ fivefold in gain. The
+    // measurement must be θ; with θ removed, the phase is φ and the points are the sent ones.
     let mut rng = Rng::new(0x0f09_000c);
     let m = Modulation::Qam16;
     let groups: Vec<usize> = (0..48).map(|_| (rng.next_u64() % 16) as usize).collect();
@@ -776,18 +775,24 @@ fn slope_and_phase_on_unequal_pilots() {
     z[fft_bin(21)] = (0.02, -0.05);
     z[fft_bin(-21)] = (-0.04, 0.01);
     let window = ifft(&z).unwrap();
-    let cfg = RxOfdmConfig {
-        timing_gain: 1.0,
-        timing_rate_gain: 0.0,
-        ..RxOfdmConfig::default()
-    };
+    let cfg = RxOfdmConfig::default();
+    // The measurement: a tracker that knows nothing sees θ.
     let mut tracking = Tracking::default();
+    equalise(&window, &h, 5, m, &cfg, &mut tracking).unwrap();
+    println!("measured slope {:.6} (true {theta:.6})", tracking.measured);
+    assert!((tracking.measured - theta).abs() < 1e-4);
+    // The correction: a tracker that knows the drift (θ at this symbol's time, 6.4 symbols
+    // after the training field) removes it, and then the phase and the points are exact.
+    let ppm = 0.3 / (6.4 * 80.0) * 1e6;
+    let mut tracking = Tracking::fixed(ppm);
     let eq = equalise(&window, &h, 5, m, &cfg, &mut tracking).unwrap();
     println!(
-        "slope {:.6} (true {theta:.6}), common phase {:.6} (true {phi})",
-        tracking.slope, eq.common_phase
+        "removed {:.6}, left {:.6}, common phase {:.6} (true {phi})",
+        tracking.slope, tracking.measured, eq.common_phase
     );
-    assert!((tracking.slope - theta).abs() < 1e-4);
+    assert!((tracking.slope - theta).abs() < 1e-9);
+    assert!(tracking.measured.abs() < 1e-4);
+    assert!((tracking.timing() - 0.3).abs() < 1e-9);
     assert!((eq.common_phase - phi).abs() < 1e-3);
     assert_eq!(tracking.shift, 0);
     for (v, p) in eq.points.iter().zip(&points) {
@@ -823,18 +828,14 @@ fn clock_offset_and_carrier_offset_have_one_sign() {
     println!("1 MHz through resample(+1000 ppm): {measured:.1} Hz");
     assert!((measured - f * (1.0 + p * 1e-6)).abs() < 1.0, "{measured}");
     // And the loop's start for +p is the drift that resample(+p) makes: a 54 Mb/s frame whose
-    // loop is frozen (gains 0) decodes only if the start has the right sign.
-    let frozen = RxOfdmConfig {
-        timing_gain: 0.0,
-        timing_rate_gain: 0.0,
-        ..RxOfdmConfig::default()
-    };
+    // tracker is fixed (it learns nothing) decodes only if the start has the right sign.
+    let frozen = RxOfdmConfig::default();
     let psdu = random_psdu(1500, &mut Rng::new(0x0f09_000d));
     let mut x = frame(&psdu, Rate::R54, 0x47);
     x.extend(vec![(0.0, 0.0); 16]);
     let y = resample(&x, 40.0);
-    let right = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::from_clock_offset(40.0));
-    let wrong = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::from_clock_offset(-40.0));
+    let right = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::fixed(40.0));
+    let wrong = decode_ppdu_from(&y, T1 - 4, &frozen, Tracking::fixed(-40.0));
     assert_eq!(right.map(|d| d.psdu), Ok(psdu.clone()));
     assert!(wrong.map(|d| d.psdu) != Ok(psdu));
 }
