@@ -139,7 +139,7 @@ spread overstated — all caught.
 
 The whole receiver (`docs/gates/rx_ofdm.md`, 2026-11-19, measurements) loses 0.8 to 3.0 dB at
 9, 18 and 36 Mb/s in TGn B and D with SOFT_BITS = 4, SOFT_CLIP = 1.5, against fine soft values,
-and 0.0 to 0.4 dB in AWGN. Six bits with a clip of 1.5 to 2 is the first format within about
-0.35 dB in AWGN and in both channels (a ranking on 200 to 300 frames per point, not a G2
+and 0.1 to 0.4 dB in AWGN. Six bits with a clip of 2 is the first format within about
+0.25 dB in AWGN and in both channels (a ranking on 200 to 300 frames per point, not a G2
 figure). SOFT_BITS, SOFT_CLIP and METRIC_BITS are unchanged: the choice was the founder's and
 its revision is too, on a paired G2 run of the whole receiver.

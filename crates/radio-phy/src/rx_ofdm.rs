@@ -57,8 +57,9 @@ impl Default for RxOfdmConfig {
 /// higher SNR the measurement is better than assumed and the tracker merely learns more slowly
 /// than it could. It sets how fast the measurements outweigh the prior on the drift.
 pub const TIMING_MEASUREMENT_STD: f64 = 0.016;
-/// A measurement whose variance is more than this many times the nominal one is not used: its
-/// pilots are so weak that their phases wrap, and it is not even roughly Gaussian.
+/// A measurement whose variance is more than this many times the nominal one is not used: a
+/// pilot that weak has a phase that wraps, and the channel estimate's own noise makes its gain
+/// look larger than it is, so the variance computed for it is too small as well.
 pub const TIMING_MAX_VARIANCE: f64 = 3.0;
 /// Prior on the clock offset when nothing is known: the standard's worst case between two
 /// stations, ppm (IEEE 802.11-2020 §17.3.9.5–6: ±20 ppm each).

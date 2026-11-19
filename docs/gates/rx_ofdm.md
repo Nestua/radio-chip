@@ -74,7 +74,7 @@ tracking, a SIGNAL plausibility check beyond parity, anything for HT/HE.
 This closes the receive half of the R0 exit gate on a clean channel: the model decodes the
 standard's worked example from the standard's own samples.
 
-**Evidence** (`cargo test --release -p radio-phy --test g1_rx_ofdm -- --nocapture`: 18 tests
+**Evidence** (`cargo test --release -p radio-phy --test g1_rx_ofdm -- --nocapture`: 19 tests
 pass; `g1_annex_i1 -- --ignored` with the local fixture: 5 pass; this entry's pull request is
 the commit)
 - Demapper: same decision as max-log on every point of a 145 × 145 grid, never more confident;
@@ -154,6 +154,7 @@ the commit)
 | a fixed tracker that learns | sign of the rule |
 | inner pilot pair ignored | unequal pilots |
 | the offset removed from the data as well; the innovation without the offset; the offset never updated; the CFO's prior as wide as none | a slope only the pilots have |
+| every measurement at the nominal variance; no rejection of worthless measurements; a pair's weight as the sum of its gains | a weak pilot |
 
 The last row is the tracker's point, and its first mutation run left three of those four
 alive: nothing tested that a slope which only the pilots have stays out of the data.
@@ -228,24 +229,25 @@ both runs, the worse of the two.
 
 | Format (bits / clip) | Step | AWGN | TGn B | TGn D |
 |---|---|---|---|---|
-| 4 / 0.75 | 0.11 | 0.97 dB | 0.36 dB | 0.73 dB |
-| 4 / 1 | 0.14 | 0.77 | 0.62 | 1.25 |
-| 4 / 1.5 (today) | 0.21 | 0.43 | 1.35 | 3.03 |
-| 4 / 3 | 0.43 | 0.50 | no crossing | no crossing |
-| 5 / 1 | 0.067 | 0.74 | 0.20 | 0.27 |
-| 5 / 1.5 | 0.10 | 0.35 | 0.43 | 0.97 |
-| 5 / 2 | 0.13 | 0.13 | 0.67 | 0.94 |
-| 5 / 3 | 0.20 | 0.14 | 1.08 | 2.65 |
-| 6 / 1.5 | 0.048 | 0.34 | 0.08 | 0.30 |
-| 6 / 2 | 0.065 | 0.19 | 0.23 | 0.34 |
-| 6 / 3 | 0.097 | 0.13 | 0.28 | 0.96 |
+| 4 / 0.75 | 0.11 | 0.97 dB | 0.43 dB | 0.78 dB |
+| 4 / 1 | 0.14 | 0.77 | 0.62 | 1.23 |
+| 4 / 1.5 (today) | 0.21 | 0.39 | 1.40 | 3.03 |
+| 4 / 3 | 0.43 | 0.52 | no crossing | no crossing |
+| 5 / 1 | 0.067 | 0.72 | 0.20 | 0.30 |
+| 5 / 1.5 | 0.10 | 0.35 | 0.36 | 1.03 |
+| 5 / 2 | 0.13 | 0.15 | 0.62 | 0.88 |
+| 5 / 3 | 0.20 | 0.16 | 0.96 | 2.53 |
+| 6 / 1.5 | 0.048 | 0.37 | 0.03 | 0.26 |
+| 6 / 2 | 0.065 | 0.13 | 0.23 | 0.22 |
+| 6 / 3 | 0.097 | 0.14 | 0.28 | 1.04 |
 | 6 / 6 | 0.19 | 0.16 | 0.83 | 2.50 |
 
 - Fading needs a small step: the weak subcarriers' values must not round to 0. AWGN needs
   the clip at 1.5 or more for 16- and 64-QAM. Four bits cannot have both, five nearly; six
-  bits with a clip of 1.5 to 2 is the first format within about 0.35 dB everywhere.
+  bits with a clip of 2 is the first format within about 0.25 dB everywhere (clip 1.5:
+  0.4 dB, in AWGN).
 - These figures rank the formats and no more. Single cells differ by up to 0.3 dB between
-  the two runs, and "losses" as low as −0.3 dB occur: that is the noise of 200 to 300
+  the two runs, and "losses" as low as −0.2 dB occur: that is the noise of 200 to 300
   frames per point with crossings interpolated on 1 and 3 dB grids. The G2 decision needs
   the paired method of `g2 viterbi` on this receiver.
 - Six-bit soft values widen the decoder's path metrics from 9 to 11 bits (2·24·31 < 2¹¹).
