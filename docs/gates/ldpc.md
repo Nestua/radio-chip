@@ -216,8 +216,8 @@ decoder and differ in the matrix, which part 1 holds.
   spends bits on the input.
 - With the default widths and an input of 2 units per unit of LLR the fixed decoder loses
   visibly (4 block errors of 300 against 1 at 2.5 dB in a first run): the input scale and
-  the widths are G2's subject, not decided here. `MinSumConfig::default()` is a
-  placeholder until then.
+  the widths are G2's subject, not decided here. `MinSumConfig::default()` is a wide
+  decoder for tests; the hardware's is `MinSumConfig::HARDWARE` (G2, below).
 
 **Mutations** (each fails the tests named; `cp` + `touch` to restore)
 | Mutation | Fails |
@@ -301,3 +301,92 @@ widths as one question.
   normalised by the channel gain, which R0-09's demapper owns; in fading the weights
   change the optimum, and this sweep is rerun through the receiver when the HT or TDMA
   mapping exists.
+
+## 2026-11-19 · G2 · decoder widths
+
+Command: `cargo run --release -p radio-tools --bin g2 -- ldpc 3000` (3000 blocks per point,
+five codes × 8 points of Eb/N0 × 76 configurations, the same noise for all). Full output:
+`docs/gates/reports/g2_ldpc.txt`. Three runs: the first around a first guess (×3/4, 15
+iterations, 6-bit messages, 8-bit totals), the second around ×7/8 and 20 iterations, the
+third, committed, around the choice; rows common to the runs are identical (seeded).
+
+**The choice, approved by the founder on 2026-11-19** (`MinSumConfig::HARDWARE`,
+`LDPC_SOFT_BITS`, `LDPC_SOFT_CLIP`): **input 6 bits at clip 2** (the receiver's working soft
+format), **messages 7 bits, totals 9 bits, factor ⌊7·min/8⌋, at most 20 iterations.**
+
+Loss in dB at a block error rate of 10 % (and of 1 %) against sum-product, 50 iterations:
+
+| Configuration | (648, 1/2) | (1944, 1/2) | (1944, 3/4) | (648, 5/6) | (1944, 5/6) |
+|---|---|---|---|---|---|
+| float layered min-sum ×13/16, 50 it | 0.07 (0.02) | 0.06 (0.03) | 0.03 (−0.01) | −0.04 (−0.03) | 0.00 (−0.04) |
+| the same, 20 it | 0.14 (0.07) | 0.17 (0.10) | 0.07 (0.04) | 0.01 (0.02) | 0.04 (0.00) |
+| **the choice** | **0.14 (0.06)** | **0.17 (0.10)** | **0.08 (0.06)** | **0.02 (0.01)** | **0.06 (0.04)** |
+| messages 6, totals 8 | 0.15 (0.11) | 0.20 (0.20) | 0.08 (0.06) | 0.02 (0.01) | 0.06 (0.04) |
+| messages 7, totals 8 | 0.15 (0.09) | 0.18 (0.13) | 0.08 (0.06) | 0.02 (0.01) | 0.06 (0.04) |
+| messages 10, totals 12 | 0.14 (0.06) | 0.17 (0.10) | 0.08 (0.06) | 0.02 (0.01) | 0.06 (0.04) |
+| input 5 bits, clip 1.5 (wide messages) | 0.17 (0.09) | 0.20 (0.11) | 0.09 (0.06) | 0.06 (0.07) | 0.10 (0.08) |
+| input 5 bits, clip 2 | 0.13 (0.07) | 0.17 (0.11) | 0.13 (0.09) | 0.16 (0.14) | 0.20 (0.18) |
+| input 4 bits, clip 1.5 | 0.28 (0.20) | 0.31 (0.24) | 0.53 (0.47) | 0.76 | 0.79 (0.77) |
+| factor 13/16 | 0.16 (0.10) | 0.19 (0.16) | 0.06 (0.04) | 0.02 (0.02) | 0.06 (0.05) |
+| factor 3/4 | 0.33 (0.32) | 0.44 (0.52) | 0.09 (0.05) | 0.03 (0.04) | 0.08 (0.07) |
+| factor 7/8 rounded to nearest | 0.24 (0.11) | 0.26 (0.17) | 0.16 (0.14) | 0.08 (0.08) | 0.11 (0.08) |
+| 10 iterations | 0.36 (0.25) | 0.47 (0.41) | 0.18 (0.20) | 0.08 (0.07) | 0.13 (0.11) |
+| 15 iterations | 0.20 (0.12) | 0.26 (0.18) | 0.11 (0.08) | 0.04 (0.04) | 0.08 (0.06) |
+| 30 iterations | 0.09 (0.02) | 0.12 | 0.06 | 0.00 (−0.01) | 0.04 (0.03) |
+| 50 iterations | 0.06 (0.00) | 0.08 (0.00) | 0.03 (0.01) | −0.02 (−0.03) | 0.02 (0.01) |
+
+- **The budget** (arithmetic ≤ 0.1 dB at 10 % against float layered min-sum at the same 20
+  iterations): the choice is at −0.00, +0.00, +0.01, +0.00 and +0.02 dB. It is the wide
+  decoder: messages of 10 bits and totals of 12 give the same block error rate at every
+  point of every code.
+- **Why not one bit less, which also meets the budget.** Messages of 6 bits and totals of 8
+  lose 0.00 to 0.03 dB at 10 %, but on (1944, 1/2) they leave a tail below 1 %: 15, 6 and 3
+  wrong blocks of 3000 at 1.75, 2.0 and 2.25 dB, where the choice has 3, 0 and 0 on the
+  same blocks (0.10 dB at 1 %). A 6-bit message cannot say more than a 6-bit input does.
+  I recommended 6/8 from the 10 % column first, the founder approved it, the 1 % column of
+  the next run showed the tail, and the question went back: 7/9 approved. The budget's
+  definition at 10 % alone would have let it through; the 1 % column is in the method for
+  this.
+- **Narrower still does not work at a 6-bit input:** 5-bit messages or 7-bit totals do not
+  reach 10 % on the rate-1/2 codes inside the grid.
+- **Input.** 6 bits are flat against the clip (1.5 to 2.5: within 0.05 dB). 5 bits meet the
+  budget at clip 1.5 only (0.01 to 0.06 dB) and lose 0.14 to 0.16 dB at the rate-5/6 codes at
+  clip 2: the scale would have to be held to a quarter, which fading will not allow. 4 bits
+  do not meet it.
+- **Factor.** 7/8 rounded down is best at rate 1/2 and within 0.02 dB of the best elsewhere.
+  Rounded down it behaves like the float decoder's 13/16 (at about 5.6 units per unit of
+  LLR the lost fraction is that much). Rounding to nearest was tried on the G1 finding
+  (`scale_round`): it shifts the effective factor up and helps only where the factor was too
+  small (3/4); at the right factor it is not needed. The option stays in the model for the
+  report's rows and is off in the choice. In hardware ⌊7x/8⌋ is `(8x − x) >> 3`.
+- **Iterations** are throughput, not arithmetic: the founder chose 20 (0.17 dB from
+  sum-product on the worst code; 15 would cost 0.08 dB more at rate 1/2, 30 would gain
+  0.05). The mean at a block error rate near 10 % is 2 to 5 iterations; the limit sets the
+  worst case, and ADR 0008's latency budget may revise it.
+- Noise of the estimate: rows that differ only in unused width are identical; 10 % crossings
+  of rows that should agree scatter by about ±0.02 dB and the 1 % column, on about 30 wrong
+  blocks per point, by about ±0.05 dB (my estimate from the table, not a computed interval).
+
+**Gate in CI:** `tests/g2_ldpc.rs`. The hardware decoder on its 6-bit input against float
+layered min-sum ×13/16 on exact LLRs, 20 iterations, the same blocks, at three points
+((648, 1/2) 1.5 dB, (1944, 1/2) 1.25 dB, (648, 5/6) 3.5 dB): blocks only the hardware decoder
+loses 4, 3, 12; only the float one 10, 2, 6; allowed 10 more. A second test shows the gate
+sees what the sweep rejects at 10 %: 5-bit messages (154 against 2), 6-bit messages with
+7-bit totals (206 against 0), a 4-bit input (75 against 1), factor 3/4 (31 against 7). It
+does not see 6/8 against 7/9: that difference lives below 1 %, in the sweep.
+
+**Mutations:** the rounding term ignored → `fixed_decoder_is_its_written_definition`;
+`HARDWARE` at factor 3/4 → the G2 gate; `LDPC_SOFT_BITS` 4 → the G2 gate.
+
+**Evidence:** the report above (commit 6808132); `cargo test -p radio-phy --test g2_ldpc` —
+2 pass; `scripts/check.sh` green; this entry's pull request.
+
+**Open questions** (G2)
+1. Everything here is BPSK in AWGN with exact scaling. Through the receiver (fading, the
+   demapper's weights, higher-order mappings) the clip and perhaps the input width are
+   measured again, when the HT or TDMA mapping exists.
+2. The tail of narrow messages suggests looking lower: an error-floor run (10⁵ blocks and
+   more on (1944, 1/2) and a rate-5/6 code) on the build server, before RTL.
+3. The repetition accumulator (decoder open question 6) is still defined as the exact sum.
+4. Early termination by the full parity check costs a pass of logic per iteration; cheaper
+   stop rules are an RTL question with their own loss to measure here.

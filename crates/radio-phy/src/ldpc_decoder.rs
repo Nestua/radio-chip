@@ -81,8 +81,8 @@ pub struct MinSumConfig {
 }
 
 impl Default for MinSumConfig {
-    /// Wide enough to behave like the float decoder on inputs scaled to a few units per
-    /// unit of LLR; the hardware's widths are the G2 result (`docs/gates/ldpc.md`).
+    /// A wide decoder for tests and experiments; the hardware's is
+    /// [`MinSumConfig::HARDWARE`].
     fn default() -> Self {
         Self {
             max_iter: 20,
