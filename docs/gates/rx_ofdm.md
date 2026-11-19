@@ -326,3 +326,44 @@ each half of a row the receivers saw the same frames)
 - `SOFT_BITS`, `SOFT_CLIP` and `METRIC_BITS` in the model change with R0-09 G2, behind their
   own gates (the Viterbi G2 of `docs/gates/viterbi.md` is rerun at the new widths), not with
   this note.
+
+## 2026-11-19 · G0 · R0-09 G2, stage A: the receiver's data path in integers
+
+Model: `crates/radio-phy/src/rx_ofdm_fixed.rs` (`FixedOfdmConfig`). Stage A is the data path
+from the FFT to the soft values; the timing tracker's arithmetic (a recursive least-squares
+fit with a division per symbol) stays in float behind an integer interface and is stage B.
+**Budget:** the whole fixed receiver within 0.2 dB of the float one at 10 % PER, every rate,
+AWGN and TGn B, D, E, on the same ADC samples (`docs/testing.md`, G2).
+
+The float receiver divides every data point by |H|² and multiplies the metric by the weight
+|H|²/mean. The two cancel; the integer path never divides per subcarrier:
+
+| Step | Arithmetic | Width (parameter) |
+|---|---|---|
+| Input | the front's CFO-corrected samples, `in_bits`, shifted left by `in_shift` into the FFT word | Z = 12, shift 2 |
+| FFT, 64 points | radix 2, decimation in time, twiddles e^(−j2πk/64) in Q(T, T−2) (the transmit ROM conjugated), every butterfly output narrowed to W bits half to even with saturation; three of the six stages halve (`fft_halve`), so a bin is the float FFT's over 8 | W, T |
+| Channel | Hs(k) = L(k)·(T1(k) + T2(k)) = 2·H(k), exact, W + 1 bits | — |
+| Products | u(k) = Z(k)·Hs*(k), g(k) = \|Hs(k)\|², both shifted right by one per-packet shift chosen so that the largest g of the 52 fits U − 1 bits, half to even | U |
+| Pilots | p = ±u at −21, −7, 7, 21 (base × polarity) | U |
+| Tracker (stage B: float) | takes the four p and their g; gives the slope θ as a P-bit phase per subcarrier and the window's move | P of the front's NCO |
+| Common phase | φ = angle of Σ p·e^(−j·k·θ) by the front's CORDIC (A bits, widened to P) | the front's N, W_c, A |
+| Rotation | v(k) = u(k)·e^(−j(φ + k·θ)) with the front's rotator (table of 2^L entries, Q-bit amplitude), narrowed back to U bits | the front's L, Q |
+| Demapper | per axis on v: first bit −v; then \|v\| − t₄, \|\|v\| − t₄\| − t₂ with the thresholds t_c = κ_c·g(k), κ_c = c/(2·√E) (E the constellation's mean energy: 1/√10 for 16-QAM; 4/(2√42) and half of it for 64-QAM), κ in C fractional bits | C |
+| Scale | once per packet and modulation: n = bit length of Σg, q = ⌊A·2ⁿ / Σg⌋ with A = round(2·√E·52·soft_max/clip·2^F); soft = sign·⌊(\|m\|·q + half) / 2^(n+F)⌋, saturated to ±soft_max (half away from zero, the float contract) | F |
+| Deinterleave, depuncture, decode | as the float receiver (R0-10) | soft format |
+
+Why it is the same receiver: with Hs = 2H the float point is 2√E·u/g and its weight g/ḡ,
+ḡ = Σg/52, so metric × weight × soft_max/clip = (2√E·52·soft_max/clip)·m/Σg with m the
+demapper's value on v and the thresholds scaled by g. One division per packet and
+modulation (two per frame: SIGNAL's BPSK and the data's) replaces 48 per symbol.
+
+**Gates:** `tests/g2_rx_ofdm.rs`. (1) The integer FFT against the float FFT of the same
+samples, and exact on inputs whose transform is known by hand. (2) With wide words the soft
+values equal the float receiver's. (3) With the default words every rate decodes, through a
+notched channel too, and the standard's printed waveform decodes where the local fixture
+is present. (4) The loss at 10 % PER and the sweep that chose each width:
+`rxper fixed`, a report.
+
+**Not in stage A:** the tracker in integers; channel-estimate smoothing; the DC removal in
+front of the decoder (`rx_front.md`, 2026-11-19: its first numbers); the Viterbi decoder at
+the new soft format (R0-10's G2 is rerun when `softg2` has confirmed it).

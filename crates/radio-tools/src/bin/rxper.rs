@@ -10,6 +10,8 @@
 //! - `timing`: what the timing tracker costs and saves near 10 % PER.
 //! - `soft`, `soft2`: PER against the soft values' width and clip level, AWGN and TGn B and D
 //!   (a wide survey, then the candidates around a step of 0.1).
+//! - `softg2`: the G2 sweep of the soft-value format (R0-09): the candidates on the same
+//!   frames, fine grids around the 10 % crossings, AWGN and TGn B, D and E.
 //!
 //! Every frame has a clock offset between the two ends (uniform in ±40 ppm unless stated) that
 //! sets both its CFO and its sample-clock offset, at a 5.8 GHz carrier.
@@ -441,10 +443,69 @@ fn main() -> ExitCode {
                 );
             }
         }
+        "softg2" => {
+            // The G2 sweep of the soft-value format: every candidate on the same frames, on
+            // grids of 0.5 dB (AWGN) and 1 dB (fading) around the 10 % crossings that
+            // `soft2` found.
+            let formats: &[(&'static str, i32, f64)] = &[
+                ("4b/1", 7, 1.0),
+                ("4b/1.5", 7, 1.5),
+                ("5b/1", 15, 1.0),
+                ("5b/1.5", 15, 1.5),
+                ("5b/2", 15, 2.0),
+                ("6b/1.5", 31, 1.5),
+                ("6b/2", 31, 2.0),
+                ("6b/3", 31, 3.0),
+            ];
+            let mut rx = vec![receiver("fine", true, fine())];
+            for &(name, soft_max, clip) in formats {
+                rx.push(receiver(
+                    name,
+                    true,
+                    RxOfdmConfig {
+                        soft_max,
+                        clip,
+                        ..base()
+                    },
+                ));
+            }
+            let frames = n.unwrap_or(2000);
+            sweep(
+                "AWGN, soft-value formats (G2)",
+                Channel::Awgn,
+                &rx,
+                [2.5, 3.5, 5.5, 7.5, 10.5, 13.5, 17.5, 18.5],
+                0.5,
+                7,
+                frames,
+            );
+            for (name, m, start, points) in [
+                (
+                    "TGn B, static, soft-value formats (G2)",
+                    TgnModel::B,
+                    [7.5, 12.0, 11.0, 15.5, 16.5, 20.5, 23.5, 26.0],
+                    7,
+                ),
+                (
+                    "TGn D, static, soft-value formats (G2)",
+                    TgnModel::D,
+                    [6.0, 10.0, 10.0, 13.5, 15.0, 19.0, 22.0, 24.5],
+                    7,
+                ),
+                (
+                    "TGn E, static, soft-value formats (G2)",
+                    TgnModel::E,
+                    [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
+                    9,
+                ),
+            ] {
+                sweep(name, Channel::Tgn(m), &rx, start, 1.0, points, frames);
+            }
+        }
         "sfo" => sfo(n.unwrap_or(40)),
         "timing" => timing(n.unwrap_or(300)),
         _ => {
-            eprintln!("usage: rxper awgn|tgn|sfo|timing|soft|soft2 [frames]");
+            eprintln!("usage: rxper awgn|tgn|sfo|timing|soft|soft2|softg2 [frames]");
             return ExitCode::from(2);
         }
     }
