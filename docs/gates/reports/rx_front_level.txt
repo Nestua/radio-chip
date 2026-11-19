@@ -1,0 +1,24 @@
+# rxfront level: 400 frames per point, CFO uniform in ±235 kHz, random fractional delay;
+# both receivers on the same 12-bit ADC samples. timing = FFT start within ±1 sample.
+# SNR  level     float: acquired timing CFO RMS   fixed: acquired timing CFO RMS   fixed/float
+    4     -3 dBFS          400    400    2897 Hz          400    400    2908 Hz     1.00
+    4     -9 dBFS          400    400    2925 Hz          400    400    2938 Hz     1.00
+    4    -15 dBFS          400    400    2925 Hz          400    400    2934 Hz     1.00
+    4    -30 dBFS          400    400    2924 Hz          400    400    2939 Hz     1.01
+    4    -45 dBFS          400    400    2941 Hz          400    400    2990 Hz     1.02
+    4    -55 dBFS          400    400    2991 Hz          400    400    3493 Hz     1.17
+    4    -60 dBFS          400    400    3130 Hz          400    400    4647 Hz     1.48
+   10     -3 dBFS          400    400    1251 Hz          400    400    1253 Hz     1.00
+   10     -9 dBFS          400    400    1249 Hz          400    400    1250 Hz     1.00
+   10    -15 dBFS          400    400    1249 Hz          400    400    1251 Hz     1.00
+   10    -30 dBFS          400    400    1248 Hz          400    400    1248 Hz     1.00
+   10    -45 dBFS          400    400    1261 Hz          400    400    1300 Hz     1.03
+   10    -55 dBFS          400    400    1367 Hz          400    400    1819 Hz     1.33
+   10    -60 dBFS          400    400    1557 Hz          400    400    3928 Hz     2.52
+   25     -3 dBFS          400    400     214 Hz          400    400     214 Hz     1.00
+   25     -9 dBFS          400    400     214 Hz          400    400     213 Hz     1.00
+   25    -15 dBFS          400    400     215 Hz          400    400     215 Hz     1.00
+   25    -30 dBFS          400    400     216 Hz          400    400     230 Hz     1.06
+   25    -45 dBFS          400    400     255 Hz          400    400     411 Hz     1.62
+   25    -55 dBFS          400    400     468 Hz          400    400    1228 Hz     2.63
+   25    -60 dBFS          400    400     883 Hz          400    400    4764 Hz     5.39

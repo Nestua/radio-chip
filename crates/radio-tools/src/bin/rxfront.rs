@@ -21,14 +21,22 @@
 //!   after acceptance — differences from L = 0 on clean, CW-tone, AGC-step, two-packet and
 //!   noise-only streams, float and fixed.
 //!
+//! - `agc <frames per case>`: the fixed receiver on packets whose start goes through an AGC
+//!   settling transient (clipping, gain steps with phase jumps and DC changes inside the STF):
+//!   acquisition, timing, and the error of the combined, coarse and fine CFO estimates.
+//! - `tailbw <million>`: detector events and acquisitions of the fixed receiver on noise that
+//!   went through a channel-select low-pass filter (band-limited noise is correlated at lag 16).
+//! - `level <frames per point>`: float and fixed receiver on the same ADC samples against the
+//!   packet's level in the ADC, at three SNRs.
+//!
 //! The output goes into the gate journal / `docs/gates/reports/`; it is not a generated file.
 
 use std::f64::consts::PI;
 use std::process::ExitCode;
 
 use radio_phy::channel::{
-    add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, tgn_taps, Doppler,
-    Multipath, Rng, TgnModel,
+    add_tone, agc_transient, awgn, fractional_delay, frequency_offset, gain_step, mean_power,
+    tgn_taps, Doppler, GainState, Multipath, Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
@@ -959,6 +967,371 @@ fn latency(trials: usize) {
     }
 }
 
+/// One `agc` case: gain steps as (offset from the STF's first sample, dB above the settled gain
+/// before it), a phase jump uniform in ±`jump_deg` at each step, a DC offset per state at
+/// `dc_dbfs` with a random phase, and the level the packet settles at.
+struct AgcCase {
+    name: String,
+    steps: Vec<(usize, f64)>,
+    jump_deg: f64,
+    dc_dbfs: Option<f64>,
+    settled_dbfs: f64,
+}
+
+/// The fixed receiver on packets through an AGC settling transient. Before the first step the
+/// chain is at a higher gain (the idle state on noise); at −15 dBFS settled a +20 dB start
+/// clips in the ADC, at −40 dBFS it does not.
+///
+/// The phase jumps are an assumption, not a measurement: no capture of a real AGC is behind
+/// them yet (R1). The cases separate the causes so that the result can be reread when one is.
+fn agc(frames: usize) {
+    const SNR_DB: f64 = 20.0;
+    let cfg = RxConfig::new(FS);
+    let fx = FixedRxConfig::default();
+    let frame = preamble();
+    let p = mean_power(&frame);
+    let full = f64::from(ADC_FULL_SCALE);
+    let unit = FS / 2f64.powi(fx.nco_phase_bits as i32);
+    let b = backoff_samples(&cfg);
+    let mut cases: Vec<(&str, Vec<AgcCase>)> = Vec::new();
+    let case =
+        |name: String, steps: &[(usize, f64)], jump: f64, dc: Option<f64>, lvl: f64| AgcCase {
+            name,
+            steps: steps.to_vec(),
+            jump_deg: jump,
+            dc_dbfs: dc,
+            settled_dbfs: lvl,
+        };
+    cases.push((
+        "causes apart, one event at STF sample 48",
+        vec![
+            case("no gain change".into(), &[], 0.0, None, -15.0),
+            case(
+                "no gain change, settled at −40 dBFS".into(),
+                &[],
+                0.0,
+                None,
+                -40.0,
+            ),
+            case(
+                "−6 dB, no clipping, no jump".into(),
+                &[(48, 6.0)],
+                0.0,
+                None,
+                -15.0,
+            ),
+            case(
+                "−20 dB, no clipping (−40 dBFS), no jump".into(),
+                &[(48, 20.0)],
+                0.0,
+                None,
+                -40.0,
+            ),
+            case(
+                "−20 dB, clipping before, no jump".into(),
+                &[(48, 20.0)],
+                0.0,
+                None,
+                -15.0,
+            ),
+            case(
+                "no gain change, jump ±10°".into(),
+                &[(48, 0.0)],
+                10.0,
+                None,
+                -15.0,
+            ),
+            case(
+                "no gain change, jump ±30°".into(),
+                &[(48, 0.0)],
+                30.0,
+                None,
+                -15.0,
+            ),
+            case(
+                "no gain change, jump ±90°".into(),
+                &[(48, 0.0)],
+                90.0,
+                None,
+                -15.0,
+            ),
+        ],
+    ));
+    let mut combined = Vec::new();
+    for jump in [10.0, 30.0, 90.0] {
+        combined.push(case(
+            format!("−20 dB at 48, clipping, jump ±{jump}°"),
+            &[(48, 20.0)],
+            jump,
+            None,
+            -15.0,
+        ));
+    }
+    for jump in [0.0, 30.0] {
+        combined.push(case(
+            format!("−20, −10 dB at 32, 64, DC −30 dBFS, jump ±{jump}°"),
+            &[(32, 30.0), (64, 10.0)],
+            jump,
+            Some(-30.0),
+            -15.0,
+        ));
+        combined.push(case(
+            format!("−20, −10 dB at 48, 96, DC −30 dBFS, jump ±{jump}°"),
+            &[(48, 30.0), (96, 10.0)],
+            jump,
+            Some(-30.0),
+            -15.0,
+        ));
+    }
+    cases.push(("causes together", combined));
+    let mut sweep = Vec::new();
+    // STF 0…159, GI2 160…191, T1 192…255, T2 256…319.
+    for at in [16, 32, 48, 64, 80, 96, 112, 128, 144, 176, 208, 272] {
+        sweep.push(case(
+            format!("−20 dB at {at}, clipping, jump ±30°"),
+            &[(at, 20.0)],
+            30.0,
+            None,
+            -15.0,
+        ));
+    }
+    cases.push(("position of a −20 dB step", sweep));
+    let mut trim = Vec::new();
+    for at in [100, 144, 176, 208, 272] {
+        for jump in [0.0, 10.0, 30.0] {
+            trim.push(case(
+                format!("−2 dB trim at {at}, jump ±{jump}°"),
+                &[(at, 2.0)],
+                jump,
+                None,
+                -15.0,
+            ));
+        }
+    }
+    cases.push(("position of a −2 dB trim", trim));
+    println!(
+        "# rxfront agc: RxFrontFixed, {frames} frames per case, SNR {SNR_DB} dB, CFO uniform in ±235 kHz.\n\
+         # Steps are offsets from the STF's first sample (STF 0…159, GI2 160…191, T1 192…255, T2\n\
+         # 256…319); the gain before a step is that many dB above the settled gain. Settled at\n\
+         # −15 dBFS unless stated. The phase jumps are assumed, not measured on a real AGC.\n\
+         # timing = FFT start exact; ±64 = off by one whole long training symbol.\n\
+         # RMS errors in Hz over the frames with exact timing; slips = of those, fine estimate off\n\
+         # by more than fs/256 (its lag-64 ambiguity resolved wrongly), left out of the fine RMS."
+    );
+    let mut ci = 0u64;
+    for (title, group) in &cases {
+        println!(
+            "\n## {title}\n# case                                          acquired  timing    ±64   combined     coarse       fine  slips"
+        );
+        for c in group {
+            ci += 1;
+            let settled = full * 10f64.powf(c.settled_dbfs / 20.0) / p.sqrt();
+            let mut rng = Rng::new(0xa6c0 + ci);
+            let (mut acq, mut tim, mut sym, mut slips) = (0usize, 0usize, 0usize, 0usize);
+            let (mut se, mut sc, mut sf) = (0.0f64, 0.0f64, 0.0f64);
+            for _ in 0..frames {
+                let lead = 600 + (rng.uniform() * 50.0) as usize;
+                let mut x = vec![(0.0, 0.0); lead];
+                x.extend_from_slice(&frame);
+                x.extend(vec![(0.0, 0.0); 300]);
+                let cfo = (2.0 * rng.uniform() - 1.0) * 235e3;
+                let x = frequency_offset(&x, cfo, FS, 2.0 * PI * rng.uniform());
+                let x = awgn(&x, SNR_DB, p, &mut rng);
+                let mut phase = 0.0;
+                let mut states: Vec<GainState> = Vec::new();
+                // Phases accumulate backwards from the settled chain (phase 0 after the last
+                // step).
+                for &(at, db) in c.steps.iter().rev() {
+                    phase += (2.0 * rng.uniform() - 1.0) * c.jump_deg.to_radians();
+                    let a = c
+                        .dc_dbfs
+                        .map_or(0.0, |d| full * 10f64.powf(d / 20.0) / settled);
+                    let t = 2.0 * PI * rng.uniform();
+                    states.push(GainState {
+                        until: lead + at,
+                        gain_db: db,
+                        phase,
+                        dc: (a * t.cos(), a * t.sin()),
+                    });
+                }
+                states.reverse();
+                let adc = to_adc(&agc_transient(&x, &states), settled);
+                if let Some(a) = acquire_fixed(&adc, &cfg, &fx) {
+                    acq += 1;
+                    let want = lead + T1 - b;
+                    sym += usize::from(a.fft_start.abs_diff(want) == 64);
+                    if a.fft_start != want {
+                        continue;
+                    }
+                    tim += 1;
+                    let e = a.cfo_hz(&fx, FS) - cfo;
+                    let ec = a.coarse_phase as f64 * unit - cfo;
+                    let ef = a.fine_phase as f64 * unit - cfo;
+                    se += e * e;
+                    sc += ec * ec;
+                    if ef.abs() > FS / 256.0 {
+                        slips += 1;
+                    } else {
+                        sf += ef * ef;
+                    }
+                }
+            }
+            let rms = |s: f64, n: usize| (s / n.max(1) as f64).sqrt();
+            println!(
+                "{:<48} {acq:>8} {tim:>7} {sym:>6} {:>10.0} {:>10.0} {:>10.0} {slips:>6}",
+                c.name,
+                rms(se, tim),
+                rms(sc, tim),
+                rms(sf, tim - slips)
+            );
+        }
+    }
+}
+
+/// A Hamming-windowed sinc low-pass filter, cutoff in cycles per sample, unit DC gain.
+fn lowpass(cutoff: f64, taps: usize) -> Vec<f64> {
+    let mid = (taps - 1) as f64 / 2.0;
+    let h: Vec<f64> = (0..taps)
+        .map(|i| {
+            let t = i as f64 - mid;
+            let sinc = if t == 0.0 {
+                2.0 * cutoff
+            } else {
+                (2.0 * PI * cutoff * t).sin() / (PI * t)
+            };
+            sinc * (0.54 - 0.46 * (2.0 * PI * i as f64 / (taps - 1) as f64).cos())
+        })
+        .collect();
+    let sum: f64 = h.iter().sum();
+    h.iter().map(|v| v / sum).collect()
+}
+
+fn fir(x: &[C], h: &[f64]) -> Vec<C> {
+    (h.len()..x.len())
+        .map(|n| {
+            h.iter().enumerate().fold((0.0, 0.0), |a, (k, c)| {
+                (a.0 + c * x[n - k].0, a.1 + c * x[n - k].1)
+            })
+        })
+        .collect()
+}
+
+/// False alarms of the fixed receiver on band-limited noise at −30 dBFS: the white-noise law
+/// (`tail`, `tailfx`) does not hold behind a channel filter. An excursion is a group of events
+/// less than 1000 samples apart (events of one excursion are not independent).
+fn tailbw(million: usize) {
+    let cfg = RxConfig::new(FS);
+    let fx = FixedRxConfig::default();
+    let per_thread = million.div_ceil(threads()).max(1);
+    println!(
+        "# rxfront tailbw: RxFrontFixed on noise at −30 dBFS behind a 65-tap low-pass filter,\n\
+         # {} M samples per case ({} threads x {per_thread} M; the streams depend on the thread count).\n\
+         # Budget: 5e-8 detector events per sample (1 per second at 20 MS/s).\n\
+         # The 802.11 signal occupies ±8.3 MHz: the two narrowest filters cut into it and are not\n\
+         # usable channel filters; they show the trend.\n\
+         # passband        detector events  excursions   per sample   acquisitions",
+        per_thread * threads(),
+        threads()
+    );
+    for (ci, (name, cutoff)) in [
+        ("white", 0.0),
+        ("±9.0 MHz", 0.45),
+        ("±8.3 MHz", 0.415),
+        ("±7.5 MHz (cuts)", 0.375),
+        ("±6.0 MHz (cuts)", 0.30),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let h = lowpass(cutoff, 65);
+        let r = par(|t| {
+            let mut rng = Rng::new(0xfa00_0000 + ((ci as u64) << 20) + t as u64);
+            let (mut d, mut e, mut a, mut n) = (0usize, 0usize, 0usize, 0usize);
+            for _ in 0..per_thread {
+                let x = noise(1_000_000, &mut rng);
+                let x = if cutoff > 0.0 { fir(&x, &h) } else { x };
+                // Unit power before the filter; the level is set on what the ADC sees.
+                let gain =
+                    f64::from(ADC_FULL_SCALE) * 10f64.powf(-30.0 / 20.0) / mean_power(&x).sqrt();
+                let adc = to_adc(&x, gain);
+                let det = detections_fixed(&adc, &cfg, &fx);
+                d += det.len();
+                e += det
+                    .iter()
+                    .zip(std::iter::once(&usize::MAX).chain(det.iter()))
+                    .filter(|(now, before)| **before == usize::MAX || **now - **before >= 1000)
+                    .count();
+                a += acquisitions_fixed(&adc, &cfg, &fx).len();
+                n += adc.len();
+            }
+            (d, e, a, n)
+        });
+        let (d, e, a, n) = r.iter().fold((0, 0, 0, 0), |s, v| {
+            (s.0 + v.0, s.1 + v.1, s.2 + v.2, s.3 + v.3)
+        });
+        println!(
+            "{name:<16} {d:>16} {e:>11}   {:>10.1e}   {a:>12}",
+            d as f64 / n as f64
+        );
+    }
+}
+
+/// Float and fixed receiver on the same ADC samples against the packet's level in the ADC.
+fn level(frames: usize) {
+    let cfg = RxConfig::new(FS);
+    let fx = FixedRxConfig::default();
+    let frame = preamble();
+    let p = mean_power(&frame);
+    let b = backoff_samples(&cfg);
+    println!(
+        "# rxfront level: {frames} frames per point, CFO uniform in ±235 kHz, random fractional delay;\n\
+         # both receivers on the same 12-bit ADC samples. timing = FFT start within ±1 sample.\n\
+         # SNR  level     float: acquired timing CFO RMS   fixed: acquired timing CFO RMS   fixed/float"
+    );
+    for snr in [4.0, 10.0, 25.0] {
+        for lvl in [-3.0, -9.0, -15.0, -30.0, -45.0, -55.0, -60.0] {
+            let mut rng = Rng::new(0x1e7e1);
+            let (mut af, mut ax, mut tf, mut tx) = (0usize, 0usize, 0usize, 0usize);
+            let (mut sf, mut sx) = (0.0f64, 0.0f64);
+            for _ in 0..frames {
+                let lead = 600;
+                let mut x = vec![(0.0, 0.0); lead];
+                x.extend_from_slice(&frame);
+                x.extend(vec![(0.0, 0.0); 300]);
+                let x = fractional_delay(&x, rng.uniform());
+                let cfo = (2.0 * rng.uniform() - 1.0) * 235e3;
+                let x = frequency_offset(&x, cfo, FS, 2.0 * PI * rng.uniform());
+                let x = awgn(&x, snr, p, &mut rng);
+                let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(lvl / 20.0) / p.sqrt();
+                let adc = to_adc(&x, gain);
+                let xf: Vec<C> = adc
+                    .iter()
+                    .map(|s| (f64::from(s.0), f64::from(s.1)))
+                    .collect();
+                let ok = |start: usize| start.abs_diff(lead + T1 - b) <= 1;
+                if let Some(a) = acquire(&xf, 0, &cfg) {
+                    af += 1;
+                    tf += usize::from(ok(a.fft_start));
+                    sf += (a.cfo_hz - cfo).powi(2);
+                }
+                if let Some(a) = acquire_fixed(&adc, &cfg, &fx) {
+                    ax += 1;
+                    tx += usize::from(ok(a.fft_start));
+                    sx += (a.cfo_hz(&fx, FS) - cfo).powi(2);
+                }
+            }
+            let (rf, rx) = (
+                (sf / af.max(1) as f64).sqrt(),
+                (sx / ax.max(1) as f64).sqrt(),
+            );
+            println!(
+                "{snr:>5} {lvl:>6} dBFS {af:>12} {tf:>6} {rf:>7.0} Hz {ax:>12} {tx:>6} {rx:>7.0} Hz   {:>6.2}",
+                rx / rf.max(1e-9)
+            );
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
@@ -972,8 +1345,11 @@ fn main() -> ExitCode {
         "tailfx" => tailfx(n.unwrap_or(100)),
         "g2joint" => g2joint(n.unwrap_or(3000)),
         "latency" => latency(n.unwrap_or(500)),
+        "agc" => agc(n.unwrap_or(500)),
+        "tailbw" => tailbw(n.unwrap_or(400)),
+        "level" => level(n.unwrap_or(400)),
         _ => {
-            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency [n]");
+            eprintln!("usage: rxfront tail|pd|robust|frames|g2|g2joint|tailfx|latency|agc|tailbw|level [n]");
             return ExitCode::from(2);
         }
     }

@@ -11,7 +11,7 @@
 //!    Schmidl–Cox metric is exactly 1 — the reason R0-08 needs a DC blocker.
 //! 4. Decibels: a gain step of g dB scales amplitude by 10^(g/20), power by 10^(g/10).
 
-use radio_phy::channel::{add_tone, awgn, gain_step, mean_power, Rng};
+use radio_phy::channel::{add_tone, agc_transient, awgn, gain_step, mean_power, GainState, Rng};
 use std::f64::consts::PI;
 
 type C = (f64, f64);
@@ -161,5 +161,70 @@ fn gain_step_scales_from_its_sample_on() {
             assert!((10.0 * ratio.log10() - db).abs() < 1e-12);
             assert_eq!(&y[..at], &x[..at]);
         }
+    }
+}
+
+/// `agc_transient` against its definition and against the two functions it generalises: with one
+/// state and no phase or DC it is the inverse-ordered `gain_step` (gain before `until`, unity
+/// after), and a DC-only state is `add_tone` at 0 Hz on that span.
+#[test]
+fn agc_transient_states() {
+    let mut rng = Rng::new(0xa6c1);
+    let x = awgn(&vec![(0.0, 0.0); 300], 0.0, 1.0, &mut rng);
+    assert_eq!(agc_transient(&x, &[]), x);
+
+    // One state: +20 dB before sample 100 is the whole signal at +20 dB with a −20 dB step at 100.
+    let st = GainState {
+        until: 100,
+        gain_db: 20.0,
+        phase: 0.0,
+        dc: (0.0, 0.0),
+    };
+    let y = agc_transient(&x, &[st]);
+    let all: Vec<_> = x.iter().map(|s| (s.0 * 10.0, s.1 * 10.0)).collect();
+    let want = gain_step(&all, 100, -20.0);
+    for (a, b) in y.iter().zip(&want) {
+        assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
+    }
+
+    // Phase: a quarter turn maps (a, b) to (−b, a); DC is added after the gain.
+    let st = GainState {
+        until: 50,
+        gain_db: 6.0,
+        phase: std::f64::consts::FRAC_PI_2,
+        dc: (3.0, -2.0),
+    };
+    let st2 = GainState {
+        until: 120,
+        gain_db: 0.0,
+        phase: 0.0,
+        dc: (-1.0, 0.5),
+    };
+    let y = agc_transient(&x, &[st, st2]);
+    let g = 10f64.powf(6.0 / 20.0);
+    for n in 0..300 {
+        let want = if n < 50 {
+            (-g * x[n].1 + 3.0, g * x[n].0 - 2.0)
+        } else if n < 120 {
+            (x[n].0 - 1.0, x[n].1 + 0.5)
+        } else {
+            x[n]
+        };
+        assert!(
+            (y[n].0 - want.0).abs() < 1e-9 && (y[n].1 - want.1).abs() < 1e-9,
+            "sample {n}"
+        );
+    }
+    // The DC-only span agrees with add_tone at 0 Hz.
+    let dc_only = GainState {
+        until: 300,
+        gain_db: 0.0,
+        phase: 0.0,
+        dc: (0.6, 0.8),
+    };
+    let y = agc_transient(&x, &[dc_only]);
+    let t = add_tone(&x, 1.0, 0.0, 20e6, (0.8f64).atan2(0.6));
+    for (a, b) in y.iter().zip(&t) {
+        assert!((a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9);
     }
 }

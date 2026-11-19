@@ -243,6 +243,51 @@ pub fn gain_step(x: &[Sample], at: usize, gain_db: f64) -> Vec<Sample> {
         .collect()
 }
 
+/// One state of a receive chain while its gain control settles: the state holds for the
+/// samples before `until`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GainState {
+    /// First sample of the next state.
+    pub until: usize,
+    /// Gain relative to the settled chain, dB (amplitude 10^(g/20)).
+    pub gain_db: f64,
+    /// Carrier phase relative to the settled chain, radians (a gain stage switched in or out
+    /// changes the phase of the path).
+    pub phase: f64,
+    /// DC offset added after the gain (it changes with the gain state in a zero-IF receiver).
+    pub dc: Sample,
+}
+
+/// An AGC settling transient: sample n takes the first state with `n < until`; samples after the
+/// last state are unchanged (the settled chain). `states` must be ordered by `until`. Steps are
+/// instantaneous. Clipping is the ADC's: feed the result to a saturating quantiser.
+///
+/// What a fast-attack AGC does to the start of a packet: it sits at high gain on noise, the
+/// packet clips, and one to three gain steps follow inside the short training field, each with
+/// its own phase and DC offset.
+pub fn agc_transient(x: &[Sample], states: &[GainState]) -> Vec<Sample> {
+    let mut k = 0;
+    x.iter()
+        .enumerate()
+        .map(|(n, s)| {
+            while k < states.len() && n >= states[k].until {
+                k += 1;
+            }
+            match states.get(k) {
+                None => *s,
+                Some(st) => {
+                    let g = 10f64.powf(st.gain_db / 20.0);
+                    let (sin, cos) = st.phase.sin_cos();
+                    (
+                        g * (s.0 * cos - s.1 * sin) + st.dc.0,
+                        g * (s.0 * sin + s.1 * cos) + st.dc.1,
+                    )
+                }
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------------------------
 // Part II (R0-07b): FFT, fractional delay, sample-clock offset, fading taps, TGn multipath.
 // ---------------------------------------------------------------------------------------------
