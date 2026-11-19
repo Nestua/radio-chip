@@ -11,6 +11,7 @@ pub mod convolutional;
 pub mod fixed;
 pub mod interleaver;
 pub mod ldpc;
+pub mod ldpc_decoder;
 mod ldpc_tables;
 pub mod mapper;
 pub mod modulation;

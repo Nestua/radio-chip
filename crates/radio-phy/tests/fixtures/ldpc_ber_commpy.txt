@@ -1,0 +1,15 @@
+# Error rates of HT LDPC codes under flooding belief propagation: CommPy's ldpc_bp_decode, black box.
+# Tool: scikit-commpy 0.8.0, numpy 2.0.2; matrices from github.com/tavildar/LDPC at 05ee7f4.
+# Command: tools/ref/ldpc_ber_commpy.py run … / combine (see the script).
+# All-zero codeword, BPSK, AWGN, at most 50 iterations; BER over all n bits.
+# n rate algorithm Eb/N0[dB] blocks BER stderr(BER) block_errors
+648 1/2 SPA 1.0 5000 3.437932e-02 7.221e-04 1741
+648 1/2 SPA 1.5 5000 6.486728e-03 3.541e-04 365
+648 1/2 SPA 2.0 5000 4.015432e-04 8.397e-05 29
+648 1/2 MSA 1.5 5000 5.292716e-02 1.014e-03 1891
+648 1/2 MSA 2.0 5000 8.370679e-03 4.647e-04 346
+648 1/2 MSA 2.5 5000 5.166667e-04 1.191e-04 21
+648 5/6 SPA 3.0 5000 1.299753e-02 2.251e-04 2214
+648 5/6 SPA 3.5 5000 2.239815e-03 1.087e-04 439
+1296 3/4 SPA 2.0 5000 3.390293e-02 3.274e-04 3634
+1296 3/4 SPA 2.5 5000 5.132253e-03 1.928e-04 674

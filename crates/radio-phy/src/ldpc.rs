@@ -83,6 +83,18 @@ pub enum LdpcError {
         /// Bits the plan was made for.
         want: usize,
     },
+    /// The soft values or decoded bits handed over are not as many as the code or the plan
+    /// has places for.
+    SoftLength {
+        /// Values offered.
+        got: usize,
+        /// Values wanted.
+        want: usize,
+    },
+    /// A soft value that is not a number.
+    NotANumber,
+    /// The decoder's parameters describe no decoder (a width, a normalisation factor).
+    DecoderConfig,
 }
 
 impl std::fmt::Display for LdpcError {
@@ -96,6 +108,11 @@ impl std::fmt::Display for LdpcError {
             LdpcError::PayloadLength { got, want } => {
                 write!(f, "{got} payload bits offered, the plan is for {want}")
             }
+            LdpcError::SoftLength { got, want } => {
+                write!(f, "{got} values offered, {want} wanted")
+            }
+            LdpcError::NotANumber => write!(f, "a soft value is not a number"),
+            LdpcError::DecoderConfig => write!(f, "the parameters describe no decoder"),
         }
     }
 }
@@ -390,20 +407,29 @@ impl LdpcPlan {
     }
 
     /// `total` spread over the codewords: the first `total mod N_CW` get one more.
-    fn share(&self, total: usize, cw: usize) -> usize {
+    pub(crate) fn share_of(&self, total: usize, cw: usize) -> usize {
         total / self.n_cw + usize::from(cw < total % self.n_cw)
     }
 
     /// Whether the numbers fit the code: what `new` guarantees and a hand-made plan may not.
-    fn consistent(&self) -> bool {
+    pub(crate) fn is_consistent(&self) -> bool {
         let (num, den) = self.rate.fraction();
         let l = self.length.bits();
         let k = l * num / den;
+        // What is sent: the codewords without their shortened and punctured bits, plus the
+        // repeated ones, is exactly N_avbits (checked: a hand-made plan may hold anything).
+        let sent = self
+            .n_cw
+            .checked_mul(l)
+            .and_then(|x| x.checked_sub(self.n_shrt))
+            .and_then(|x| x.checked_sub(self.n_punc))
+            .and_then(|x| x.checked_add(self.n_rep));
         self.n_cw > 0
             && self.n_cw.checked_mul(k) == self.n_pld.checked_add(self.n_shrt)
             && self.n_shrt.div_ceil(self.n_cw) < k
             && self.n_punc.div_ceil(self.n_cw) < l - k
             && self.n_rep <= 1 << 24
+            && sent == Some(self.n_avbits)
     }
 
     /// The information blocks handed to the encoder: the payload spread over the codewords
@@ -415,7 +441,7 @@ impl LdpcPlan {
                 want: self.n_pld,
             });
         }
-        if !self.consistent() {
+        if !self.is_consistent() {
             return Err(LdpcError::Parameters);
         }
         let (num, den) = self.rate.fraction();
@@ -423,7 +449,7 @@ impl LdpcPlan {
         let mut out = Vec::with_capacity(self.n_cw * k);
         let mut at = 0;
         for cw in 0..self.n_cw {
-            let data = k - self.share(self.n_shrt, cw);
+            let data = k - self.share_of(self.n_shrt, cw);
             out.extend_from_slice(&payload[at..at + data]);
             out.resize((cw + 1) * k, 0);
             at += data;
@@ -451,15 +477,15 @@ impl LdpcPlan {
         let words = self.codewords(payload)?;
         let mut out = Vec::with_capacity(self.n_avbits);
         for (cw, word) in words.chunks(l).enumerate() {
-            let data = k - self.share(self.n_shrt, cw);
-            let parity = l - k - self.share(self.n_punc, cw);
+            let data = k - self.share_of(self.n_shrt, cw);
+            let parity = l - k - self.share_of(self.n_punc, cw);
             let start = out.len();
             out.extend_from_slice(&word[..data]);
             out.extend_from_slice(&word[k..k + parity]);
             // Repetition copies from the codeword as transmitted so far, from its first bit,
             // going round again if one pass is not enough.
             let sent = out.len() - start;
-            for i in 0..self.share(self.n_rep, cw) {
+            for i in 0..self.share_of(self.n_rep, cw) {
                 out.push(out[start + i % sent]);
             }
         }
