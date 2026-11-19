@@ -1,7 +1,8 @@
 //! G1 gate of the capture tooling (R0-13, `radio-capture`).
 //!
-//! References we did not write, all CPython's standard library run as a black box
-//! (`tools/ref/capture_python.py`, ADR 0005), plus FIPS 180-4's own examples:
+//! References we did not write: CPython's standard library run as a black box
+//! (`tools/ref/capture_python.py`, ADR 0005), FIPS 180-4's own examples, and the SigMF
+//! project's own library (`tools/ref/capture_sigmf.py`, references 5 and 6):
 //! 1. `hashlib.sha512` on 328 deterministic messages (every length to 299, the block
 //!    boundaries, 1 MB), and the digests printed in FIPS 180-4 / NIST's example files.
 //! 2. `json.dumps`: JSON texts with every escape, non-ASCII text, astral characters, numbers
@@ -10,6 +11,11 @@
 //!    fields.
 //! 4. Python's verdict on a recording we wrote (`rs.sigmf-*`, committed, and checked here to
 //!    be what today's code writes): it parses, the checksum holds, the fields are there.
+//! 5. A SigMF recording written by the `sigmf` library (`sg.sigmf-*`): our reader gives its
+//!    samples and fields, including the members the library adds on its own.
+//! 6. The `sigmf` library's verdict on `rs.sigmf-*`: valid against the project's schema, the
+//!    checksum verified, the samples read back; and the same metadata refused with a member
+//!    damaged, so that "valid" means something.
 //!
 //! Round trips, damage and limits are properties (no outside reference needed).
 
@@ -271,6 +277,98 @@ fn reads_the_recording_python_wrote() {
         .map(|s| (f64::from(s.0), f64::from(s.1)))
         .collect();
     assert_eq!(got, want_f);
+}
+
+#[test]
+fn reads_the_recording_the_sigmf_library_wrote() {
+    let r = Recording::read(&fixtures().join("sg.sigmf-meta")).unwrap();
+    assert_eq!(r.meta.datatype, Datatype::Ci16Le);
+    assert_eq!(r.meta.sample_rate_hz, 20e6);
+    assert_eq!(
+        r.meta.description.as_deref(),
+        Some("ramp written by the sigmf library")
+    );
+    assert_eq!(r.meta.author.as_deref(), Some("capture_sigmf.py"));
+    // The library writes these two on its own; they say what we assume, and are kept.
+    assert_eq!(
+        r.meta.other,
+        vec![
+            ("core:num_channels".to_string(), Value::Number("1".into())),
+            ("core:offset".to_string(), Value::Number("0".into())),
+        ]
+    );
+    assert_eq!(r.meta.captures.len(), 2);
+    assert_eq!(r.meta.captures[0].frequency_hz, Some(5.805e9));
+    assert_eq!(
+        r.meta.captures[0].datetime.as_deref(),
+        Some("2026-11-19T00:00:00Z")
+    );
+    assert_eq!(
+        (
+            r.meta.captures[1].sample_start,
+            r.meta.captures[1].frequency_hz
+        ),
+        (200, Some(5.825e9))
+    );
+    let a = &r.meta.annotations[0];
+    assert_eq!((a.sample_start, a.sample_count), (40, Some(120)));
+    assert_eq!(
+        (a.label.as_deref(), a.comment.as_deref()),
+        (Some("burst"), Some("second reference"))
+    );
+    let names: Vec<&str> = a.other.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["core:freq_lower_edge", "core:freq_upper_edge"]);
+    // The ramp of capture_sigmf.py.
+    let want: Vec<(i16, i16)> = (0..400i32)
+        .map(|n| {
+            (
+                ((11 * n) % 4096 - 2048) as i16,
+                (2047 - (5 * n) % 4096) as i16,
+            )
+        })
+        .collect();
+    assert_eq!(r.to_i16().unwrap(), want);
+}
+
+#[test]
+fn the_sigmf_library_accepts_the_recording_we_write() {
+    // `python_reads_the_recording_we_write` shows the committed rs.sigmf-* are what today's
+    // code writes; here the library's verdict must be about those same bytes.
+    let meta = std::fs::read(fixtures().join("rs.sigmf-meta")).unwrap();
+    let verdict = std::fs::read_to_string(fixtures().join("sg_verdict.txt")).unwrap();
+    let field = |name: &str| {
+        verdict
+            .lines()
+            .find_map(|l| l.strip_prefix(name).and_then(|r| r.strip_prefix(' ')))
+            .unwrap_or_else(|| panic!("no {name} in the verdict"))
+            .to_string()
+    };
+    assert_eq!(
+        field("meta_sha512"),
+        hex(&sha512(&meta)),
+        "the verdict is about another file"
+    );
+    assert_eq!(field("schema_valid"), "True");
+    assert_eq!(field("checksum_verified"), "True");
+    let ours = ours();
+    assert_eq!(field("samples"), ours.len().to_string());
+    let first: Vec<String> = ours.to_i16().unwrap()[..4]
+        .iter()
+        .flat_map(|s| [s.0.to_string(), s.1.to_string()])
+        .collect();
+    assert_eq!(field("first_samples"), first.join(" "));
+    assert_eq!(field("sample_rate"), "20000000");
+    assert_eq!(field("captures"), "1 frequency 5805000000");
+    assert_eq!(field("annotation"), "16 320 preamble");
+    // The validator bites: the same metadata with one member damaged is refused.
+    let refusals: Vec<&str> = verdict
+        .lines()
+        .filter(|l| l.starts_with("refuses_"))
+        .collect();
+    assert_eq!(refusals.len(), 6);
+    for line in refusals {
+        assert!(line.ends_with(" True"), "{line}");
+    }
 }
 
 /// The recording committed as `rs.sigmf-*`, the one Python gave its verdict on.

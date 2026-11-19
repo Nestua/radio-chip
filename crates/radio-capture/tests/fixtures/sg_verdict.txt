@@ -1,0 +1,17 @@
+# Verdict of the SigMF project's library on the recording our code wrote (rs.sigmf-*).
+# Tool: sigmf 1.11.1 (PyPI), numpy 2.0.2, Python 3.9.6
+# Command: <venv>/bin/python -I tools/ref/capture_sigmf.py check <dir>
+meta_sha512 012645da9dc815a7443a1d6b9d938bfe24214652bd85b65d87328bddd188df1c42a67c86342bb3093d4f4791920ec3f5275de8fea474b44947b0fe36bc884695
+schema_valid True
+checksum_verified True
+samples 500
+first_samples -2000 -1999 -1999 -1962 -1996 -1925 -1991 -1888
+sample_rate 20000000
+captures 1 frequency 5805000000
+annotation 16 320 preamble
+refuses_missing_datatype True
+refuses_unknown_datatype True
+refuses_text_sample_rate True
+refuses_missing_sample_start True
+refuses_negative_sample_start True
+refuses_text_frequency True
