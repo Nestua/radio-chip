@@ -91,8 +91,10 @@ const SLACK: usize = 10;
 
 #[test]
 fn the_gate_sees_a_narrower_decoder() {
-    // What the sweep rejects must fail here too: one bit less in the messages, one bit
-    // less in the totals, an input of 4 bits, a factor of 3/4.
+    // What the sweep rejects at a block error rate of 10 % must fail here too: messages
+    // of 5 bits, totals of 7, an input of 4 bits, a factor of 3/4. (One bit less than
+    // the choice, 6 and 8, costs nothing here: it shows as a tail below 1 %, which only
+    // the sweep's block counts see.)
     let hw = MinSumConfig::HARDWARE;
     let fails = |in_bits, cfg: MinSumConfig| {
         let (h, f, _) = discordant(LdpcLength::N648, LdpcRate::R1_2, 1.5, 400, in_bits, &cfg);
@@ -100,7 +102,14 @@ fn the_gate_sees_a_narrower_decoder() {
         h > f + SLACK
     };
     assert!(fails(LDPC_SOFT_BITS, MinSumConfig { msg_bits: 5, ..hw }));
-    assert!(fails(LDPC_SOFT_BITS, MinSumConfig { app_bits: 7, ..hw }));
+    assert!(fails(
+        LDPC_SOFT_BITS,
+        MinSumConfig {
+            msg_bits: 6,
+            app_bits: 7,
+            ..hw
+        }
+    ));
     assert!(fails(4, hw));
     assert!(fails(
         LDPC_SOFT_BITS,

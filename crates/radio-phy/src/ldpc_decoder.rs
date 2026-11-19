@@ -103,15 +103,15 @@ pub const LDPC_SOFT_BITS: u32 = 6;
 pub const LDPC_SOFT_CLIP: f64 = 2.0;
 
 impl MinSumConfig {
-    /// The hardware decoder (G2, `docs/gates/ldpc.md`): 6-bit messages, 8-bit totals,
+    /// The hardware decoder (G2, `docs/gates/ldpc.md`): 7-bit messages, 9-bit totals,
     /// ⌊7·min/8⌋, at most 20 iterations, for an input of [`LDPC_SOFT_BITS`] bits.
     pub const HARDWARE: MinSumConfig = MinSumConfig {
         max_iter: 20,
         scale_num: 7,
         scale_shift: 3,
         scale_round: false,
-        msg_bits: 6,
-        app_bits: 8,
+        msg_bits: 7,
+        app_bits: 9,
     };
 
     /// Whether the parameters describe a decoder: widths of 2 to 24 bits, the total at
