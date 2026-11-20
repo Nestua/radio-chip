@@ -28,7 +28,8 @@ pub type ChannelEstimate = [Sample; FFT_SIZE];
 /// Receiver settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RxOfdmConfig {
-    /// Largest soft magnitude handed to the Viterbi decoder.
+    /// Largest soft magnitude handed to the Viterbi decoder (with `mid_rise`: the largest
+    /// magnitude index; the values then reach 2·soft_max + 1).
     pub soft_max: i32,
     /// Soft metric (in half minimum distances of the constellation, on a subcarrier of mean
     /// gain) that maps to `soft_max`.
@@ -38,6 +39,12 @@ pub struct RxOfdmConfig {
     /// Track the timing drift of a sample-clock offset on the pilots' phase slope (needs
     /// `pilot_tracking`).
     pub timing_tracking: bool,
+    /// Quantise without a zero level (mid-rise): the magnitude index i = ⌊|x|·(soft_max+1)/clip⌋,
+    /// at most `soft_max`, comes out as ±(2i + 1), so a weak bit keeps its sign instead of
+    /// becoming an erasure. `soft_max + 1` magnitudes and a sign: the same word as the
+    /// rounding quantiser. An experiment of the G2 sweep (`rxper softg4`); the integer path
+    /// does not have it.
+    pub mid_rise: bool,
 }
 
 impl Default for RxOfdmConfig {
@@ -48,6 +55,7 @@ impl Default for RxOfdmConfig {
             clip: SOFT_CLIP,
             pilot_tracking: true,
             timing_tracking: true,
+            mid_rise: false,
         }
     }
 }
@@ -98,7 +106,7 @@ pub struct Tracking {
 }
 
 /// Slope per subcarrier of one sample of timing offset.
-const ONE_SAMPLE: f64 = 2.0 * PI / FFT_SIZE as f64;
+pub(crate) const ONE_SAMPLE: f64 = 2.0 * PI / FFT_SIZE as f64;
 
 /// Drift of the slope per symbol for a clock offset in ppm.
 fn rate_of(ppm: f64) -> f64 {
@@ -321,6 +329,52 @@ pub fn demap(point: Sample, modulation: Modulation) -> Vec<f64> {
     out
 }
 
+/// The timing tracker's step for one symbol (step 1 of [`equalise`]): `p` are the four pilots
+/// P(k) at −21, −7, 7, 21, `gain` the channel gains |H|² there, `mean_gain` that of the 52
+/// used subcarriers (any common scale), `polarity_index` the symbol's place in time. Leaves
+/// the slope to remove in `tracking.slope`. Shared with the integer receiver, whose tracker
+/// is still this one (`rx_ofdm_fixed`).
+pub(crate) fn track_timing(
+    p: &[Sample; 4],
+    gain: [f64; 4],
+    mean_gain: f64,
+    polarity_index: usize,
+    tracking: &mut Tracking,
+) {
+    let turn = |v: Sample, angle: f64| cmul(v, (angle.cos(), angle.sin()));
+    // Middle of T1 and T2 to the middle of this symbol's window: 112 samples for
+    // SIGNAL, then 80 per symbol.
+    let t = (FFT_SIZE + CP_LEN + FFT_SIZE / 2) as f64 / SYMBOL_LEN as f64 + polarity_index as f64;
+    let moved = tracking.shift as f64 * ONE_SAMPLE;
+    let predicted = tracking.rate * t;
+    let q: Vec<Sample> = p
+        .iter()
+        .zip(&PILOT_SUBCARRIERS)
+        .map(|(v, &c)| turn(*v, -f64::from(c) * (predicted + moved)))
+        .collect();
+    // Pilots at −21, −7, 7, 21: the outer pair spans 42 subcarriers, the inner 14.
+    let outer = cmul(q[3], conj(q[0]));
+    let inner = cmul(q[2], conj(q[1]));
+    // A pilot's phase noise goes as 1/|H|², a pair's as the sum of its two: the pair's
+    // weight is the harmonic combination of the channel gains (from the estimate, which
+    // is the same for every symbol; the pilots' own magnitudes are noisy). One weak
+    // pilot makes its pair worthless, as it should.
+    let pair = |a: f64, b: f64| if a + b > 0.0 { a * b / (a + b) } else { 0.0 };
+    let (wo, wi) = (pair(gain[3], gain[0]), pair(gain[2], gain[1]));
+    let den = 42.0 * 42.0 * wo + 14.0 * 14.0 * wi;
+    let error = if den > 0.0 {
+        (42.0 * wo * outer.1.atan2(outer.0) + 14.0 * wi * inner.1.atan2(inner.0)) / den
+    } else {
+        0.0
+    };
+    // The measurement's variance against a flat channel of the same mean gain (where
+    // each pair's weight is half that gain): what the tracker trusts it by.
+    let flat = (42.0 * 42.0 + 14.0 * 14.0) * mean_gain / 2.0;
+    tracking.update(error, predicted, t, flat / den);
+    tracking.drift = tracking.rate * t;
+    tracking.slope = tracking.drift + moved;
+}
+
 /// Equalises one symbol: `window` is its 64-sample FFT window (moved by `tracking.shift`
 /// samples from its nominal place), `polarity_index` the pilot polarity index (0 for SIGNAL,
 /// k + 1 for DATA symbol k), which is also the symbol's place in time. `None` for a short
@@ -358,39 +412,14 @@ pub fn equalise(
             *slot = (s * t.0, s * t.1);
         }
         if cfg.timing_tracking {
-            // Middle of T1 and T2 to the middle of this symbol's window: 112 samples for
-            // SIGNAL, then 80 per symbol.
-            let t = (FFT_SIZE + CP_LEN + FFT_SIZE / 2) as f64 / SYMBOL_LEN as f64
-                + polarity_index as f64;
-            let moved = tracking.shift as f64 * ONE_SAMPLE;
-            let predicted = tracking.rate * t;
-            let q: Vec<Sample> = p
-                .iter()
-                .zip(&PILOT_SUBCARRIERS)
-                .map(|(v, &c)| turn(*v, -f64::from(c) * (predicted + moved)))
-                .collect();
-            // Pilots at −21, −7, 7, 21: the outer pair spans 42 subcarriers, the inner 14.
-            let outer = cmul(q[3], conj(q[0]));
-            let inner = cmul(q[2], conj(q[1]));
-            // A pilot's phase noise goes as 1/|H|², a pair's as the sum of its two: the pair's
-            // weight is the harmonic combination of the channel gains (from the estimate, which
-            // is the same for every symbol; the pilots' own magnitudes are noisy). One weak
-            // pilot makes its pair worthless, as it should.
             let gain = |c: i8| abs2(h[fft_bin(c)]);
-            let pair = |a: f64, b: f64| if a + b > 0.0 { a * b / (a + b) } else { 0.0 };
-            let (wo, wi) = (pair(gain(21), gain(-21)), pair(gain(7), gain(-7)));
-            let den = 42.0 * 42.0 * wo + 14.0 * 14.0 * wi;
-            let error = if den > 0.0 {
-                (42.0 * wo * outer.1.atan2(outer.0) + 14.0 * wi * inner.1.atan2(inner.0)) / den
-            } else {
-                0.0
-            };
-            // The measurement's variance against a flat channel of the same mean gain (where
-            // each pair's weight is half that gain): what the tracker trusts it by.
-            let flat = (42.0 * 42.0 + 14.0 * 14.0) * mean_gain / 2.0;
-            tracking.update(error, predicted, t, flat / den);
-            tracking.drift = tracking.rate * t;
-            tracking.slope = tracking.drift + moved;
+            track_timing(
+                &p,
+                [gain(-21), gain(-7), gain(7), gain(21)],
+                mean_gain,
+                polarity_index,
+                tracking,
+            );
         }
         let removed = if cfg.timing_tracking {
             tracking.slope
@@ -454,9 +483,22 @@ pub fn soft_bits(eq: &Equalised, modulation: Modulation, cfg: &RxOfdmConfig) -> 
         .iter()
         .zip(&eq.weights)
         .flat_map(|(p, w)| {
-            demap(*p, modulation)
-                .into_iter()
-                .map(move |m| (m * w * scale).round().clamp(-limit, limit) as i32)
+            demap(*p, modulation).into_iter().map(move |m| {
+                let x = m * w;
+                if cfg.mid_rise {
+                    let i = (x.abs() * (limit + 1.0) / cfg.clip)
+                        .floor()
+                        .clamp(0.0, limit);
+                    let v = 2 * (i as i32) + 1;
+                    if x < 0.0 {
+                        -v
+                    } else {
+                        v
+                    }
+                } else {
+                    (x * scale).round().clamp(-limit, limit) as i32
+                }
+            })
         })
         .collect();
     // The interleaver sends coded bit k to position interleaved_index(k). (A symbol with
@@ -473,7 +515,7 @@ pub fn soft_bits(eq: &Equalised, modulation: Modulation, cfg: &RxOfdmConfig) -> 
 
 /// First sample of the FFT window of symbol `i` after the long training field (0 = SIGNAL),
 /// keeping the back-off `fft_start` has inside the cyclic prefix.
-fn symbol_start(fft_start: usize, i: usize) -> usize {
+pub(crate) fn symbol_start(fft_start: usize, i: usize) -> usize {
     // Saturating: a start beyond any stream is reported as truncation, not as an overflow.
     fft_start
         .saturating_add(2 * FFT_SIZE + CP_LEN)
@@ -518,8 +560,13 @@ fn signal_with_phase(
     // IEEE 802.11-2020 §17.3.4: one BPSK rate-1/2 symbol; RATE, reserved, LENGTH (LSB first),
     // even parity over the first 17 bits, six tail zeros.
     let (soft, phase) = symbol_soft(y, fft_start, 0, h, Modulation::Bpsk, cfg, tracking)?;
+    Ok((signal_from_soft(&soft)?, phase))
+}
+
+/// The SIGNAL field from the 48 soft values of its symbol.
+pub(crate) fn signal_from_soft(soft: &[i32]) -> Result<Signal, RxOfdmError> {
     let bits =
-        decode(&soft, CodeRate::R1_2, Termination::ZeroAfter(24)).map_err(RxOfdmError::Viterbi)?;
+        decode(soft, CodeRate::R1_2, Termination::ZeroAfter(24)).map_err(RxOfdmError::Viterbi)?;
     let field = bits.get(..18).ok_or(RxOfdmError::SignalParity)?;
     if field.iter().fold(0u8, |p, b| p ^ b) != 0 {
         return Err(RxOfdmError::SignalParity);
@@ -532,7 +579,7 @@ fn signal_with_phase(
     if !(1..=MAX_PSDU_LEN).contains(&length) {
         return Err(RxOfdmError::SignalLength);
     }
-    Ok((Signal { rate, length }, phase))
+    Ok(Signal { rate, length })
 }
 
 /// Decodes the SIGNAL field with the given channel estimate; `fft_start` as in [`decode_ppdu`].
@@ -615,6 +662,15 @@ fn decode_tracked(
         timing: vec![tracking.timing()],
     };
     let bits = decode_data_bits(y, fft_start, h, signal, cfg, &mut tracking, &mut log)?;
+    descramble(&bits, signal, log)
+}
+
+/// The PSDU from the decoded DATA field: scrambler seed, descrambling, octets.
+pub(crate) fn descramble(
+    bits: &[u8],
+    signal: Signal,
+    log: SymbolLog,
+) -> Result<Decoded, RxOfdmError> {
     // §17.3.5.5: the first seven SERVICE bits are zero, so their scrambled values are the
     // scrambler's first seven outputs and identify its seed. (Hardware loads them as the state;
     // the model searches the 127 seeds.) An error in these seven bits loses the frame.
@@ -624,7 +680,7 @@ fn decode_tracked(
         .ok_or(RxOfdmError::ScramblerSeed)?;
     let clear = Scrambler::new(scrambler_seed)
         .map_err(|_| RxOfdmError::ScramblerSeed)?
-        .scramble(&bits);
+        .scramble(bits);
     let psdu = clear
         .get(16..16 + 8 * signal.length)
         .ok_or(RxOfdmError::ScramblerSeed)?

@@ -340,6 +340,27 @@ fn annex_waveform_decodes() {
         assert_eq!(d.psdu, want, "back-off {backoff}");
         assert_eq!(d.scrambler_seed, seed, "back-off {backoff}");
     }
+    // The integer data path (R0-09 G2, stage A) on the same samples as a 12-bit ADC would
+    // hand them over, the frame at −12 dBFS, with the default words.
+    {
+        use radio_phy::rx_ofdm::Tracking;
+        use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig};
+        let p = y.iter().map(|v| v.0 * v.0 + v.1 * v.1).sum::<f64>() / y.len() as f64;
+        let z = to_fixed(&y, 2048.0 * (10f64.powf(-1.2) / p).sqrt(), 12);
+        for backoff in [0usize, 2, 4, 8, 15] {
+            let d = decode_ppdu_fixed(
+                &z,
+                192 - backoff,
+                &RxOfdmConfig::default(),
+                &FixedOfdmConfig::default(),
+                Tracking::default(),
+            )
+            .unwrap();
+            assert_eq!(d.signal.rate, Rate::R36);
+            assert_eq!(d.psdu, want, "integer path, back-off {backoff}");
+            assert_eq!(d.scrambler_seed, seed, "integer path, back-off {backoff}");
+        }
+    }
     println!(
         "Annex I.1 waveform: {} octets decoded, \"{}…\"",
         want.len(),

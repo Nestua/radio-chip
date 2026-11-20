@@ -10,6 +10,11 @@
 //! - `timing`: what the timing tracker costs and saves near 10 % PER.
 //! - `soft`, `soft2`: PER against the soft values' width and clip level, AWGN and TGn B and D
 //!   (a wide survey, then the candidates around a step of 0.1).
+//! - `fixed`, `fixedw`: G2 of the integer data path (`rx_ofdm_fixed`): the loss against the
+//!   float receiver on the same 12-bit samples over the grids of `softg2`, and the frames lost
+//!   near 10 % PER with one width changed at a time.
+//! - `softg2`: the G2 sweep of the soft-value format (R0-09): the candidates on the same
+//!   frames, fine grids around the 10 % crossings, AWGN and TGn B, D and E.
 //!
 //! Every frame has a clock offset between the two ends (uniform in ±40 ppm unless stated) that
 //! sets both its CFO and its sample-clock offset, at a 5.8 GHz carrier.
@@ -26,7 +31,9 @@ use radio_phy::channel::{
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{acquire, correct, RxConfig};
+use radio_phy::rx_front_fixed::FixedRxConfig;
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
+use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig};
 
 type C = (f64, f64);
 
@@ -81,11 +88,23 @@ struct Receiver {
     name: &'static str,
     cfg: RxOfdmConfig,
     hint: bool,
+    /// The integer data path with these widths instead of the float one.
+    fixed: Option<FixedOfdmConfig>,
 }
 
 fn receiver(name: &'static str, hint: bool, cfg: RxOfdmConfig) -> Receiver {
-    Receiver { name, cfg, hint }
+    Receiver {
+        name,
+        cfg,
+        hint,
+        fixed: None,
+    }
 }
+
+/// Level of the frame in the 12-bit samples both kinds of receiver are handed when any of
+/// them is the integer one, dBFS (0 dBFS: a mean |v|² of full scale squared).
+const ADC_LEVEL_DBFS: f64 = -12.0;
+const ADC_FULL: f64 = 2048.0;
 
 /// Frames lost by each receiver out of `frames` (rounded up to the thread count).
 /// One operating point: `ppm` is the clock offset between the two ends, `None` draws it
@@ -134,15 +153,29 @@ fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<
                 lost.iter_mut().for_each(|l| *l += 1);
                 continue;
             };
-            let y = correct(&x, a.cfo_hz, FS);
+            let mut y = correct(&x, a.cfo_hz, FS);
+            // With an integer receiver in the set every receiver sees the corrected stream
+            // as 12-bit samples, the frame's span at the level a gain control would leave it.
+            let z = receivers.iter().any(|r| r.fixed.is_some()).then(|| {
+                let span = &y[300.min(y.len())..(300 + f.len()).min(y.len())];
+                let k = (10f64.powf(ADC_LEVEL_DBFS / 10.0) / mean_power(span)).sqrt();
+                to_fixed(&y, ADC_FULL * k, 12)
+            });
+            if let Some(z) = &z {
+                y = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
+            }
             for (k, r) in receivers.iter().enumerate() {
                 let start = if r.hint {
                     Tracking::from_clock_offset(a.cfo_hz / CARRIER_HZ * 1e6)
                 } else {
                     Tracking::default()
                 };
-                let ok =
-                    decode_ppdu_from(&y, a.fft_start, &r.cfg, start).is_ok_and(|d| d.psdu == psdu);
+                let ok = match (&r.fixed, &z) {
+                    (Some(fx), Some(z)) => decode_ppdu_fixed(z, a.fft_start, &r.cfg, fx, start)
+                        .is_ok_and(|d| d.psdu == psdu),
+                    _ => decode_ppdu_from(&y, a.fft_start, &r.cfg, start)
+                        .is_ok_and(|d| d.psdu == psdu),
+                };
                 lost[k] += usize::from(!ok);
             }
         }
@@ -244,6 +277,308 @@ fn fine() -> RxOfdmConfig {
         soft_max: 255,
         clip: 6.0,
         ..base()
+    }
+}
+
+/// The working soft format (the founder, 2026-11-19): six bits, clip 2.
+fn soft6() -> RxOfdmConfig {
+    RxOfdmConfig {
+        soft_max: 31,
+        clip: 2.0,
+        ..base()
+    }
+}
+
+/// The soft-format sweep: a fine reference and every candidate on the same frames, on grids
+/// of 0.5 dB (AWGN) and 1 dB (fading) around the 10 % crossings that `soft2` found.
+fn soft_formats(tag: &str, formats: &[(&'static str, i32, f64)], frames: usize) {
+    let mut rx = vec![receiver("fine", true, fine())];
+    for &(name, soft_max, clip) in formats {
+        rx.push(receiver(
+            name,
+            true,
+            RxOfdmConfig {
+                soft_max,
+                clip,
+                ..base()
+            },
+        ));
+    }
+    sweep(
+        &format!("AWGN, soft-value formats ({tag})"),
+        Channel::Awgn,
+        &rx,
+        [2.5, 3.5, 5.5, 7.5, 10.5, 13.5, 17.5, 18.5],
+        0.5,
+        7,
+        frames,
+    );
+    for (name, m, start, points) in [
+        (
+            format!("TGn B, static, soft-value formats ({tag})"),
+            TgnModel::B,
+            [7.5, 12.0, 11.0, 15.5, 16.5, 20.5, 23.5, 26.0],
+            7,
+        ),
+        (
+            format!("TGn D, static, soft-value formats ({tag})"),
+            TgnModel::D,
+            [6.0, 10.0, 10.0, 13.5, 15.0, 19.0, 22.0, 24.5],
+            7,
+        ),
+        (
+            format!("TGn E, static, soft-value formats ({tag})"),
+            TgnModel::E,
+            [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
+            9,
+        ),
+    ] {
+        sweep(&name, Channel::Tgn(m), &rx, start, 1.0, points, frames);
+    }
+}
+
+/// The width sweep of the integer data path: frames lost of the same frames near 10 % PER,
+/// the float receiver first, then the default widths, then one width changed at a time.
+fn widths(frames: usize) {
+    let d = FixedOfdmConfig::default();
+    let front = |f: FixedRxConfig| FixedOfdmConfig { front: f, ..d };
+    let variants: Vec<(&'static str, FixedOfdmConfig)> = vec![
+        (
+            "wide",
+            FixedOfdmConfig {
+                in_shift: 8,
+                fft_bits: 28,
+                twiddle_bits: 24,
+                prod_bits: 40,
+                kappa_bits: 20,
+                scale_frac: 8,
+                front: FixedRxConfig {
+                    cordic_iters: 24,
+                    cordic_bits: 30,
+                    angle_bits: 24,
+                    nco_phase_bits: 30,
+                    nco_lut_bits: 16,
+                    nco_amp_bits: 20,
+                    ..d.front
+                },
+                ..d
+            },
+        ),
+        (
+            "front wide",
+            front(FixedRxConfig {
+                cordic_iters: 24,
+                cordic_bits: 30,
+                angle_bits: 24,
+                nco_phase_bits: 30,
+                nco_lut_bits: 16,
+                nco_amp_bits: 20,
+                ..d.front
+            }),
+        ),
+        (
+            "data wide",
+            FixedOfdmConfig {
+                in_shift: 8,
+                fft_bits: 28,
+                twiddle_bits: 24,
+                prod_bits: 40,
+                kappa_bits: 20,
+                scale_frac: 8,
+                ..d
+            },
+        ),
+        (
+            "L11 Q14",
+            front(FixedRxConfig {
+                nco_lut_bits: 11,
+                nco_amp_bits: 14,
+                ..d.front
+            }),
+        ),
+        (
+            "cordic wide",
+            front(FixedRxConfig {
+                cordic_iters: 24,
+                cordic_bits: 30,
+                angle_bits: 22,
+                ..d.front
+            }),
+        ),
+        (
+            "C14",
+            FixedOfdmConfig {
+                kappa_bits: 14,
+                ..d
+            },
+        ),
+        ("F8", FixedOfdmConfig { scale_frac: 8, ..d }),
+        ("default", d),
+        (
+            "W14 s0",
+            FixedOfdmConfig {
+                fft_bits: 14,
+                in_shift: 0,
+                ..d
+            },
+        ),
+        ("W14 s2", FixedOfdmConfig { fft_bits: 14, ..d }),
+        ("W15 s2", FixedOfdmConfig { fft_bits: 15, ..d }),
+        ("W16 s0", FixedOfdmConfig { in_shift: 0, ..d }),
+        ("W16 s4", FixedOfdmConfig { in_shift: 4, ..d }),
+        (
+            "W18 s4",
+            FixedOfdmConfig {
+                fft_bits: 18,
+                in_shift: 4,
+                ..d
+            },
+        ),
+        (
+            "T8",
+            FixedOfdmConfig {
+                twiddle_bits: 8,
+                ..d
+            },
+        ),
+        (
+            "T10",
+            FixedOfdmConfig {
+                twiddle_bits: 10,
+                ..d
+            },
+        ),
+        (
+            "T14",
+            FixedOfdmConfig {
+                twiddle_bits: 14,
+                ..d
+            },
+        ),
+        ("U10", FixedOfdmConfig { prod_bits: 10, ..d }),
+        ("U12", FixedOfdmConfig { prod_bits: 12, ..d }),
+        ("U14", FixedOfdmConfig { prod_bits: 14, ..d }),
+        ("U20", FixedOfdmConfig { prod_bits: 20, ..d }),
+        ("C6", FixedOfdmConfig { kappa_bits: 6, ..d }),
+        ("C8", FixedOfdmConfig { kappa_bits: 8, ..d }),
+        ("F0", FixedOfdmConfig { scale_frac: 0, ..d }),
+        (
+            "L7",
+            front(FixedRxConfig {
+                nco_lut_bits: 7,
+                ..d.front
+            }),
+        ),
+        (
+            "L8",
+            front(FixedRxConfig {
+                nco_lut_bits: 8,
+                ..d.front
+            }),
+        ),
+        (
+            "L11",
+            front(FixedRxConfig {
+                nco_lut_bits: 11,
+                ..d.front
+            }),
+        ),
+        (
+            "Q8",
+            front(FixedRxConfig {
+                nco_amp_bits: 8,
+                ..d.front
+            }),
+        ),
+        (
+            "Q9",
+            front(FixedRxConfig {
+                nco_amp_bits: 9,
+                ..d.front
+            }),
+        ),
+        (
+            "N10",
+            front(FixedRxConfig {
+                cordic_iters: 10,
+                ..d.front
+            }),
+        ),
+        (
+            "N12",
+            front(FixedRxConfig {
+                cordic_iters: 12,
+                ..d.front
+            }),
+        ),
+    ];
+    let mut rx = vec![receiver("float", true, soft6())];
+    for (name, fx) in &variants {
+        if !fx.is_valid() {
+            println!("# {name}: not a usable set of widths, left out");
+            continue;
+        }
+        rx.push(Receiver {
+            fixed: Some(*fx),
+            ..receiver(name, true, soft6())
+        });
+    }
+    println!(
+        "\n## widths of the integer data path: frames lost of {frames} (rounded up), 1000 octets, the same frames for every column,\n\
+         # 12-bit samples at {ADC_LEVEL_DBFS} dBFS, six-bit soft values with a clip of 2, clock offset uniform in ±40 ppm.\n\
+         # default = W16 s2 T12 U16 C10 F4, rotator L9 Q11, CORDIC N16; each other column changes what its name says;\n\
+         # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
+         # columns: {}",
+        rx.iter().map(|r| r.name).collect::<Vec<_>>().join(" | ")
+    );
+    for (label, rate, snr, ch) in [
+        ("AWGN  6 Mb/s  3.5 dB", Rate::R6, 3.5, Channel::Awgn),
+        ("AWGN 54 Mb/s 20.0 dB", Rate::R54, 20.0, Channel::Awgn),
+        ("AWGN 54 Mb/s 35.0 dB", Rate::R54, 35.0, Channel::Awgn),
+        (
+            "TGn D 18 Mb/s 15.5 dB",
+            Rate::R18,
+            15.5,
+            Channel::Tgn(TgnModel::D),
+        ),
+        (
+            "TGn D 54 Mb/s 26.5 dB",
+            Rate::R54,
+            26.5,
+            Channel::Tgn(TgnModel::D),
+        ),
+        (
+            "TGn E 54 Mb/s 26.5 dB",
+            Rate::R54,
+            26.5,
+            Channel::Tgn(TgnModel::E),
+        ),
+        (
+            "TGn E 54 Mb/s 45.0 dB",
+            Rate::R54,
+            45.0,
+            Channel::Tgn(TgnModel::E),
+        ),
+    ] {
+        let (l, total) = lost(
+            Scene {
+                rate,
+                octets: 1000,
+                snr_db: snr,
+                ch,
+                ppm: None,
+            },
+            &rx,
+            frames,
+            9000 + rate.mbps() as u64 + snr as u64,
+        );
+        println!(
+            "{label:<22} | {}  of {total}",
+            l.iter()
+                .map(|x| format!("{x:>4}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
 }
 
@@ -441,10 +776,149 @@ fn main() -> ExitCode {
                 );
             }
         }
+        "softg2" => {
+            // The G2 sweep of the soft-value format: every candidate on the same frames, on
+            // grids of 0.5 dB (AWGN) and 1 dB (fading) around the 10 % crossings that
+            // `soft2` found.
+            let formats: &[(&'static str, i32, f64)] = &[
+                ("4b/1", 7, 1.0),
+                ("4b/1.5", 7, 1.5),
+                ("5b/1", 15, 1.0),
+                ("5b/1.5", 15, 1.5),
+                ("5b/2", 15, 2.0),
+                ("6b/1.5", 31, 1.5),
+                ("6b/2", 31, 2.0),
+                ("6b/3", 31, 3.0),
+            ];
+            soft_formats("G2", formats, n.unwrap_or(2000));
+        }
+        "softg3" => {
+            // The same grids with seven- and eight-bit candidates, after `softg2` showed that
+            // no six-bit format holds 0.2 dB in both AWGN (wants a larger clip) and TGn B
+            // (wants a finer step). 6b/2 is repeated as the paired reference.
+            let formats: &[(&'static str, i32, f64)] = &[
+                ("6b/2", 31, 2.0),
+                ("7b/2", 63, 2.0),
+                ("7b/3", 63, 3.0),
+                ("7b/4", 63, 4.0),
+                ("8b/3", 127, 3.0),
+                ("8b/4", 127, 4.0),
+            ];
+            soft_formats("G2, wider", formats, n.unwrap_or(2000));
+        }
+        "softg4" => {
+            // The quantiser without a zero level against the rounding one, word for word:
+            // "6m/2" is six bits (32 magnitudes and a sign), clip 2, mid-rise.
+            let mut rx = vec![receiver("fine", true, fine())];
+            for (name, soft_max, clip, mid_rise) in [
+                ("6b/2", 31, 2.0, false),
+                ("5m/2", 15, 2.0, true),
+                ("6m/2", 31, 2.0, true),
+                ("6m/3", 31, 3.0, true),
+                ("7m/3", 63, 3.0, true),
+            ] {
+                rx.push(receiver(
+                    name,
+                    true,
+                    RxOfdmConfig {
+                        soft_max,
+                        clip,
+                        mid_rise,
+                        ..base()
+                    },
+                ));
+            }
+            let frames = n.unwrap_or(2000);
+            sweep(
+                "AWGN, mid-rise soft values (G2)",
+                Channel::Awgn,
+                &rx,
+                [2.5, 3.5, 5.5, 7.5, 10.5, 13.5, 17.5, 18.5],
+                0.5,
+                7,
+                frames,
+            );
+            sweep(
+                "TGn B, static, mid-rise soft values (G2)",
+                Channel::Tgn(TgnModel::B),
+                &rx,
+                [7.5, 12.0, 11.0, 15.5, 16.5, 20.5, 23.5, 26.0],
+                1.0,
+                7,
+                frames,
+            );
+            sweep(
+                "TGn E, static, mid-rise soft values (G2)",
+                Channel::Tgn(TgnModel::E),
+                &rx,
+                [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
+                1.0,
+                9,
+                frames,
+            );
+        }
+        "fixed" => {
+            // G2 of the integer data path: float and integer receiver on the same 12-bit
+            // samples, six-bit soft values with a clip of 2, the grids of `softg2`.
+            let rx = [
+                receiver("float", true, soft6()),
+                Receiver {
+                    fixed: Some(FixedOfdmConfig::default()),
+                    ..receiver("integer", true, soft6())
+                },
+                // The one width `fixedw` shows a cost for: the rotator's table.
+                Receiver {
+                    fixed: Some(FixedOfdmConfig {
+                        front: FixedRxConfig {
+                            nco_lut_bits: 11,
+                            nco_amp_bits: 14,
+                            ..FixedRxConfig::default()
+                        },
+                        ..FixedOfdmConfig::default()
+                    }),
+                    ..receiver("integer L11 Q14", true, soft6())
+                },
+            ];
+            let frames = n.unwrap_or(2000);
+            sweep(
+                "AWGN, float against integer data path (G2)",
+                Channel::Awgn,
+                &rx,
+                [2.5, 3.5, 5.5, 7.5, 10.5, 13.5, 17.5, 18.5],
+                0.5,
+                7,
+                frames,
+            );
+            for (name, m, start, points) in [
+                (
+                    "TGn B, static, float against integer data path (G2)",
+                    TgnModel::B,
+                    [7.5, 12.0, 11.0, 15.5, 16.5, 20.5, 23.5, 26.0],
+                    7,
+                ),
+                (
+                    "TGn D, static, float against integer data path (G2)",
+                    TgnModel::D,
+                    [6.0, 10.0, 10.0, 13.5, 15.0, 19.0, 22.0, 24.5],
+                    7,
+                ),
+                (
+                    "TGn E, static, float against integer data path (G2)",
+                    TgnModel::E,
+                    [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
+                    9,
+                ),
+            ] {
+                sweep(name, Channel::Tgn(m), &rx, start, 1.0, points, frames);
+            }
+        }
+        "fixedw" => widths(n.unwrap_or(2000)),
         "sfo" => sfo(n.unwrap_or(40)),
         "timing" => timing(n.unwrap_or(300)),
         _ => {
-            eprintln!("usage: rxper awgn|tgn|sfo|timing|soft|soft2 [frames]");
+            eprintln!(
+                "usage: rxper awgn|tgn|sfo|timing|soft|soft2|softg2|softg3|softg4|fixed|fixedw [frames]"
+            );
             return ExitCode::from(2);
         }
     }

@@ -176,7 +176,7 @@ pub fn cordic_angle(re: i64, im: i64, fx: &FixedRxConfig) -> i64 {
     cordic_with(re, im, fx, &cordic_table(fx))
 }
 
-fn cordic_with(re: i64, im: i64, fx: &FixedRxConfig, table: &[i64]) -> i64 {
+pub(crate) fn cordic_with(re: i64, im: i64, fx: &FixedRxConfig, table: &[i64]) -> i64 {
     if re == 0 && im == 0 {
         return 0;
     }
@@ -252,7 +252,7 @@ fn nco_mix_with(y: IQ, phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits)
 }
 
-fn rotate_with(phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
+pub(crate) fn rotate_with(phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     let l = fx.nco_lut_bits;
     let p = fx.nco_phase_bits;
     let addr = (phase.rem_euclid(1i64 << p) >> (p - l)) as usize;
