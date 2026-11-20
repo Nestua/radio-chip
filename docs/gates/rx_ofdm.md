@@ -667,10 +667,10 @@ and g₁g₂/b are cleared of their divisions:
 | Quantity | Arithmetic | Width |
 |---|---|---|
 | N_o, N_i, D | g₀·g₃·b, g₁·g₂·a, 9·N_o + N_i | 46, 46, 50 bits for U = 16 |
-| normalisation | D cut to M bits by a right shift (leading-zero count), the same shift on N_o, N_i and Σg·a·b, truncating | M |
+| normalisation | D cut to M bits by a right shift (leading-zero count), the same shift on N_o, N_i and Σg·a·b, truncating. A pair with both its pilots at zero gain has no weight; its sum (a or b) counts as 1 so that the other pair still measures | M |
 | pair coefficients | c_o = 3·N_o/(14·D), c_i = N_i/(14·D), K fractional bits, rounded half up (at most 1/42 and 1/14) | K |
 | variance | v = 5·Σg·a·b/(52·D), V fractional bits, truncated: the measurement's variance against a flat channel of the same mean gain | V |
-| prior's weight | λ = round(w·v), w a ROM constant: 25·(σ/drift per symbol of the prior's deviation)², σ = 0.016 rad: 64 846 for the 40 ppm prior, 25 938 223 for the front's CFO hint (2 ppm) | 35 bits |
+| prior's weight | λ = round(w·v), w a ROM constant: 25·(σ/drift per symbol of the prior's deviation)², σ = 0.016 rad: 64 846 for the 40 ppm prior, 25 938 223 for the front's CFO hint (2 ppm); half to even | 27 bits (v ≤ 3) |
 
 **Per symbol** i (τ = 7 + 5i):
 
@@ -678,13 +678,25 @@ and g₁g₂/b are cleared of their divisions:
 |---|---|
 | Prediction | drift = round((r₀ + δ)·τ / 2^R), half to even; θ_pred = drift + shift·2^(P−6) (what the window's moves took) |
 | Measurement | the CORDIC's angle of p₃·p₀* and of p₂·p₁* (A bits, widened to P), less 42·θ_pred and 14·θ_pred modulo a turn; e = round((c_o·∠outer + c_i·∠inner)/2^K), half to even. Subtracting the predicted turn from the angle is the float tracker's rotation of the pilots before it measures, without the rotator |
-| Fit | if 0 < v ≤ 3: z = e + round(δ·τ/2^R); n += 1, Στ += τ, Στ² += τ², Σz += z, Στz += τ·z; δ = 2^R·(n·Στz − Στ·Σz) / (n·(Στ² + λ) − (Στ)²), truncated toward zero |
+| Fit | if 0 < v ≤ 3: z = e + round(δ·τ/2^R), saturated to P − 2 bits; n += 1, Στ += τ, Στ² += τ², Σz += z, Στz += τ·z; δ = 2^R·(n·Στz − Στ·Σz) / (n·(Στ² + λ) − (Στ)²), truncated toward zero, saturated to P + R − 4 bits |
 | Applied | drift with the new δ; θ = drift + shift·2^(P−6) goes to the rotator; beyond half a sample (2^(P−7)) the window moves by one for the next symbol |
 
 The quotient is the float recursion's rate exactly (the batch form of the same least
 squares; the float tracker's prior on the offset, 10⁶ nominal variances, is taken as flat).
-For the longest frame (1367 symbols) the sums need 11, 23, 35, 31 and 43 bits; the division
-is 64 bits by 45, once per symbol (4 µs), so a serial divider. r₀ is the prior rate: 0, or
+
+**Registers** (P = 22, R = 10). e is at most half a turn over 14: 19 bits signed. z is 20
+bits signed and saturates: 8 samples of timing, which a prior on the clock offset wrong by
+190 ppm reaches over the longest frame (the standard's worst case is 40 ppm). For the
+longest frame (1367 symbols) n, Στ, Στ² need 11, 23 and 35 bits, and with z bounded Σz and
+Στz cannot exceed 31 and 43 bits signed. δ is 28 bits signed, saturating. The division is
+65 bits by 43, once per symbol (4 µs), so a serial divider. With a signal present nothing
+saturates. When the signal ends inside a frame the pilots are noise, the measurement no
+longer answers the prediction, and the rate runs away — in the float tracker too (the
+review drove both: the float timing reached 635 samples); the integer one stops at z's
+limit. What a receiver does with a frame whose signal has gone is not the tracker's
+business, but the widths above hold only because z saturates.
+
+r₀ is the prior rate: 0, or
 from the clock offset the front's CFO gives. Here that conversion is the one float at the
 boundary (`FixedTracking::start`, ppm in); in hardware it is the CFO word times a constant
 of the channel's centre frequency, and where that product is formed is ADR 0008's hand-off.
@@ -733,7 +745,8 @@ dropping a symbol whose two pairs disagree, is worth having at the sensitivity l
 would change the float receiver first.
 
 **The gate bites.** 41 mutations of `rx_ofdm_fixed.rs`, one at a time, restored with `cp`
-and `touch`; each fails at least one test. The per-packet constants: the outer
+and `touch`; each fails at least one test (the list is of the code before the review; the
+review's additions follow it). The per-packet constants: the outer
 coefficient without its 3; D = N_o + N_i; N_o with a; N_i with b; coefficient truncated;
 variance with 4 for 5; variance over 48; the gains of the wrong pilots; D not cut to M
 bits. The fit: τ from 0; τ in steps of 4; z without the prediction; the prediction
@@ -773,10 +786,44 @@ tracker in integers, the rotator's phase truncated):
   rounding, a table of 2⁸ entries is not enough (+14 frames over the five points against
   2⁹), so L stays 9. The front's own rotator (CFO correction, RTL and vectors exist) is
   not changed: a constant phase offset there is absorbed by the channel estimate.
-- **The tracker's widths are not tight.** R 6, M 8, K 8, V 4 lose nothing here (K 8: one
-  frame at one point). The defaults R 10, M 16, K 16, V 10 stay until ADR 0008 counts what
-  each bit costs; narrowing them is free of risk by this table and to be confirmed on the
-  full grids if it is taken.
+- **The tracker's widths show slack at these points.** R 6, M 8, K 8, V 4 lose nothing here
+  (K 8: one frame at one point). That is not yet a licence to narrow them: the frames are
+  1000 octets (at most 335 symbols) and R's rounding grows with the frame's length, up to
+  τ = 6837; and every column varies one width around the base with the truncating rotator,
+  not around today's default. The defaults R 10, M 16, K 16, V 10 stay; ADR 0008 counts
+  what each bit costs, and a narrower set is measured on the full grids and the longest
+  frame before it is taken.
+
+**After the review** (an independent reviewer on commit 37134f6, with the code and the
+float reference, not this entry). It rederived the estimator from the float code and
+found it the same in normal operation, recomputed every hand-worked number, and found
+three faults, all fixed in commit 923fdb3:
+
+- The register widths stated in G0 were not in the model: with the signal gone after 20
+  symbols of a long frame z reached 27 bits and the numerator 67, where the model's
+  128-bit integers went on and a register would have wrapped. z and δ saturate now, at
+  the widths G0 states, and the other widths follow from them (G0's paragraph on the
+  registers was rewritten; its "35 bits" for λ was wrong, it is 27, and the divisor is 43
+  bits, not 45).
+- `FixedTracking::learn` could be driven to a shift overflow with unusable widths
+  (a `rate_frac` of 128); it refuses them now, and symbols beyond any frame's.
+- A pair with both pilots at zero gain switched the whole tracker off, where the float
+  tracker goes on with the other pair. Fixed (the pair's sum counts as 1); it needs both
+  pilots some 48 dB below the strongest subcarrier, so no measured figure moves.
+
+Of the reviewer's own 46 mutations 14 survived. Tests added
+(`the_tracker_constants_at_their_edges`, `the_tracker_registers_saturate_and_refuse`,
+`the_window_moves_beyond_half_a_sample_only`; 22 pass) and 20 mutations rerun, 17 killed:
+the variance limit at 4, exclusive, and 0 taken as usable; λ truncated; D cut to M − 1
+bits; the coefficient's rounding constant 13 for 14; the window moving at exactly half a
+sample, either sign; a dead pair taking the other with it, either pair; z not saturated
+and one bit wider; δ not saturated and one bit wider; symbols beyond the frame learned;
+unusable widths learned. Not pinned, because no frame reaches them: the widths of Σz and
+Στz (they cannot overflow once z is bounded) and the divisor's sign test (it is positive
+whenever λ ≥ 0). The pin's first frame now runs z into its limit (its prior is wrong by
+318 ppm) and so pins the saturation; the other four hashes did not change with the
+review's fixes, which is why the report below, started before them, stands for this code:
+its frames have clock offsets within ±40 ppm.
 
 Open: the report of `rxper fixed` at these defaults (below, when its run ends); the frames
 of every `rxper` report depend on the number of threads (the seed is per thread), so a
