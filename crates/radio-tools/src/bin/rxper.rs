@@ -13,8 +13,6 @@
 //! - `fixed`, `fixedw`: G2 of the integer data path (`rx_ofdm_fixed`): the loss against the
 //!   float receiver on the same 12-bit samples over the grids of `softg2`, and the frames lost
 //!   near 10 % PER with one width changed at a time.
-//! - `fixedi`: the integer receiver alone on the frames of `fixed`, with the rotator's phase
-//!   truncated and rounded.
 //! - `softg2`: the G2 sweep of the soft-value format (R0-09): the candidates on the same
 //!   frames, fine grids around the 10 % crossings, AWGN and TGn B, D and E.
 //!
@@ -943,59 +941,6 @@ fn main() -> ExitCode {
                 ),
                 (
                     "TGn E, static, float against integer data path (G2)",
-                    TgnModel::E,
-                    [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
-                    9,
-                ),
-            ] {
-                sweep(name, Channel::Tgn(m), &rx, start, 1.0, points, frames);
-            }
-        }
-        "fixedi" => {
-            // The integer receiver alone on the frames of `fixed` (the same seeds, so the
-            // float columns of `fixed` need not be run again when only the integer path
-            // has changed): with the rotator's phase truncated and rounded.
-            let rx = [
-                Receiver {
-                    fixed: Some(FixedOfdmConfig {
-                        rot_round: false,
-                        ..FixedOfdmConfig::default()
-                    }),
-                    ..receiver("integer, phase truncated", true, base())
-                },
-                Receiver {
-                    fixed: Some(FixedOfdmConfig {
-                        rot_round: true,
-                        ..FixedOfdmConfig::default()
-                    }),
-                    ..receiver("integer, phase rounded", true, base())
-                },
-            ];
-            let frames = n.unwrap_or(2000);
-            sweep(
-                "AWGN, integer data path alone (G2)",
-                Channel::Awgn,
-                &rx,
-                [2.5, 3.5, 5.5, 7.5, 10.5, 13.5, 17.5, 18.5],
-                0.5,
-                7,
-                frames,
-            );
-            for (name, m, start, points) in [
-                (
-                    "TGn B, static, integer data path alone (G2)",
-                    TgnModel::B,
-                    [7.5, 12.0, 11.0, 15.5, 16.5, 20.5, 23.5, 26.0],
-                    7,
-                ),
-                (
-                    "TGn D, static, integer data path alone (G2)",
-                    TgnModel::D,
-                    [6.0, 10.0, 10.0, 13.5, 15.0, 19.0, 22.0, 24.5],
-                    7,
-                ),
-                (
-                    "TGn E, static, integer data path alone (G2)",
                     TgnModel::E,
                     [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
                     9,

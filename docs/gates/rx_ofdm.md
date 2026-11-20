@@ -700,3 +700,85 @@ the float recursion written out in the test, 1367 symbols, two priors, three var
 (4) In the receiver: each symbol's measured slope and applied drift against the float
 receiver on the same samples, from 6 dB up, three starts. (5) A notch on a pilot: measured,
 reported, not followed. (6) The bit-for-bit pin.
+
+## 2026-11-20 · G2 · stage B: the integer tracker and the rotator's rounding
+
+Commits 16283ae and the one carrying this entry. Commands:
+`cargo test -p radio-phy --test g2_rx_ofdm` (19 pass);
+`cargo test -p radio-phy --test g1_annex_i1 -- --ignored` (the standard's printed waveform
+decodes through the all-integer path, local fixture);
+`rxper fixedw 2000` → `reports/rx_ofdm_fixedw.txt`.
+
+**Order of work.** The tracker's tests were written after its first version, not before
+it (the rule is the other way round). What stands in for the failing run: the float
+tracker is the reference and existed first, and each of the 41 mutations below was seen to
+fail a test.
+
+**Against the float tracker.** In the receiver, on the same 12-bit samples (6 Mb/s at
+6 dB, 12 at 9 dB, 24 at 18 dB, 54 at 28 dB, a two-path channel, ±40 ppm and less, three
+starts): over 2085 symbols the measured slope differs by at most 9.6·10⁻⁵ rad per
+subcarrier and the drift applied by at most 0.00015 samples. The fit alone against the
+float recursion written out in the test: within one unit of the quotient's last bit (2⁻¹⁰
+of 2π/2²² per subcarrier per fifth of a symbol) over 1367 symbols, two priors, three
+variances.
+
+**A finding about both trackers.** In one of the 6 dB frames a pilot was all but cancelled
+by noise and the outer pair's angle fell within 2·10⁻⁴ rad of ±π: the float receiver read
+−π, the integer one +π, and the two measurements differ by a turn times the pair's
+coefficient (0.12 rad per subcarrier, eight nominal deviations). Neither is right: a pair
+angle near ±π is a measurement that has wrapped, and both trackers take it at face value.
+The test ends that frame's comparison there and counts the event. Open: whether resolving
+the outer pair's turn from the inner pair's angle (three times closer to zero), or
+dropping a symbol whose two pairs disagree, is worth having at the sensitivity limit. It
+would change the float receiver first.
+
+**The gate bites.** 41 mutations of `rx_ofdm_fixed.rs`, one at a time, restored with `cp`
+and `touch`; each fails at least one test. The per-packet constants: the outer
+coefficient without its 3; D = N_o + N_i; N_o with a; N_i with b; coefficient truncated;
+variance with 4 for 5; variance over 48; the gains of the wrong pilots; D not cut to M
+bits. The fit: τ from 0; τ in steps of 4; z without the prediction; the prediction
+truncated; the determinant without λ; the numerator's sign; the quotient not scaled; the
+quotient floored; a fixed tracker that learns; λ without the variance; the weight without
+its 25; the rate per symbol instead of per fifth. The step: τ from 0 in the drift; the
+outer span 21; the inner span 7; the pairs swapped; the pair product not conjugated; the
+prediction without the window's moves; θ without them; the angle not widened; the angle
+saturated instead of wrapped; half a sample taken as a whole one; the window moving the
+wrong way; the error one bit too large; the drift not refreshed after learning; the timing
+log in half samples. Three survived the first run — the variance limit at 30, weak
+measurements used, the error truncated — the first two because no test had a weak pilot
+(`a_weak_pilot_pair_is_not_followed` added, kills both), the third is a last-bit rounding
+that the bit-for-bit pin kills. The rotator: phase truncated; a whole address added; half
+an address subtracted (the phase-log test, whose tolerance went from 8·10⁻³ to
+1.5·10⁻³ rad, and the pin).
+
+**Widths** (`fixedw`, frames lost of 2000, the same frames in every column; base = the
+tracker in integers, the rotator's phase truncated):
+
+| Point | float | base | round | round L8 | R6 | R8 | M8 | M12 | K8 | K12 | V4 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| AWGN 6 Mb/s 3.5 dB | 190 | 190 | 189 | 190 | 190 | 190 | 190 | 190 | 191 | 190 | 190 |
+| AWGN 54 Mb/s 20 dB | 184 | 188 | 189 | 192 | 188 | 188 | 188 | 188 | 188 | 188 | 188 |
+| TGn D 18 Mb/s 15.5 dB | 215 | 215 | 213 | 215 | 215 | 215 | 215 | 215 | 215 | 215 | 215 |
+| TGn D 54 Mb/s 26.5 dB | 188 | 194 | 188 | 191 | 194 | 194 | 194 | 194 | 194 | 194 | 194 |
+| TGn E 54 Mb/s 26.5 dB | 130 | 130 | 130 | 135 | 130 | 130 | 130 | 130 | 130 | 130 | 130 |
+
+(No frame lost at the two high-SNR points in any of these columns.)
+
+- **The integer tracker costs nothing that these points resolve:** the base column is the
+  one measured with the float tracker inside (entry above: 190, 188, 215, 194, 130).
+- **The rotator's phase is rounded now** (`rot_round`, default on: half a table address
+  added before the table is addressed, one adder). Over the five points it gives back 7
+  frames of the 9 the base loses against float; the common phase the receiver reports
+  agrees with the float receiver's to 5·10⁻⁴ rad (was 6·10⁻³, the truncation's bias). With
+  rounding, a table of 2⁸ entries is not enough (+9 frames over the five points against
+  2⁹), so L stays 9. The front's own rotator (CFO correction, RTL and vectors exist) is
+  not changed: a constant phase offset there is absorbed by the channel estimate.
+- **The tracker's widths are not tight.** R 6, M 8, K 8, V 4 lose nothing here (K 8: one
+  frame at one point). The defaults R 10, M 16, K 16, V 10 stay until ADR 0008 counts what
+  each bit costs; narrowing them is free of risk by this table and to be confirmed on the
+  full grids if it is taken.
+
+Open: the report of `rxper fixed` at these defaults (below, when its run ends); the frames
+of every `rxper` report depend on the number of threads (the seed is per thread), so a
+report is reproduced only on a machine with as many cores as the one that made it — the
+tool should draw each frame's seed from the frame's number.
