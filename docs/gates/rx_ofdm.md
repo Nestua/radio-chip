@@ -825,7 +825,35 @@ whenever λ ≥ 0). The pin's first frame now runs z into its limit (its prior i
 review's fixes, which is why the report below, started before them, stands for this code:
 its frames have clock offsets within ±40 ppm.
 
-Open: the report of `rxper fixed` at these defaults (below, when its run ends); the frames
+**The whole grid at these defaults** (`rxper fixed 2000` → `reports/rx_ofdm_fixed.txt`;
+run on the build server, 32 threads, Linux x86-64, rustc 1.100.0, from the tree of
+commit bfd619e — the code before the review's fixes, which do not touch these frames,
+see above. The frames are not those of the report it replaces:
+they depend on the thread count). Float with fine soft values, float at 8 / 3, and the
+all-integer receiver at 8 / 3 on the same frames; SNR at 10 % PER against the first,
+worst rate (Mb/s), and frames over all points of the channel:
+
+| Channel | float 8 / 3, worst | integer 8 / 3, worst | frames lost, fine | float 8 / 3 − fine | integer − float 8 / 3 |
+|---|---|---|---|---|---|
+| AWGN | +0.01 dB (18) | +0.02 dB (54) | 14926 | +24 | +10 |
+| TGn B | +0.03 dB (18) | +0.07 dB (54) | 10772 | +6 | +22 |
+| TGn D | +0.01 dB (6) | +0.05 dB (54) | 10416 | +10 | −2 |
+| TGn E | +0.00 dB (12) | +0.04 dB (48) | 11630 | +2 | +26 |
+
+- **The receiver with nothing in floating point after the front is within 0.07 dB of the
+  float receiver with fine soft values in every cell** (worst: TGn B, 54 Mb/s; the most
+  negative cell is −0.05 dB, TGn E at 24 Mb/s, so single cells are at the measurement's
+  resolution). Budget for the whole fixed receiver: 0.2 dB.
+- In frames the integer arithmetic costs −2 to +26 per channel of some 10 000 to 15 000
+  lost, 56 over the four channels; the run before it (float tracker inside, truncating
+  rotator, other frames) had 108. The two runs do not share frames, so the difference
+  between them is not a measurement of the tracker or of the rounding; the paired figure
+  for the rounding is `fixedw`'s above.
+- Not in this figure: the front in integers on the same frames (the front here is the
+  float one; its own G2 is in `rx_front.md`), the gain control and DC in front, input
+  levels other than −12 dBFS.
+
+Open: the frames
 of every `rxper` report depend on the number of threads (the seed is per thread), so a
 report is reproduced only on a machine with as many cores as the one that made it — the
 tool should draw each frame's seed from the frame's number.
