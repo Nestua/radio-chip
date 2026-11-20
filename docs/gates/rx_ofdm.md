@@ -910,7 +910,7 @@ in `rxper`.
 
 ## 2026-11-20 · G2 + measurements · stage B, second part: the receiver behind the gain control
 
-Commits 0697d36 (G0, `correct_fixed`, its gates), 37e51be (after the review), 762575d,
+Commits 0697d36 (G0, `correct_fixed`, its gates), d06cc0e (after the review), 762575d,
 16875f6 and 2f7ce65 (`rxagc`). Commands:
 `cargo test -p radio-phy --test g2_rx_front` (14 pass, 4 new);
 `rxagc per 2000` → `reports/rx_ofdm_agc_per.txt` (build server, Linux x86-64, rustc 1.100.0,
