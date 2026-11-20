@@ -18,9 +18,11 @@ use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{acquire, detections, RxConfig};
 use radio_phy::rx_front_fixed::{
-    acquire_fixed, acquisitions_fixed, cordic_angle, dc_block_fixed, detections_fixed, nco_rotator,
-    to_adc, FixedRxConfig, ADC_FULL_SCALE,
+    acquire_fixed, acquisitions_fixed, cordic_angle, correct_fixed, dc_block_fixed,
+    detections_fixed, nco_mix, nco_rotator, to_adc, FixedRxConfig, ADC_FULL_SCALE, IQ,
 };
+use radio_phy::rx_ofdm::RxOfdmConfig;
+use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 use std::f64::consts::PI;
 
 type C = (f64, f64);
@@ -539,4 +541,225 @@ fn fixed_acquisition_hands_on_the_fine_estimate() {
         differ += usize::from(d != 0);
     }
     assert!(differ > 150, "coarse and fine hardly ever differ: {differ}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// R0-09 G2, stage B, second part: the CFO taken out of the decoder's samples in integers
+// (`correct_fixed`, G0 in `docs/gates/rx_ofdm.md`).
+// ---------------------------------------------------------------------------------------------
+
+/// The definition on samples worked by hand: amplitude 1023 (Q = 11), a 13-bit sample times
+/// it narrowed from 23 bits to O, half to even; a CFO word of 2^20 is a quarter turn per
+/// sample at P = 22 and is taken out, so sample n is turned by −n quarter turns.
+#[test]
+fn correct_fixed_worked_by_hand() {
+    let fx = FixedRxConfig::default();
+    assert_eq!(
+        (fx.nco_phase_bits, fx.nco_lut_bits, fx.nco_amp_bits),
+        (22, 9, 11)
+    );
+    let y: Vec<IQ> = vec![(1000, -500); 4];
+    // 1000·1023/2048 = 499.51, 500·1023/2048 = 249.76.
+    // ·1, ·(−j), ·(−1), ·(+j) of 1000 − 500j: (1000, −500), (−500, −1000), (−1000, 500),
+    // (500, 1000).
+    assert_eq!(
+        correct_fixed(&y, 1 << 20, 12, &fx),
+        vec![(500, -250), (-250, -500), (-500, 250), (250, 500)]
+    );
+    // The other way round for a negative CFO.
+    assert_eq!(
+        correct_fixed(&y, -(1 << 20), 12, &fx),
+        vec![(500, -250), (250, 500), (-500, 250), (-250, -500)]
+    );
+    // One bit more keeps the ADC's last bit: 1000·1023/1024 = 999.02, 500·1023/1024 = 499.51.
+    assert_eq!(
+        correct_fixed(&y, 1 << 20, 13, &fx),
+        vec![(999, -500), (-500, -999), (-999, 500), (500, 999)]
+    );
+    // No CFO: every sample by the same real amplitude. Ties go to the even value:
+    // 1024·1023/2048 = 511.5 → 512, 3072·1023/2048 = 1534.5 → 1534, and the negatives.
+    assert_eq!(
+        correct_fixed(&[(1024, 3072), (-1024, -3072)], 0, 12, &fx),
+        vec![(512, 1534), (-512, -1534)]
+    );
+    // An eighth of a turn (the table's entry 64 of 512: round(1023·cos 45°) = 723):
+    // (4095 − 4095j)·(723 + 723j) = 5 921 370, beyond either word: it saturates.
+    let z = correct_fixed(&[(0, 0), (4095, -4095)], -(1 << 19), 12, &fx);
+    assert_eq!(z[1], (2047, 0));
+    let z = correct_fixed(&[(0, 0), (4095, -4095)], -(1 << 19), 13, &fx);
+    assert_eq!(z[1], (4095, 0));
+    let z = correct_fixed(&[(0, 0), (-4095, 4095)], -(1 << 19), 12, &fx);
+    assert_eq!(z[1], (-2048, 0));
+    // Unusable widths give nothing.
+    assert!(correct_fixed(&y, 1, 1, &fx).is_empty());
+    assert!(correct_fixed(&y, 1, 31, &fx).is_empty());
+    let bad = FixedRxConfig {
+        nco_lut_bits: 30,
+        ..fx
+    };
+    assert!(correct_fixed(&y, 1, 12, &bad).is_empty());
+    assert!(correct_fixed(&[], 1, 12, &fx).is_empty());
+}
+
+/// Against the float rotation y·e^(−j2πφn/2^P) (what `rx_front::correct` does with the CFO in
+/// Hz), over streams long enough for the phase to wrap thousands of times. The bound is the
+/// construction's: the phase truncated to L bits (at most 2π/2^L late), a table entry rounded
+/// (half a unit of 2^(Q−1) − 1 per component), the output rounded (half a unit per component).
+#[test]
+fn correct_fixed_is_the_float_rotation_within_its_bound() {
+    let fx = FixedRxConfig::default();
+    let p = f64::from(1u32 << fx.nco_phase_bits);
+    let amp = f64::from((1u32 << (fx.nco_amp_bits - 1)) - 1);
+    let mut rng = Rng::new(0xc0fe);
+    for out_bits in [12u32, 13] {
+        // 13 bits of sample times Q − 1 of amplitude, cut to O.
+        let scale = amp / f64::from(1u32 << (13 + fx.nco_amp_bits - 1 - out_bits));
+        for cfo in [
+            0i64,
+            1,
+            -1,
+            49_283,
+            -49_283,
+            12_345,
+            (1 << 21) - 1,
+            -(1 << 21),
+        ] {
+            // Within ±2896: no rotation of it leaves 13 bits, so nothing saturates.
+            let y: Vec<IQ> = (0..20_000)
+                .map(|_| {
+                    let v = |r: &mut Rng| ((r.uniform() * 2.0 - 1.0) * 2896.0) as i64;
+                    (v(&mut rng), v(&mut rng))
+                })
+                .collect();
+            let z = correct_fixed(&y, cfo, out_bits, &fx);
+            assert_eq!(z.len(), y.len());
+            let on_address = cfo == 0 || cfo == -(1 << 21);
+            let (mut worst, mut mean_phase) = (0.0f64, 0.0f64);
+            for (n, (z, y)) in z.iter().zip(&y).enumerate() {
+                let turn = (-(cfo as i128) * n as i128).rem_euclid(1 << fx.nco_phase_bits);
+                let (sin, cos) = (2.0 * PI * turn as f64 / p).sin_cos();
+                let (a, b) = (y.0 as f64, y.1 as f64);
+                let want = ((a * cos - b * sin) * scale, (a * sin + b * cos) * scale);
+                let mag = (a * a + b * b).sqrt();
+                // A phase that stays on table addresses (no CFO, or half a turn per sample)
+                // is not truncated.
+                let late = if on_address {
+                    0.0
+                } else {
+                    2.0 * PI / f64::from(1u32 << fx.nco_lut_bits)
+                };
+                let bound = mag * scale * late
+                    + mag * scale * 0.5 * 2f64.sqrt() / amp
+                    + 0.5 * 2f64.sqrt()
+                    + 1e-9;
+                let e = ((z.0 as f64 - want.0).powi(2) + (z.1 as f64 - want.1).powi(2)).sqrt();
+                assert!(e <= bound, "O {out_bits} CFO {cfo} n {n}: {e} > {bound}");
+                worst = worst.max(e / bound);
+                // The angle from the wanted value to the one given.
+                mean_phase += (z.1 as f64 * want.0 - z.0 as f64 * want.1)
+                    .atan2(z.0 as f64 * want.0 + z.1 as f64 * want.1);
+            }
+            mean_phase /= y.len() as f64;
+            // The truncation is one-sided: with a CFO whose phase visits every remainder the
+            // rotation lags by half a table address on average (π/2^L = 0.0061 rad), and a
+            // phase on table addresses not at all.
+            let half = PI / f64::from(1u32 << fx.nco_lut_bits);
+            if on_address {
+                assert!(mean_phase.abs() < 2e-4, "{mean_phase}");
+            } else {
+                assert!(
+                    (mean_phase + half).abs() < 0.15 * half,
+                    "CFO {cfo}: mean phase {mean_phase}, wanted {}",
+                    -half
+                );
+            }
+            assert!(worst > 0.3, "the bound is never approached: {worst}");
+        }
+    }
+}
+
+/// At O = Z it is the front's own mixer at the phase −φ·n: the same table, the same narrowing,
+/// and a P-bit accumulator that wraps.
+#[test]
+fn correct_fixed_is_the_fronts_mixer_with_a_wrapping_accumulator() {
+    let fx = FixedRxConfig::default();
+    let mut rng = Rng::new(0x51de);
+    for cfo in [77_777i64, -(1 << 21), (1 << 21) - 1] {
+        let y: Vec<IQ> = (0..5000)
+            .map(|_| {
+                let v = |r: &mut Rng| ((r.uniform() * 2.0 - 1.0) * 4095.0) as i64;
+                (v(&mut rng), v(&mut rng))
+            })
+            .collect();
+        let z = correct_fixed(&y, cfo, fx.z_bits, &fx);
+        for (n, (z, y)) in z.iter().zip(&y).enumerate() {
+            let phase = (-(cfo as i128) * n as i128).rem_euclid(1 << fx.nco_phase_bits) as i64;
+            assert_eq!(Some(*z), nco_mix(*y, phase, &fx), "CFO {cfo} n {n}");
+        }
+    }
+}
+
+/// The whole chain in integers on the ADC's samples: DC blocker, acquisition, the CFO taken
+/// out by `correct_fixed`, the integer decoder started from the CFO word's clock offset.
+/// A frame with a CFO of −180 kHz, a DC offset of −30 dBFS and noise 30 dB down comes back at
+/// every hand-off width of the G0 table; with the CFO left in the samples it does not.
+#[test]
+fn the_all_integer_chain_decodes_a_frame_from_adc_samples() {
+    let fs = 20e6;
+    let cfg = RxConfig::new(fs);
+    let fx = FixedRxConfig::default();
+    let tx = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << tx.data.frac_bits());
+    let mut rng = Rng::new(0xadc0);
+    for (rate, cfo) in [(Rate::R54, -180e3), (Rate::R6, 120e3), (Rate::R24, 3e3)] {
+        let psdu: Vec<u8> = (0..300).map(|_| (rng.next_u64() & 0xff) as u8).collect();
+        let f: Vec<C> = build_ppdu(&psdu, rate, 0x5d, &tx)
+            .unwrap()
+            .iter()
+            .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+            .collect();
+        let mut x = vec![(0.0, 0.0); 500];
+        x.extend_from_slice(&f);
+        x.extend(vec![(0.0, 0.0); 200]);
+        let x = frequency_offset(&x, cfo, fs, 1.0);
+        let p = mean_power(&f);
+        let x = awgn(&x, 30.0, p, &mut rng);
+        // The frame at −12 dBFS, the offset at −30 dBFS.
+        let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-12.0 / 20.0) / p.sqrt();
+        let dc = 10f64.powf(-30.0 / 20.0) / gain * f64::from(ADC_FULL_SCALE);
+        let x: Vec<C> = x.iter().map(|s| (s.0 + 0.6 * dc, s.1 - 0.8 * dc)).collect();
+        let adc = to_adc(&x, gain);
+        let a = acquire_fixed(&adc, &cfg, &fx).unwrap();
+        assert!(
+            (a.cfo_hz(&fx, fs) - cfo).abs() < 2e3,
+            "{}",
+            a.cfo_hz(&fx, fs)
+        );
+        let y = dc_block_fixed(&adc, &cfg, &fx);
+        for (out_bits, in_shift) in [(12u32, 2u32), (13, 1), (13, 2)] {
+            let fo = FixedOfdmConfig {
+                in_bits: out_bits,
+                in_shift,
+                ..FixedOfdmConfig::default()
+            };
+            assert!(fo.is_valid());
+            let decode = |z: &[IQ]| {
+                decode_ppdu_fixed(
+                    z,
+                    a.fft_start,
+                    &RxOfdmConfig::default(),
+                    &fo,
+                    FixedTracking::unknown(&fo),
+                )
+            };
+            let z = correct_fixed(&y, a.cfo_phase, out_bits, &fx);
+            let d = decode(&z).unwrap();
+            assert_eq!(d.psdu, psdu, "{rate:?} O {out_bits} shift {in_shift}");
+            // The same samples with the CFO left in.
+            let raw = correct_fixed(&y, 0, out_bits, &fx);
+            if cfo.abs() > 50e3 {
+                assert!(decode(&raw).map_or(true, |d| d.psdu != psdu), "{rate:?}");
+            }
+        }
+    }
 }
