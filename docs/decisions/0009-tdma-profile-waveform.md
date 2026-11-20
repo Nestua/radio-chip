@@ -1,139 +1,208 @@
-# ADR 0009 — The waveform of the long-range TDMA profile: the colleague's n10, adopted
+# ADR 0009 — The long-range TDMA profile: the colleague's work is taken; the waveform that goes into silicon stays 802.11's
 
-Status: **proposed** · 2026-11-20 · PHY architecture and licences (risk point): waits for an
-independent review and the founder's decision. Amends ADR 0001.
-Source: `docs/reviews/2026-11-20-e021-waveform-comparison.md` (the comparison run) and the
-review of `waverage/phy-sim` of 2026-11-18 (reproduced on the build server at ff1c483).
-The number 0008 is kept for the receiver-front hand-off ADR that ADR 0007 announced.
+Status: **proposed** · 2026-11-20 · PHY architecture, licences and CE/RED (risk points): the
+founder decides. Does not amend ADR 0001, 0003 or 0004.
+Sources: `docs/reviews/2026-11-20-e021-waveform-comparison.md` (the comparison run); the
+review of `waverage/phy-sim` of 2026-11-18 (reproduced on the build server; its record is
+not yet in this repository — to be committed with this ADR's follow-up, until then its
+figures are this ADR's word); an independent review of the first draft of this ADR
+(2026-11-20), which changed its decision; two directions of the founder of 2026-11-20
+(below). The number 0008 is kept for the receiver-front hand-off ADR that ADR 0007 announced.
 
 ## Context
 
-ADR 0001 says long range comes from a TDMA MAC profile "on the standard OFDM PHY with
-5/10/20 MHz channels". Since then a colleague has shared a complete custom OFDM video PHY
-(`waverage/phy-sim`, Apache-2.0 since 07b53c5): a 10 MHz, 256-point waveform ("n10") with a
-TDD superframe of 22 downlink frames and 1 uplink frame, a fixed-point modem with
-bit-exact twins, and the whole radio in RTL, bit-exact in simulation and placed on a
-Zynq-7020 board. Our review reproduced his modem, his 232 harness tests, every RTL block and
-his 1 % FER point within 0.05 dB, and found defects of implementation, not of design: an
-ideal gain control that is not disclosed, an error floor near 1e-4 in his 6-bit LDPC
-decoder, vectors that are not deterministic, board timing claims without saved reports.
+ADR 0001: long range comes from a TDMA MAC profile on the standard OFDM PHY. A colleague
+has since shared a complete custom OFDM video PHY (`waverage/phy-sim`, Apache-2.0 since
+07b53c5): a 10 MHz, 256-point waveform ("n10") with its own preamble and pilots, the 5G NR
+LDPC code, a TDD superframe of 22 downlink frames and 1 uplink frame, a fixed-point modem
+with bit-exact twins, and the radio's digital part in RTL.
 
-The founder's position (2026-11-18): adopt it if the comparison against 802.11 holds up;
-where it falls short, take it and do it better. The criterion agreed before the results
-(2026-11-19): n10 if it is within about 0.5 dB of the 802.11ax numerology at equal net
-rate on the fading channels, or if it wins.
+The founder asked for a decision: is his work good enough to take, or do we go the whole
+way from nothing and do it better? And gave two directions on 2026-11-20: **no patent
+exposure beyond the patents Wi-Fi needs anyway**, and **the regulatory question is to be
+researched and decided here**.
 
-## What the comparison says
+## What we know
 
-From the report, in the words that matter here:
+**The waveform (e021).** The agreed criterion — n10 within about 0.5 dB of the 802.11ax
+numerology at equal energy per bit in fading — is met. But the run does not show n10
+better anywhere a 10 km link operates: at QPSK and 16-QAM with a line of sight every 10 MHz
+waveform, plain 802.11a at half clock included, needs the same energy per bit within
+0.5 to 1 dB, and n10 with three pilot symbols and 802.11ax with a midamble are
+indistinguishable. n10's clear wins are at 64-QAM at a Doppler of 2000 Hz (103 m/s) and
+without line of sight, with a pilot-only receiver; it carries 14 to 21 % less than the
+802.11ax numerology in the same channel. Synchronisation, gain control, the oscillator
+and the amplifier were ideal in the run.
 
-- The criterion is met. n10 with three pilot symbols is not worse than the 802.11ax
-  numerology in any fading cell and is the only waveform of the six with no error floor at
-  64-QAM 3/4; n10 with two pilot symbols meets it up to 16-QAM.
-- At QPSK and 16-QAM with a line of sight, where a 10 km link operates, every 10 MHz
-  waveform including plain 802.11a at half clock needs the same Eb/N0 within about 1.4 dB.
-  The waveform is not what makes 10 km possible; the link budget is.
-- What separates the waveforms is the guard interval (802.11a's 1.6 µs at 10 MHz fails on a
-  300 ns channel without line of sight) and how often the channel is measured within a
-  frame (64-QAM in fading).
-- n10-p3 carries 21 % less than the 802.11ax numerology at one modulation and code (199
-  tones against 242, three pilot symbols of 14), 8 % less than n10-p2.
-- Not shown by the run: synchronisation, gain control, phase noise and the power amplifier
-  were ideal. A 256-point waveform at 10 MHz has a quarter of 802.11a's tone spacing.
+**The implementation (our review of 2026-11-18).** His modem, 232 harness tests, every RTL
+block and his 1 % FER point reproduce. The state of the head start, exactly: the RTL is
+bit-exact with his model in simulation and runs on an Arty Z7-20 through an on-chip channel
+emulator — a digital loop, no radio; the board run used older RTL; there are no saved
+timing or utilisation reports (block RAM 124 of 140); the gain control is an ideal one, so
+none exists; his 6-bit LDPC decoder has an error floor near 1e-4; the RTL test fails at the
+transmitter under one simulator (a missing reset); vectors are not deterministic and the
+committed ones are stale. It is real, careful work that has not yet met an antenna.
+
+**Regulation (researched 2026-11-20; sources at the end; to be confirmed by a CE test lab
+before anything is built on it).**
+
+- 5 GHz RLAN bands in the EU (Decision (EU) 2022/179, harmonised standard EN 301 893):
+  unmanned aircraft may use **5170–5250 MHz only**, at **200 mW e.i.r.p. and 10 mW/MHz**.
+  The bands above 5250 MHz are closed to them. A 10 MHz signal is therefore limited to
+  100 mW; the full 200 mW needs 20 MHz.
+- EN 301 893 requires listening before talking, in one of two forms. The one a TDMA link
+  can meet is **frame-based equipment**: a fixed frame period of 1 to 10 ms; one channel
+  check by the initiating device before each period; occupancy of at most 95 % of the
+  period, then idle for at least 5 %; within the occupancy, transmissions with gaps of at
+  most 16 µs need no new check. If the check finds the channel busy, the period is lost.
+- 5725–5875 MHz: 25 mW e.i.r.p. as a short-range device. Not a 10 km band under CE.
+- 2.4 GHz (EN 300 328): 100 mW e.i.r.p.; equipment that does not listen is held to a
+  medium utilisation of 10 %, so listening is needed there too.
+- An outside reference for what these limits allow: the market leader's current digital
+  video link is specified at 10 to 15 km under FCC power and **6 to 8 km under CE**
+  (5.1 GHz below 23 dBm, 5.8 GHz below 14 dBm), with small antennas at both ends.
 
 ## Proposed decision
 
-1. **The long-range TDMA profile uses the n10 waveform**: 10 MHz, 256-point FFT, CP 32,
-   the colleague's preamble and frame, his TDD superframe as the starting point of the MAC.
-   ADR 0001's sentence becomes: long range comes from a TDMA profile with its own waveform
-   on the shared OFDM/LDPC core; 802.11 compatibility is the property of the Wi-Fi
-   profiles, not of the TDMA one. Everything else in ADR 0001 stands.
-2. **The pilot pattern is a parameter of the link, two values: p2 and p3.** They need the
-   same C/N0 on the line-of-sight channel at 600 Hz, p2 carries 9 % more, p3 is the one
-   that holds 64-QAM at high Doppler and without line of sight. Which is the default is
-   decided on captures from a flying link (R3), not here.
-3. **We take the colleague's work; we do not start again.** His repository is brought
-   into the project with its history and his copyright notices (Apache-2.0; the LDPC
-   base-graph files are Sionna's, attributed separately; the AD9361 datasheet is never
-   copied). It is the fast path to the roadmap's R3 exit — video over 10 km on Zynq and
-   AD9361 — because his RTL already runs on that class of board.
-4. **It is accepted block by block through our gates, and the listed defects are ours to
-   fix**: a real gain control (ours, R0-07e) in place of the ideal one; an LDPC decoder
-   without the floor (ours, R0-12, or his repaired — a measurement decides); deterministic
-   vectors under a CI diff (his PR #1); saved synthesis and timing reports. Until a block
-   has passed, a claim about it is his claim, cited as such.
-5. **His fixed-point modem and its twins are the golden model of the n10 blocks for now.**
-   ADR 0003 (the golden model is the spec) holds; what changes is that the spec of these
-   blocks is written in his language. Blocks that both profiles share — FFT, LDPC decoder,
-   CORDIC and NCO, gain control, DC removal — get one implementation, specified in
-   `crates/radio-phy`. Whether the rest is ported is decided per block when it is touched.
-6. **Nothing changes for the 802.11 work in progress** (R0: the 802.11a receiver). It is
-   the Wi-Fi profile's first step and the source of the shared blocks.
-
-## Why not the alternatives
-
-- **Start again and design a better waveform.** The run shows what a better one would
-  have: a guard of 3.2 µs or so, a channel measurement every five symbols or so, a short
-  preamble. n10-p3 has these. A design from nothing would arrive at about the same grid a
-  year later. What can be done better is the implementation, and decision 4 does that
-  without discarding what works.
-- **The 802.11ax numerology at half clock with a midamble (he10-ma).** Nearest to a
-  standard and 17 % more rate than n10-p3, but it reaches 1 % at 64-QAM only just at
-  2000 Hz and is 6 dB behind there; 802.11ax allows a midamble every 10 or 20 symbols only,
-  so a denser one is no more standard than n10; nobody clocks 802.11ax at 10 MHz, so there
-  is no commodity chip to test against either; and the 802.11ax core is stages away, while
-  n10's RTL exists.
-- **802.11a at 10 MHz, which is what we are building anyway.** Equal to n10 at QPSK and
-  16-QAM with a line of sight. It stays the fallback: if n10 is delayed, a first long-range
-  link can fly on it. It is not the profile because it fails without line of sight and
-  at 64-QAM.
-
-## Open, and not decided here
-
-- **Patents (risk point).** n10 uses the 5G NR LDPC code, whose essential patents are
-  3GPP's, not 802.11's. Options: keep it and add it to the freedom-to-operate analysis of
-  ADR 0001; or carry n10's frames on 802.11n's LDPC (one code family in the chip, already
-  modelled in R0-12). A code-only comparison at n10's block lengths decides whether the
-  second costs anything. To be shown to the lawyer with the rest.
-- **Regulation (risk point, CE/RED test plan).** The 5 GHz bands' harmonised standards ask
-  for channel access behaviour (listen before talk, DFS, power control, EIRP limits per
-  sub-band) that a TDMA link must be assessed against whatever its waveform. This ADR
-  assumes nothing about it; the figures below are parametrised by EIRP for that reason.
-- **Phase noise, frequency error and the power amplifier at 39 kHz tone spacing** on the
-  AD9361: the colleague's impairment experiments rerun under our gates, then captures.
-- **The 21 % of rate.** Whether n10 can use more of the 256 tones (242 as 802.11ax does)
-  within the spectral mask, and whether p2 serves as the default.
-- **One repository or two**, and where his code sits in the tree: a `[meta]` change of
-  its own with the layout.
+1. **We take the colleague's work. We do not start again.** A custom waveform designed
+   from nothing would not be better than his: nothing in e021 points to a grid that beats
+   it, and a year would go on arriving where he is. What can be done better is the
+   implementation, and that is done to his code, not instead of it (4).
+2. **What goes into silicon as the TDMA profile's waveform stays 802.11's, as ADR 0001
+   says:** the 802.11ax single-user format with its Doppler-mode midamble, at 20 MHz and
+   clocked at 10 MHz, under our TDMA MAC. Reasons, none of them the waveform's quality,
+   where the two are equal:
+   - the founder's direction on patents: one set of essential patents, Wi-Fi's;
+   - regulation asks for a 20 MHz mode, and n10 at twice its clock is the 802.11ax 20 MHz
+     numerology anyway;
+   - it is the Wi-Fi 6 core the roadmap builds regardless: one waveform in the chip, not
+     two, and 14 to 21 % more rate in the same channel;
+   - it keeps non-negotiable 3: the standard is the reference we did not write, and at
+     20 MHz a commodity Wi-Fi 6 chip can be the other end of a test (G1 and G5). n10's
+     preamble, frame and pilots have no reference but their author's model.
+3. **n10 is the prototype and the path there.** The first flying link (R3) is attempted on
+   his RTL with a radio in front of it, because it exists. From there n10 is moved toward
+   the 802.11ax format a step at a time, each step measured: 802.11n's LDPC in place of the
+   NR code; 242 tones; the HE long training field and midamble in place of the block
+   pilots; the HE preamble. If a step costs range that captures from the air show we need
+   — the short preamble, the third pilot symbol — that element is kept and a new ADR
+   amends ADR 0001 for it, on evidence. This ADR does not presume it.
+4. **His code comes in through our gates, and the defects are ours to fix:** a real gain
+   control (R0-07e's); a decoder without the floor; deterministic vectors under a CI diff;
+   saved synthesis and timing reports; the reset. Until a block has passed a gate here, a
+   claim about it is his, cited as such. "Fast path to R3" is an expectation, not a
+   result: the design has to meet an AD9361 first.
+5. **The code is 802.11's LDPC** (R0-12, already modelled), in the prototype as soon as the
+   comparison at n10's block lengths has been run, and in anything that leaves the lab
+   from the start. The NR code does not enter the chip.
+6. **ADR 0003 stands as written.** His fixed-point modem is the specification of the
+   prototype only. Whatever goes toward silicon is specified in `crates/radio-phy` and
+   reaches RTL through `rvec`, under ADR 0004's rules; his RTL is assessed against those
+   rules block by block before any of it is reused there.
+7. **The TDMA MAC is designed as frame-based equipment of EN 301 893 from the start:**
+   a superframe that is the fixed frame period (at most 10 ms), opened by one channel
+   check, at most 95 % occupied — his 22 + 1 frames of 432 µs are 9.94 ms and become 20 + 1
+   or fewer — with turnarounds inside it of at most 16 µs or a check of their own. A busy
+   channel costs a whole period: the video path must ride through gaps of 10 ms and more.
+8. **Bands and bandwidth are parameters of the profile:** 5170–5250 MHz and 2.4 GHz for
+   the CE variant, 10 and 20 MHz; the regulatory domain (limits, channel access) is
+   configuration, so that a market with other limits is another table and not another
+   design.
+9. **Nothing changes for the 802.11 work in progress.** It was the Wi-Fi profile's first
+   step; it is now also on the TDMA profile's own path. 802.11a at 10 MHz remains the
+   fallback for a first long-range link.
 
 ## What it means at 10 km
 
-A budget, not a measurement. Free-space loss at 5.8 GHz over 10 km is 127.7 dB. With a
-receiver noise figure of 6 dB the received C/N0 is EIRP + G_rx + 40.3 dB-Hz (EIRP in dBm,
-the receive antenna's gain in dBi). The run's requirement for n10-p3 on the line-of-sight
-channel at 600 Hz, plus 3 dB for what the run idealised (synchronisation, estimation,
-fixed point, phase noise) and 6 dB of margin (pointing, polarisation, ground reflection):
+A budget, not a measurement. Received C/N0 at 10 km, free space, receiver noise figure
+6 dB (a system figure, front-end loss included): EIRP + G_rx + 41.2 dB-Hz at 5.2 GHz,
++ 47.8 at 2.44 GHz, + 40.3 at 5.8 GHz. Requirement from the run (n10-p3 on the
+line-of-sight channel at 600 Hz; 802.11ax with a midamble is within a dB): 74.3 dB-Hz for
+QPSK 1/2 at 5 Mbit/s in 10 MHz, 79.7 for 16-QAM 1/2 at 10 Mbit/s, 89.3 for 64-QAM 3/4 at
+23 Mbit/s; plus 3 dB for what the run idealised and 6 dB of margin (assumptions of this
+ADR until R3 measures them; the 3 dB is optimistic for 64-QAM, and the 6 dB does not cover
+a ground-reflection null, which wants antenna diversity or height).
 
-| Modulation and code | PHY net rate | C/N0 needed (run) | with 3 + 6 dB | EIRP + G_rx needed | After the 22 : 1 superframe and 1 % loss |
-|---|---|---|---|---|---|
-| QPSK 1/2 | 5.07 Mbit/s | 74.3 dB-Hz | 83.3 | 43.0 dBm | about 4.8 Mbit/s |
-| 16-QAM 1/2 | 10.13 Mbit/s | 79.7 dB-Hz | 88.7 | 48.4 dBm | about 9.6 Mbit/s |
-| 64-QAM 3/4 | 22.80 Mbit/s | 89.3 dB-Hz | 98.3 | 58.1 dBm | about 21.6 Mbit/s |
+| Case (downlink, drone to ground) | EIRP + G_rx | C/N0 | What it carries |
+|---|---|---|---|
+| CE, 5.2 GHz, 10 MHz: 20 dBm, 17 dBi panel on the ground | 37 dBm | 78.2 | QPSK 1/2 with 3.9 dB of the 9 dB allowance: not a dependable link |
+| CE, 5.2 GHz, 10 MHz: 20 dBm, 23 dBi tracking dish | 43 dBm | 84.2 | **5 Mbit/s** (QPSK 1/2), 0.9 dB beyond the allowance |
+| CE, 5.2 GHz, 20 MHz: 23 dBm, 23 dBi tracking dish | 46 dBm | 87.2 | **10 Mbit/s** (QPSK 1/2 in 20 MHz) at the same margin, or 5 Mbit/s with 3 dB more |
+| CE, 2.4 GHz, 10 MHz: 20 dBm, 17 dBi panel | 37 dBm | 84.8 | **5 Mbit/s**, 1.5 dB beyond the allowance; a busier band |
+| Outside CE limits: 30 dBm EIRP, 23 dBi dish, 5.8 GHz | 53 dBm | 93.3 | 10 Mbit/s (16-QAM 1/2 in 10 MHz), 4.6 dB beyond |
+| Outside CE limits: 36 dBm EIRP, 23 dBi dish, 5.8 GHz | 59 dBm | 99.3 | 23 Mbit/s (64-QAM 3/4), 1 dB beyond |
 
-Examples: 0.5 W into a 2 dBi antenna on the drone (EIRP 29 dBm) and a 17 dBi panel on the
-ground give 46 dBm: QPSK 1/2 with 3 dB to spare. 1 W EIRP and a 23 dBi tracking dish give
-53 dBm: 16-QAM 1/2 with 4.6 dB to spare. 64-QAM 3/4 needs 4 W EIRP and the dish, with
-nothing to spare. 25 mW EIRP and a 14 dBi antenna give 28 dBm: no link at 10 km at any
-rate (QPSK 1/2 to about 1.8 km). The 3 and 6 dB are assumptions of this ADR until R3
-measures them; the MAC's headers and guard times, and packet loss of video packets that
-span several frames, come off the last column.
+After the superframe's uplink share, its idle 5 % and 1 % frame loss, about 0.85 to 0.9 of
+these rates is left before the MAC's headers; a video packet spans several frames, so
+packet loss without retransmission is several times the frame loss.
+
+**The uplink is the tighter direction.** The EIRP limit applies to the ground station too,
+so its dish does not help it transmit, and the drone's antenna is small: 23 dBm EIRP into
+2 dBi on the drone is 25 dBm, 66.2 dB-Hz at 5.2 GHz. With the same allowances that is
+about **100 kbit/s** (50 kbit/s at 20 dBm in 10 MHz): enough for command and telemetry,
+but it needs a mode some 17 dB below QPSK 1/2 that none of the waveforms compared has
+(802.11ax's extended-range format gives a few dB). To be designed: repetition or spreading
+for the uplink, or gain and diversity on the drone.
+
+So under CE limits 10 km is at the edge — beyond what the market leader specifies — and is
+reached only with a high-gain tracking antenna on the ground: about 5 Mbit/s of video in
+10 MHz, about 10 Mbit/s in 20 MHz, and a narrow uplink.
+
+## Why not the alternatives
+
+- **n10 as the chip's TDMA waveform, as it is.** Equal quality, less rate, a second
+  waveform and a second LDPC family in the chip, patents outside Wi-Fi's set, no outside
+  reference, and ADR 0001, 0003 and 0004 to amend. It would be chosen for a head start
+  that decision 3 uses anyway.
+- **Our own waveform from nothing.** Decision 1.
+- **802.11a at 10 MHz only.** Equal at QPSK and 16-QAM with a line of sight and already
+  being built; fails beyond its 1.6 µs guard and has no midamble. The fallback, not the
+  profile.
+- **802.11bd** (10 MHz, LDPC, midambles every few symbols, made for vehicles): a standard
+  answer to the Doppler problem that e021 did not include. To be added to the next run;
+  if it beats the 802.11ax format at 10 MHz it is a candidate under the same reasoning.
+
+## Open
+
+- **Patents (risk point, for the lawyer).** Undertakings to license on FRAND terms cover
+  implementations of a standard. A TDMA MAC under an 802.11 PHY, and still more an
+  802.11 code inside a frame that is not 802.11's, may not be covered as a Wi-Fi product
+  is. Decision 2 keeps the PHY the standard's for this reason too; the question goes into
+  the freedom-to-operate analysis of ADR 0001.
+- **The import (risk point, licences).** A snapshot at a cited commit, not the history:
+  the history holds commits made before the licence and may hold the AD9361 datasheet,
+  which is never copied. Before it: written confirmation of who holds the copyright (the
+  author or an employer), a licence scan of the tree, and whether his RTL or build leans on
+  vendor reference designs. The LDPC base-graph files are Sionna's and stay out with the NR
+  code. One repository or two is a `[meta]` change of its own.
+- **The CE test plan (risk point).** Everything under "Regulation" and decisions 7 and 8,
+  with a test lab: frame-based access for an airborne link, which end initiates, the
+  out-of-band limits at 10 and 20 MHz.
+- **To measure next (e022):** the 802.11ax format at 20 MHz with 1.6 and 3.2 µs guard,
+  802.11bd, a receiver with phase tracking for every waveform, what the simulator does
+  with the line-of-sight Doppler shift, 802.11n's LDPC at these frame sizes, an uplink mode
+  17 dB below QPSK 1/2, and the frequency acquisition range against ±2 ppm at each end
+  (0.6 of a tone at 39 kHz spacing).
+- **Dependence on one person** for the prototype's code, and his agreement to the gates and
+  to where the code lives.
+- FPGA headroom on his board (block RAM at 89 % before a gain control and a MAC).
 
 ## Consequences
 
-- The chip carries two waveforms on one core, and the TDMA profile is no longer testable
-  against commodity Wi-Fi cards (G5 for it is our two nodes and a signal analyser; the
-  Wi-Fi profiles keep their G5).
-- R3's exit can be attempted on the colleague's RTL before our 802.11 receiver has RTL.
-- The colleague becomes a contributor to an Apache-2.0 project; his notices stay.
-- `ROADMAP.md` and `BACKLOG.md` get the n10 items (gain control, decoder, vectors, reports,
-  the code comparison) when this ADR is accepted.
+- ADR 0001 is kept whole; the roadmap's order is unchanged; the Wi-Fi 6 core gains a
+  second customer.
+- Two toolchains live side by side while the prototype does (his: Python, Zig, Verilog-2005,
+  cocotb); a standing cost on a team small on purpose, accepted for the head start and
+  ended by decision 3's convergence.
+- `ROADMAP.md` and `BACKLOG.md` get the prototype track, the convergence steps and e022
+  when this ADR is accepted.
+
+## Sources for the regulatory facts
+
+Commission Implementing Decision (EU) 2022/179 as amended by (EU) 2022/2307 (EUR-Lex,
+consolidated text of 2022-11-25): the 5150–5250 MHz row and its unmanned-aircraft note;
+ETSI EN 301 893 (frame-based equipment: summaries by a chip vendor's application note and
+by test houses, not yet read against the standard's own text); ERC Recommendation 70-03
+annex and a national regulator's page for 25 mW in 5725–5875 MHz; ETSI EN 300 328
+(summaries); the market leader's published specification pages for the range and power
+figures. None of this replaces the test lab's reading.
