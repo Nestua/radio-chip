@@ -174,9 +174,35 @@ e.i.r.p. limit does not reach: two receive antennas combined (about 3 dB and pro
 from nulls), a low-noise amplifier at the antenna (2 to 3 dB), a larger dish (30 dBi: 7 dB).
 With them 16-QAM in 20 MHz at 10 km comes into reach. At 1 km everything has 20 dB more.
 
-So under CE limits 10 km is at the edge — the maker quoted above specifies 6 to 8 km for
-FPV units — and is reached only with a high-gain tracking antenna on the ground: about 5
-to 6 Mbit/s of video in 10 MHz, about 11 in 20 MHz, and a narrow uplink in another band.
+### The design point: built-in antennas (the founder, 2026-11-20)
+
+No tracking dish is planned; the link has to work with antennas that fit the drone and the
+dock, as the market's products do. That makes the receiving side's other means part of the
+design, not options: several receive antennas combined, and a low-noise front end. An
+estimate for 5.2 GHz under CE limits (22.8 dBm from a 2 dBi antenna on the drone), with
+the same 3 dB and 6 dB of allowance, a system noise figure of 3 dB, each pair of combined
+antennas counted as 3 dB of gain, and 2 dB taken off the run's fading requirement for the
+diversity. **None of the multi-antenna figures is measured: e021 had one antenna at each
+end.** Rates are PHY rates in the 20 MHz mode; the modes below QPSK 1/2 do not exist yet.
+
+| Rate | Dock: 4 patches of 8 dBi | Dock: 2 patches of 8 dBi | Handheld: 2 antennas of 3 dBi |
+|---|---|---|---|
+| 53 Mbit/s (64-QAM 3/4) | 1.1 km | 0.8 km | 0.4 km |
+| 24 Mbit/s (16-QAM 1/2) | 3.4 km | 2.4 km | 1.4 km |
+| 12 Mbit/s (QPSK 1/2) | 6.2 km | 4.4 km | 2.5 km |
+| 6 Mbit/s (half of it) | 8.7 km | 6.2 km | 3.5 km |
+| 3 Mbit/s (a quarter) | 12.3 km | 8.7 km | 4.9 km |
+| 1.5 Mbit/s (an eighth) | 17.4 km | 12.3 km | 6.9 km |
+
+Distances are with the 6 dB margin; without it each doubles, which is how a "maximum
+range" is usually quoted. The handheld column lands where the maker quoted above
+specifies its CE range (6 to 8 km), a check on the estimate from outside.
+
+So with built-in antennas under CE limits: **10 km is reached at about 3 to 5 Mbit/s with
+four receive antennas on the dock, with a margin; 12 Mbit/s reaches about 6 km; tens of
+megabits belong to the first one to three kilometres.** What this asks of the profile:
+rate adaptation over the whole table, modes below QPSK 1/2 for the downlink too (not only
+the uplink), and a receiver for two to four antennas.
 
 ## Why not the alternatives
 
