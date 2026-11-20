@@ -623,6 +623,8 @@ fn the_default_words_bit_for_bit() {
     // table's business; this keeps every rounding, saturation and constant where the table
     // put it, so that a change of one bit anywhere is a decision and not an accident. (The
     // RTL's G3 will compare whole vectors.)
+    // The tracker's prior (318 ppm) is wrong by more than its registers hold over the first
+    // frame's 335 symbols (8.6 samples against 8): that frame pins their saturation too.
     let fx = FixedOfdmConfig::default();
     let cfg = six_bits();
     let mut rng = Rng::new(0x0f20);
@@ -673,7 +675,7 @@ fn the_default_words_bit_for_bit() {
     assert_eq!(
         got,
         [
-            14_636_983_848_939_621_610u64,
+            797_987_032_209_841_876u64,
             2_722_506_916_840_601_925,
             2_803_077_607_927_797_426,
             16_026_798_777_574_690_161,
@@ -1080,4 +1082,162 @@ fn a_weak_pilot_pair_is_not_followed() {
     // The case is what it says: there was a slope to follow (40 ppm over 60 symbols is 0.19
     // samples, 0.019 rad per subcarrier).
     assert!(largest > 0.01, "{largest}");
+}
+
+#[test]
+fn the_tracker_constants_at_their_edges() {
+    let fx = FixedOfdmConfig::default();
+    let c = |g, sum| tracker_constants(&pilots_of(g, sum), &fx);
+    // A pair with both pilots gone has no weight and the other measures alone, as in the
+    // float tracker. Inner pair gone, flat otherwise: D = 9·10⁶ (24 bits: shift 8 → 35 156,
+    // N_o 3906); 3·3906/(14·35 156) = 1560.3/2¹⁶ (1/42), variance
+    // 5·52 000·2000/(52·9·10⁶) = 1.111 → 1137. Outer pair gone: 1/14 → 4681, variance
+    // 5·20 800·1600/(52·630 000) = 5.08 → 5201.
+    assert_eq!(
+        c([1000, 0, 0, 1000], 52_000),
+        TrackerConstants {
+            outer: 1560,
+            inner: 0,
+            variance: 1137
+        }
+    );
+    assert_eq!(
+        c([0, 700, 900, 0], 20_800),
+        TrackerConstants {
+            outer: 0,
+            inner: 4681,
+            variance: 5201
+        }
+    );
+    // Roundings that the round cases above do not separate. a = 13 237, b = 6238,
+    // N_o = 50 962 039 656, N_i = 13 264 069 665, D = 471 922 426 569 (39 bits: shift 23 →
+    // 56 257, 6075, 1581): 3·6075/(14·56 257) = 1516.502/2¹⁶ → 1517 (half up; a shift of
+    // 24 gives 1516), 1581/(14·56 257) = 131.55 → 132 (a shift of 24 gives 131); variance
+    // 5·4 494 101/(52·56 257) = 7.681 → 7865.
+    assert_eq!(
+        c([12_588, 165, 6073, 649], 456_560),
+        TrackerConstants {
+            outer: 1517,
+            inner: 132,
+            variance: 7865
+        }
+    );
+    // Used up to 3 nominal variances, 3 included; not at 0.
+    let with = |variance| TrackerConstants {
+        outer: 1,
+        inner: 1,
+        variance,
+    };
+    assert!(with(1).usable(&fx));
+    assert!(with(3072).usable(&fx));
+    assert!(!with(3073).usable(&fx));
+    assert!(!with(0).usable(&fx));
+    assert!(!with(-5).usable(&fx));
+    // λ = weight·variance/2¹⁰, half to even: 64 846·1396/1024 = 88 403.3; ties 0.5 → 0,
+    // 1.5 → 2, 2.5 → 2. None for a tracker that learns nothing.
+    let mut t = FixedTracking::unknown(&fx);
+    assert_eq!(t.lambda(&with(1396), &fx), 88_403);
+    t.weight = 1;
+    for (variance, want) in [(512, 0), (1536, 2), (2560, 2), (1537, 2), (2561, 3)] {
+        assert_eq!(t.lambda(&with(variance), &fx), want, "{variance}");
+    }
+    assert!(FixedTracking::fixed(3.0, &fx).lambda(&with(1024), &fx) < 0);
+}
+
+#[test]
+fn the_tracker_registers_saturate_and_refuse() {
+    let fx = FixedOfdmConfig::default();
+    // Unusable widths, a symbol beyond any frame: nothing learned, no panic.
+    for bad in [
+        FixedOfdmConfig {
+            rate_frac: 128,
+            ..fx
+        },
+        FixedOfdmConfig {
+            rate_frac: 200,
+            ..fx
+        },
+        FixedOfdmConfig { var_frac: 99, ..fx },
+    ] {
+        let mut t = FixedTracking::unknown(&fx);
+        t.learn(5, 0, 64_846, &bad);
+        t.learn(90_000, 1, 64_846, &bad);
+        assert_eq!(t.delta, 0);
+        let c = TrackerConstants {
+            outer: 1,
+            inner: 1,
+            variance: 1024,
+        };
+        assert!(!c.usable(&bad) || bad.var_frac <= 16);
+        let _ = t.lambda(&c, &bad);
+    }
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(0, 0, 0, &fx);
+    t.learn(1000, 1367, 0, &fx);
+    assert_eq!(t.delta, 0);
+    // z saturates at 20 bits: with no prior (λ = 0) two measurements give the line through
+    // them, δ = 2¹⁰·(z₁ − z₀)/5. An error of 600 000 counts as 524 287: δ = 107 374 029.9…
+    // → 107 373 977 (1024·524 287/5 = 107 373 977.6, toward zero).
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(0, 0, 0, &fx);
+    t.learn(600_000, 1, 0, &fx);
+    assert_eq!(t.delta, 107_373_977);
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(0, 0, 0, &fx);
+    t.learn(-600_000, 1, 0, &fx);
+    // −524 288·1024/5 = −107 374 182.4 → −107 374 182.
+    assert_eq!(t.delta, -107_374_182);
+    // δ saturates at 28 bits: from −2¹⁹ to 2¹⁹ − 1 in one step of 5 is
+    // 1024·1 048 575/5 = 214 748 160 → 2²⁷ − 1, and the mirror image −2²⁷.
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(-600_000, 0, 0, &fx);
+    t.learn(600_000, 1, 0, &fx);
+    assert_eq!(t.delta, (1 << 27) - 1);
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(600_000, 0, 0, &fx);
+    t.learn(-600_000, 1, 0, &fx);
+    assert_eq!(t.delta, -(1 << 27));
+    // And stays in its 28 bits whatever is fed, for a whole frame and back.
+    let mut t = FixedTracking::unknown(&fx);
+    for i in 0..1367 {
+        t.learn(i64::MAX, i, 0, &fx);
+        assert!(t.delta.abs() < 1 << 27, "symbol {i}: {}", t.delta);
+    }
+    for i in 0..1367 {
+        t.learn(i64::MIN, 1366 - i, 0, &fx);
+        assert!(t.delta.abs() <= 1 << 27, "symbol {i}: {}", t.delta);
+    }
+}
+
+#[test]
+fn the_window_moves_beyond_half_a_sample_only() {
+    // A tracker that applies a fixed rate: at symbol 5 (τ = 32) a rate of 2²⁰/2¹⁰ units per
+    // τ is a drift of exactly 2¹⁵, half a sample: the window stays. One unit more and it
+    // moves one sample earlier; the mirror image moves it later.
+    let fx = FixedOfdmConfig::default();
+    let mut rng = Rng::new(0x0f33);
+    let x = at_level(&frame(&psdu(60, &mut rng), Rate::R12), -12.0);
+    let z = to_fixed(&x, 2048.0, 12);
+    let ch = estimate_channel_fixed(&z[188..316], &fx).unwrap();
+    let w = 188 + 144 + 400..188 + 208 + 400;
+    for (rate0, theta, shift) in [
+        (1 << 20, 32_768, 0),
+        ((1 << 20) + 32, 32_769, -1),
+        (-(1 << 20), -32_768, 0),
+        (-(1 << 20) - 32, -32_769, 1),
+    ] {
+        let mut t = FixedTracking::fixed(0.0, &fx);
+        t.rate0 = rate0;
+        symbol_soft_fixed(
+            &z[w.clone()],
+            &ch,
+            5,
+            Modulation::Qpsk,
+            &RxOfdmConfig::default(),
+            &fx,
+            &mut t,
+        )
+        .unwrap();
+        assert_eq!((t.theta, t.shift), (theta, shift), "rate {rate0}");
+    }
 }

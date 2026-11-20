@@ -384,8 +384,17 @@ pub struct TrackerConstants {
     /// Coefficient of the inner pair's angle (pilots at ±7), K fractional bits: N_i/(14·D).
     pub inner: i64,
     /// The measurement's variance against a flat channel of the same mean gain, V fractional
-    /// bits: 5·Σg·a·b/(52·D). 0: no usable pilot pair.
+    /// bits: 5·Σg·a·b/(52·D). 0: neither pair has both its pilots (or the variance is below
+    /// 2^−V).
     pub variance: i64,
+}
+
+impl TrackerConstants {
+    /// Whether the packet's measurements go into the fit: a variance above 0 and at most 3
+    /// nominal ones ([`crate::rx_ofdm::TIMING_MAX_VARIANCE`]).
+    pub fn usable(&self, fx: &FixedOfdmConfig) -> bool {
+        fx.var_frac <= 16 && self.variance > 0 && self.variance <= MAX_VARIANCE << fx.var_frac
+    }
 }
 
 /// The tracker's constants for one packet. With g the gains at −21, −7, 7, 21, a = g₀ + g₃
@@ -393,7 +402,8 @@ pub struct TrackerConstants {
 /// divisions: N_o = g₀·g₃·b, N_i = g₁·g₂·a, D = 9·N_o + N_i. D is cut to M bits (and the
 /// numerators by the same shift, truncating) and three quotients are taken: the slope left
 /// in a symbol is `outer`·∠outer + `inner`·∠inner, its variance `variance`. All zero for
-/// unusable widths, no pilot pair, or gains no estimate can produce.
+/// unusable widths, no pair with both its pilots, or gains no estimate can produce. A pair
+/// whose two pilots are both gone has no weight; the other pair measures alone.
 pub fn tracker_constants(ch: &FixedChannel, fx: &FixedOfdmConfig) -> TrackerConstants {
     constants_of(ch, fx).unwrap_or_default()
 }
@@ -404,7 +414,12 @@ fn constants_of(ch: &FixedChannel, fx: &FixedOfdmConfig) -> Option<TrackerConsta
     for (slot, &c) in g.iter_mut().zip(&PILOT_SUBCARRIERS) {
         *slot = i128::from(ch.gain[fft_bin(c)].max(0));
     }
-    let (a, b) = (g[0].checked_add(g[3])?, g[1].checked_add(g[2])?);
+    // A pair with both pilots gone has no weight and must not take the other pair's with
+    // it: its sum counts as 1 (the pair's own numerator is 0 either way).
+    let (a, b) = (
+        g[0].checked_add(g[3])?.max(1),
+        g[1].checked_add(g[2])?.max(1),
+    );
     let no = g[0].checked_mul(g[3])?.checked_mul(b)?;
     let ni = g[1].checked_mul(g[2])?.checked_mul(a)?;
     let d = no.checked_mul(9)?.checked_add(ni)?;
@@ -433,6 +448,12 @@ fn constants_of(ch: &FixedChannel, fx: &FixedOfdmConfig) -> Option<TrackerConsta
 /// ([`crate::rx_ofdm::TIMING_MAX_VARIANCE`], an integer here).
 const MAX_VARIANCE: i64 = 3;
 
+/// Widths of the tracker's counting registers ([`FixedTracking`]): n, Στ, Στ². The others
+/// follow the phase width P: z is P − 2 bits, Σz P + 9, Στz P + 21, δ P + R − 4.
+const N_BITS: u32 = 11;
+const S1_BITS: u32 = 23;
+const S2_BITS: u32 = 35;
+
 /// The timing tracker's state across the symbols of a PPDU, in integers: the float
 /// [`crate::rx_ofdm::Tracking`]'s fit measured(τ) = offset + rate·τ in its batch form. Time τ
 /// is in fifths of a symbol from the middle of the long training field (7 for SIGNAL, then
@@ -442,8 +463,18 @@ const MAX_VARIANCE: i64 = 3;
 /// The sums n, Στ, Στ², Σz, Στz of the measurements z (each taken against the prior rate)
 /// give the correction to the prior rate as one quotient per symbol,
 /// δ = 2^R·(n·Στz − Στ·Σz) / (n·(Στ² + λ) − (Στ)²), truncated toward zero, where λ is the
-/// prior's weight times the packet's variance. For the longest frame (1367 symbols) the sums
-/// need 11, 23, 35, 31 and 43 bits and the quotient is 64 bits by 45.
+/// prior's weight times the packet's variance.
+///
+/// The registers, for P = 22 and R = 10. z is 20 bits signed (P − 2) and saturates: 8
+/// samples of timing, a prior on the clock offset wrong by 190 ppm over the longest frame
+/// (the standard's worst case is 40). δ is 28 bits signed (P + R − 4) and saturates. n is
+/// 11 bits, Στ 23 and Στ² 35 unsigned, Σz 31 (P + 9) and Στz 43 (P + 21) signed: the longest
+/// frame, 1367 symbols with one measurement each, cannot overflow them (the model
+/// saturates them all the same, for a caller that feeds a symbol twice). The numerator is
+/// then 55 bits, 65 with its R fractional bits, and the divisor 43. With a signal present
+/// nothing saturates; when the signal ends inside a frame the pilots are noise, the
+/// measurement no longer answers the prediction and the rate runs away, in the float
+/// tracker and here alike — here up to z's limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FixedTracking {
     /// Prior drift rate (R fractional bits).
@@ -543,40 +574,46 @@ impl FixedTracking {
         )
     }
 
+    /// The prior's weight for a packet: `weight`·variance, half to even. Negative for a
+    /// tracker that learns nothing.
+    pub fn lambda(&self, c: &TrackerConstants, fx: &FixedOfdmConfig) -> i128 {
+        if self.weight < 0 || fx.var_frac > 16 {
+            return -1;
+        }
+        rsh_even(
+            i128::from(self.weight) * i128::from(c.variance.max(0)),
+            fx.var_frac,
+        )
+    }
+
     /// One symbol's measurement into the fit: `err` is the slope measured in symbol `i`
     /// (0 for SIGNAL) after the predicted drift was removed, `lambda` the prior's weight for
-    /// this packet (`weight`·variance). Updates δ. A tracker that learns nothing, or sums
-    /// beyond any frame's, leave δ as it is.
+    /// this packet ([`FixedTracking::lambda`]). Updates δ. A tracker that learns nothing, a
+    /// negative `lambda`, unusable widths or a symbol index beyond any frame's (1366) leave
+    /// δ as it is.
     pub fn learn(&mut self, err: i64, i: usize, lambda: i128, fx: &FixedOfdmConfig) {
         self.measured = err;
-        if self.weight < 0 || lambda < 0 {
+        if self.weight < 0 || lambda < 0 || i > 1366 || !fx.is_valid() {
             return;
         }
-        let step = || -> Option<(i128, i128, i128, i128, i128, i64)> {
-            let tau = i128::try_from(i).ok()?.checked_mul(5)?.checked_add(7)?;
-            // The measurement against the prior rate: what was predicted with δ comes back.
-            let z = i128::from(err).checked_add(rsh_even(
-                i128::from(self.delta).checked_mul(tau)?,
-                fx.rate_frac,
-            ))?;
-            let n = self.n + 1;
-            let s1 = self.s1.checked_add(tau)?;
-            let s2 = self.s2.checked_add(tau.checked_mul(tau)?)?;
-            let y0 = self.y0.checked_add(z)?;
-            let y1 = self.y1.checked_add(tau.checked_mul(z)?)?;
-            let det = n
-                .checked_mul(s2.checked_add(lambda)?)?
-                .checked_sub(s1.checked_mul(s1)?)?;
-            let num = n.checked_mul(y1)?.checked_sub(s1.checked_mul(y0)?)?;
-            let delta = if det > 0 {
-                i64::try_from(num.checked_mul(1i128 << fx.rate_frac)? / det).ok()?
-            } else {
-                self.delta
-            };
-            Some((n, s1, s2, y0, y1, delta))
-        };
-        if let Some((n, s1, s2, y0, y1, delta)) = step() {
-            (self.n, self.s1, self.s2, self.y0, self.y1, self.delta) = (n, s1, s2, y0, y1, delta);
+        // Unsigned registers saturate at 2^bits − 1.
+        let cap = |v: i128, bits: u32| v.clamp(0, (1i128 << bits) - 1);
+        let tau = 7 + 5 * i as i128;
+        // The measurement against the prior rate: what was predicted with δ comes back.
+        let back = rsh_even(i128::from(self.delta) * tau, fx.rate_frac);
+        let p = fx.front.nco_phase_bits;
+        let z = i128::from(sat(i128::from(err).saturating_add(back), p - 2));
+        self.n = cap(self.n + 1, N_BITS);
+        self.s1 = cap(self.s1 + tau, S1_BITS);
+        self.s2 = cap(self.s2 + tau * tau, S2_BITS);
+        self.y0 = i128::from(sat(self.y0 + z, p + 9));
+        self.y1 = i128::from(sat(self.y1 + tau * z, p + 21));
+        // λ beyond 64 bits is a prior nothing outweighs; the divisor stays in range.
+        let lambda = lambda.min(1i128 << 64);
+        let det = self.n * (self.s2 + lambda) - self.s1 * self.s1;
+        if det > 0 {
+            let num = self.n * self.y1 - self.s1 * self.y0;
+            self.delta = sat((num << fx.rate_frac) / det, p + fx.rate_frac - 4);
         }
     }
 }
@@ -619,15 +656,13 @@ fn track_fixed(
         i128::from(c.outer) * outer + i128::from(c.inner) * inner,
         fx.coef_frac,
     );
-    let usable = c.variance > 0 && c.variance <= MAX_VARIANCE << fx.var_frac;
-    if usable {
-        let lambda = rsh_even(
-            i128::from(tracking.weight) * i128::from(c.variance),
-            fx.var_frac,
-        );
-        tracking.learn(sat(err, p_bits + 1), i, lambda, fx);
+    // |e| is at most half a turn over 14: it fits P − 2 bits; the saturation is for
+    // coefficients no estimate produces.
+    let err = sat(err, p_bits);
+    if c.usable(fx) {
+        tracking.learn(err, i, tracking.lambda(&c, fx), fx);
     } else {
-        tracking.measured = sat(err, p_bits + 1);
+        tracking.measured = err;
     }
     tracking.drift = tracking.drift_at(i, fx);
     tracking.theta = sat(i128::from(tracking.drift) + moved, p_bits + 1);
