@@ -280,15 +280,6 @@ fn fine() -> RxOfdmConfig {
     }
 }
 
-/// The working soft format (the founder, 2026-11-19): six bits, clip 2.
-fn soft6() -> RxOfdmConfig {
-    RxOfdmConfig {
-        soft_max: 31,
-        clip: 2.0,
-        ..base()
-    }
-}
-
 /// The soft-format sweep: a fine reference and every candidate on the same frames, on grids
 /// of 0.5 dB (AWGN) and 1 dB (fading) around the 10 % crossings that `soft2` found.
 fn soft_formats(tag: &str, formats: &[(&'static str, i32, f64)], frames: usize) {
@@ -512,7 +503,7 @@ fn widths(frames: usize) {
             }),
         ),
     ];
-    let mut rx = vec![receiver("float", true, soft6())];
+    let mut rx = vec![receiver("float", true, base())];
     for (name, fx) in &variants {
         if !fx.is_valid() {
             println!("# {name}: not a usable set of widths, left out");
@@ -520,12 +511,12 @@ fn widths(frames: usize) {
         }
         rx.push(Receiver {
             fixed: Some(*fx),
-            ..receiver(name, true, soft6())
+            ..receiver(name, true, base())
         });
     }
     println!(
         "\n## widths of the integer data path: frames lost of {frames} (rounded up), 1000 octets, the same frames for every column,\n\
-         # 12-bit samples at {ADC_LEVEL_DBFS} dBFS, six-bit soft values with a clip of 2, clock offset uniform in ±40 ppm.\n\
+         # 12-bit samples at {ADC_LEVEL_DBFS} dBFS, eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.\n\
          # default = W16 s2 T12 U16 C10 F4, rotator L9 Q11, CORDIC N16; each other column changes what its name says;\n\
          # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
          # columns: {}",
@@ -858,25 +849,17 @@ fn main() -> ExitCode {
             );
         }
         "fixed" => {
-            // G2 of the integer data path: float and integer receiver on the same 12-bit
-            // samples, six-bit soft values with a clip of 2, the grids of `softg2`.
+            // G2 of the integer data path at the decoder's soft format (eight bits, clip 3):
+            // the float receiver with fine soft values (G0's reference for the whole fixed
+            // receiver), the float receiver at the format, and the integer data path at the
+            // format, all on the same 12-bit samples, on the grids of `softg2`. The loss
+            // printed is against the first.
             let rx = [
-                receiver("float", true, soft6()),
+                receiver("float fine", true, fine()),
+                receiver("float", true, base()),
                 Receiver {
                     fixed: Some(FixedOfdmConfig::default()),
-                    ..receiver("integer", true, soft6())
-                },
-                // The one width `fixedw` shows a cost for: the rotator's table.
-                Receiver {
-                    fixed: Some(FixedOfdmConfig {
-                        front: FixedRxConfig {
-                            nco_lut_bits: 11,
-                            nco_amp_bits: 14,
-                            ..FixedRxConfig::default()
-                        },
-                        ..FixedOfdmConfig::default()
-                    }),
-                    ..receiver("integer L11 Q14", true, soft6())
+                    ..receiver("integer", true, base())
                 },
             ];
             let frames = n.unwrap_or(2000);

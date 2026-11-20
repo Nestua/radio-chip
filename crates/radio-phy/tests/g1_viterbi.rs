@@ -373,6 +373,26 @@ fn metric_spread_respects_its_bound() {
         }
     }
     println!("worst metric spread with |soft| ≤ 7: {worst} (bound 168)");
+    // The same at the decoder's own width: saturated inputs of ±SOFT_MAX.
+    let span = 2 * SOFT_MAX as u64 + 1;
+    let mut worst = 0;
+    for rate in [CodeRate::R1_2, CodeRate::R2_3, CodeRate::R3_4] {
+        for _ in 0..200 {
+            let rx: Vec<i32> = (0..600)
+                .map(|_| (r.next_u64() % span) as i32 - SOFT_MAX)
+                .collect();
+            let spread = metric_spread(&rx, rate).unwrap();
+            assert!(
+                spread <= 24 * i64::from(SOFT_MAX),
+                "{rate:?}: spread {spread}"
+            );
+            worst = worst.max(spread);
+        }
+    }
+    println!(
+        "worst metric spread with |soft| ≤ {SOFT_MAX}: {worst} (bound {})",
+        24 * SOFT_MAX
+    );
 }
 
 #[test]

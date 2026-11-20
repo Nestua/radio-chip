@@ -150,3 +150,43 @@ Decided on the evidence of the note above. The constants change with R0-09 G2, w
 whole receiver's sweep confirms or corrects the format and this journal's G2 (loss against
 float, metric width) is rerun at the new widths. Record: `docs/gates/rx_ofdm.md`,
 2026-11-19, decisions.
+
+## 2026-11-20 · decision and G2 · eight bits, clip 3 (the founder), after R0-09's sweep
+
+R0-09's sweep of the whole receiver (`docs/gates/rx_ofdm.md`, 2026-11-20: 2000 paired
+frames per point, every rate, AWGN and TGn B, D, E) showed that no format of six bits or
+fewer holds 0.2 dB at the 3/4-code rates in fading, that seven bits with a clip of 2 hold it
+(worst +0.09 dB) and that eight bits with a clip of 3 lose nothing resolved (worst
++0.02 dB). **The founder chose eight bits, clip 3 on 2026-11-20**; it replaces the working
+format of 2026-11-19 (six bits, clip 2) and the first choice of 2026-11-17 (four bits,
+clip 1.5), which was right for the question it was asked on (BPSK in AWGN) and wrong for
+the receiver in fading — open question 1 above, answered.
+
+Constants: `SOFT_BITS = 8` (soft values ±127), `SOFT_CLIP = 3.0`, `METRIC_BITS = 13`
+(spread ≤ 24·127 = 3048, so 2^13 = 8192 > 6096). `TRACEBACK_DEPTH` stays 64.
+
+This journal's own G2 at the new format: `cargo run -q --release -p radio-tools --bin g2
+-- viterbi 30000`, three rows added per rate, every earlier row identical to the run of
+2026-11-17 (`docs/gates/reports/g2_viterbi.txt`). Loss at BER 1e-4 against 2^-12 soft
+values and full traceback, dB:
+
+| Configuration | 1/2 | 2/3 | 3/4 | worst | largest spread seen |
+|---|---|---|---|---|---|
+| 7 bit, clip 2.0 | 0.002 | 0.002 | 0.009 | 0.009 | 920 |
+| **8 bit, clip 3.0** | 0.003 | 0.003 | −0.000 | 0.003 | 1366 |
+| **8 bit / 3.0 + window 64** | 0.003 | 0.010 | 0.025 | **0.025** | — |
+
+Within the budget of 2026-11-17 (0.15 dB for the soft values, 0.05 dB for the window, 0.2
+together): what is left is the window's own 0.024 dB. The spread seen, 1366, is under the
+bound of 3048.
+
+G1 at the new constants: `cargo test -p radio-phy --test g1_viterbi` (12 pass; the
+metric-bound test failed with `METRIC_BITS = 9`, as it should, and has a second case at the
+decoder's own width, saturated inputs of ±127). `soft_value_contract` in `g1_rx_ofdm` is
+rewritten for the format (level 1 → 42, 3 and beyond → 127, 0.011 → erasure, 0.012 → 1).
+
+Cost, for ADR 0008's count: four more bits per soft value than the first choice and four
+more bits per path metric (64 registers of 13 bits, add-compare-select 13 bits wide).
+
+Open question 2 (the loss at BER 1e-5) is superseded by R0-09's sweep, which measures the
+whole receiver at 10 % PER of 1000-octet frames.

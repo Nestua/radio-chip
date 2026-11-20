@@ -526,7 +526,7 @@ fn through_the_front_and_a_channel() {
 #[test]
 fn soft_value_contract() {
     // docs/gates/viterbi.md: a matched-filter level of 1 (a noiseless BPSK point on a subcarrier
-    // of mean gain) is soft_max/clip = 7/1.5 → 5; 1.5 and beyond is 7; the weight scales it.
+    // of mean gain) is soft_max/clip = 127/3 → 42; 3 and beyond is 127; the weight scales it.
     let cfg = RxOfdmConfig::default();
     let eq = |v: f64, w: f64| Equalised {
         points: vec![(v, 0.3); 48],
@@ -539,17 +539,19 @@ fn soft_value_contract() {
         assert!(s.iter().all(|x| *x == s[0]));
         s[0]
     };
-    assert_eq!(all(1.0, 1.0), -5); // bit 1 is +1 on air, negative soft
-    assert_eq!(all(-1.0, 1.0), 5);
-    assert_eq!(all(-1.5, 1.0), 7);
-    assert_eq!(all(-9.0, 1.0), 7);
-    assert_eq!(all(9.0, 1.0), -7);
-    assert_eq!(all(-1.0, 0.5), 2); // 2.33 → 2
+    assert_eq!(all(1.0, 1.0), -42); // bit 1 is +1 on air, negative soft
+    assert_eq!(all(-1.0, 1.0), 42);
+    assert_eq!(all(-3.0, 1.0), 127);
+    assert_eq!(all(-2.99, 1.0), 127); // 126.58 → 127
+    assert_eq!(all(-2.98, 1.0), 126); // 126.15 → 126
+    assert_eq!(all(-9.0, 1.0), 127);
+    assert_eq!(all(9.0, 1.0), -127);
+    assert_eq!(all(-1.0, 0.5), 21); // 21.17 → 21
     assert_eq!(all(-1.0, 0.0), 0);
-    assert_eq!(all(-0.1, 1.0), 0); // 0.47 → 0: an erasure
-    assert_eq!(all(-0.11, 1.0), 1); // 0.513 → 1
-                                    // Order: the soft values come back in coded order. A symbol whose points encode the
-                                    // interleaved pattern of a known coded sequence gives that sequence's signs.
+    assert_eq!(all(-0.011, 1.0), 0); // 0.466 → 0: an erasure
+    assert_eq!(all(-0.012, 1.0), 1); // 0.508 → 1
+                                     // Order: the soft values come back in coded order. A symbol whose points encode the
+                                     // interleaved pattern of a known coded sequence gives that sequence's signs.
     for m in MODULATIONS {
         let n = 48 * m.bits_per_subcarrier();
         let coded: Vec<u8> = (0..n).map(|k| ((k * 7 + k / 5) % 3 == 0) as u8).collect();

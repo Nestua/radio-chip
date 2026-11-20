@@ -198,6 +198,14 @@ fn viterbi(blocks: u64) -> Result<(), String> {
         clip: 1.5,
         depth: 64,
     });
+    // The format R0-09's whole-receiver sweep chose (2026-11-20), and the runner-up.
+    configs.push(Config::Soft { bits: 7, clip: 2.0 });
+    configs.push(Config::Soft { bits: 8, clip: 3.0 });
+    configs.push(Config::Both {
+        bits: 8,
+        clip: 3.0,
+        depth: 64,
+    });
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
     println!(
         "# G2 sweep: Viterbi, {blocks} blocks x {VIT_BLOCK} bits per point, BPSK/AWGN, \

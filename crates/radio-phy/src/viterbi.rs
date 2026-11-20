@@ -13,16 +13,16 @@ pub const STATES: usize = 64;
 
 /// Soft-input width of the hardware decoder (G2, `docs/gates/viterbi.md`): values in
 /// ±[`SOFT_MAX`], 0 = erasure.
-pub const SOFT_BITS: u32 = 4;
+pub const SOFT_BITS: u32 = 8;
 /// Largest soft magnitude, 2^(SOFT_BITS−1) − 1.
 pub const SOFT_MAX: i32 = (1 << (SOFT_BITS - 1)) - 1;
 /// Matched-filter level (signal amplitude 1) that maps to ±[`SOFT_MAX`]: the demapper's
 /// scaling contract (R0-09). Chosen by G2 together with [`SOFT_BITS`].
-pub const SOFT_CLIP: f64 = 1.5;
+pub const SOFT_CLIP: f64 = 3.0;
 /// Traceback window of the hardware decoder ([`decode_windowed`]), chosen by G2.
 pub const TRACEBACK_DEPTH: usize = 64;
 /// Path-metric register width for modulo arithmetic: 2^METRIC_BITS > 2·24·SOFT_MAX.
-pub const METRIC_BITS: u32 = 9;
+pub const METRIC_BITS: u32 = 13;
 
 /// Where the decoder may assume the encoder's state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
