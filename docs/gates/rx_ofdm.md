@@ -581,5 +581,13 @@ Findings:
   (R0-12), in AWGN. Whether fading asks the same of it as of the Viterbi path here has not
   been measured.
 
-**Decision:** the founder's (the working format was). Until then `SOFT_BITS`, `SOFT_CLIP`
-and `METRIC_BITS` are unchanged.
+**Decision (the founder, 2026-11-20): eight bits, clip 3** — soft values of ±127, 3 half
+minimum distances on a subcarrier of mean gain mapping to 127. It replaces the working
+format of 2026-11-19 (six bits, clip 2). Reason: it is the one candidate that leaves the
+0.2 dB budget to the data path, the tracker and the front; 7 / 2 holds the budget alone but
+spends half of it.
+
+Follows, each behind its own gate and not in this change: `SOFT_BITS` 4 → 8, `SOFT_CLIP`
+1.5 → 3 and `METRIC_BITS` (2^M > 2·24·127, so 13) in `viterbi.rs` with R0-10's G1 and G2
+rerun; `rxper fixed` and `fixedw` rerun at the new format (they were measured at 6 / 2), the
+pin of `g2_rx_ofdm` and the constants A regenerated; the LDPC input's question above.
