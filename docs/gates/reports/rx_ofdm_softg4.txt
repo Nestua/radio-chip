@@ -1,0 +1,4 @@
+# rxper softg4: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz
+
+## AWGN, mid-rise soft values (G2): PER of 1000-octet frames, 2000 frames per point, clock offset uniform in ±40 ppm
+# receivers: fine / 6b/2 / 5m/2 / 6m/2 / 6m/3 / 7m/3

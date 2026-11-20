@@ -367,3 +367,113 @@ is present. (4) The loss at 10 % PER and the sweep that chose each width:
 **Not in stage A:** the tracker in integers; channel-estimate smoothing; the DC removal in
 front of the decoder (`rx_front.md`, 2026-11-19: its first numbers); the Viterbi decoder at
 the new soft format (R0-10's G2 is rerun when `softg2` has confirmed it).
+
+## 2026-11-19 · G2 · stage A: the integer data path against the float receiver
+
+Commits 3965195 (model, gate), f37f56a and the one carrying this entry (measurements).
+Commands: `cargo test -p radio-phy --test g2_rx_ofdm` (7 pass);
+`cargo test -p radio-phy --test g1_annex_i1 -- --ignored` (the standard's printed waveform,
+local fixture: decodes through `decode_ppdu_fixed` to the annex's message);
+`rxper fixedw 2000` → `reports/rx_ofdm_fixedw.txt`; `rxper fixed 2000` →
+`reports/rx_ofdm_fixed.txt`.
+
+**Outside references.** The FFT is checked on inputs whose transform is known by hand (a
+constant, an impulse, the alternating sequence, (−j)ⁿ → bin 48, ties, saturation) and against
+the float transform; the receiver against the float receiver (itself G1 against the
+standard's Annex I waveform) and, where the fixture is present, against that waveform
+directly.
+
+**The gate bites.** 31 mutations of `rx_ofdm_fixed.rs`, one at a time, each restored with
+`cp` and `touch`; every one fails at least one test of `g2_rx_ofdm`. They are: twiddle sign; no stage halved; ties
+rounded up; ties rounded down; FFT word not saturated; L(k) ignored; T2 not used; u not
+conjugated; the packet shift one short; no packet shift; pilot polarity ignored; pilot base
+ignored; slope sign on the pilots; common phase not removed; slope not removed from the
+data; angle not widened to the phase word; threshold twice too large; centre threshold not
+halved; fold without magnitude; first-bit sign; scale over 48 instead of 52; soft value
+truncated; soft value not saturated; not deinterleaved; window moves the wrong way; window
+never moves; input shift ignored; rotation not narrowed back; Q of BPSK demapped; the gain
+of bin 0 used for every threshold; window moves one way only. One survived at first — "the
+window never moves" — because no test ran long enough for the window to walk; the test
+`the_window_walks_over_a_drift_longer_than_the_guard_interval` was added and kills it, and
+"the window moves one way only" after it.
+
+**Measurement set-up.** The same frames for every receiver: the float front acquires and
+corrects, the corrected stream is scaled to −12 dBFS RMS and quantised to 12 bits
+(full scale 2048), and *every* receiver, the float one too, decodes those samples; soft
+values six bits with a clip of 2 (the working format). 1000-octet frames, 2000 per point,
+clock offset uniform in ±40 ppm.
+
+**Loss at 10 % PER, integer data path − float** (`reports/rx_ofdm_fixed.txt`; default widths
+W16 s2 T12 U16 C10 F4, the front's rotator L9 Q11 and CORDIC N16; dB, + is a loss):
+
+| Rate, Mb/s | AWGN | TGn B | TGn D | TGn E |
+|---|---|---|---|---|
+| 6 | −0.00 | +0.00 | −0.01 | −0.00 |
+| 9 | −0.00 | +0.00 | +0.01 | −0.00 |
+| 12 | −0.00 | +0.00 | −0.01 | −0.01 |
+| 18 | −0.01 | +0.04 | +0.00 | +0.01 |
+| 24 | −0.01 | +0.00 | +0.01 | −0.00 |
+| 36 | +0.02 | +0.10 | +0.03 | +0.01 |
+| 48 | +0.03 | +0.05 | +0.01 | +0.02 |
+| 54 | +0.01 | +0.02 | +0.01 | +0.00 |
+
+The worst cell is +0.10 dB (TGn B, 36 Mb/s); the budget is 0.2 dB. **Stage A's data path is
+inside the budget at every rate and channel measured.** What this does not cover: the
+tracker's arithmetic (float here, stage B), the front in integers on the same frames (the
+front here is the float one; its own G2 is in `rx_front.md`), and the soft format itself,
+which is below.
+
+**Widths** (`reports/rx_ofdm_fixedw.txt`: frames lost of the same 2000 at seven scenes, one
+width changed per column).
+
+- With every width far beyond need the integer path loses what the float receiver loses
+  (186/186, 188/189, 233/233, 195/195, 141/141 frames; 0 at 35 and 45 dB). The
+  architecture — no division per subcarrier, thresholds scaled by g, one division per
+  packet — costs nothing measurable.
+- The default's few extra frames at 54 Mb/s (196 against 189 in AWGN, 203 against 195 in
+  TGn D, 144 against 141 in TGn E) go with the rotator table: with L11 Q14 the counts are
+  193, 195, 141. In dB at 10 % PER the wider table changes nothing that the grid resolves
+  (third column of `rx_ofdm_fixed.txt`: within 0.03 dB of the default except TGn B 48 Mb/s,
+  −0.03 against +0.05; TGn B 36 Mb/s stays +0.10). **The shared table L9 Q11 stays**; a
+  second table for the data path is not bought by these numbers.
+- Too narrow: products of 10 bits (U10: 270 against 203 in TGn D, 255 against 144 in TGn E,
+  34 frames lost at 45 dB); an FFT word with less than two bits above the input after the
+  shift (W14 s2 and W16 s4: 32–33 frames lost at 45 dB in TGn E — saturation on a strong
+  signal; the default leaves two); C6 (216 against 196 in AWGN); L7 (229).
+- No difference found, so candidates for narrowing when area is counted (ADR 0008): W15,
+  T10, U12–U14, C8, F0, N10–N12. Not narrowed now: each is within the noise of 2000 frames
+  at these scenes, and that is not evidence that it is free everywhere.
+- "CORDIC wide alone" is not a valid set of widths (the angle word must stay six bits
+  below the phase word) and has no column.
+
+## 2026-11-20 · G2 · the soft-value format: the sweep
+
+Commands: `rxper softg2 2000` → `reports/rx_ofdm_softg2.txt` (float receiver, a fine
+reference of soft_max 255 clip 6, eight candidates on the same frames; grids of 0.5 dB in
+AWGN and 1 dB in TGn B, D, E). Worst loss at 10 % PER against the fine reference, dB (rate
+in Mb/s where it happens):
+
+| Format (bits / clip) | AWGN | TGn B | TGn D | TGn E |
+|---|---|---|---|---|
+| 4 / 1 | +0.68 (48) | +0.99 (36) | +0.90 (18) | +0.98 (18) |
+| 4 / 1.5 (R0-10's contract) | +0.31 (48) | +1.96 (9) | +2.74 (18) | +2.76 (18) |
+| 5 / 1 | +0.63 (48) | +0.29 (36) | +0.21 (18) | +0.21 (36) |
+| 5 / 1.5 | +0.28 (48) | +0.65 (36) | +0.39 (18) | +0.46 (36) |
+| 5 / 2 | +0.10 (24) | +0.89 (36) | +0.70 (18) | +0.84 (18) |
+| 6 / 1.5 | +0.24 (48) | +0.21 (36) | +0.06 (18) | +0.13 (36) |
+| 6 / 2 (working format) | +0.10 (24) | +0.32 (36) | +0.15 (18) | +0.21 (36) |
+| 6 / 3 | +0.02 (48) | +0.53 (36) | +0.32 (18) | +0.44 (36) |
+
+Findings:
+
+- **No format of six bits or fewer holds 0.2 dB everywhere.** The working format 6 / 2
+  misses in TGn B (36 Mb/s +0.32, 9 Mb/s +0.23) and touches the limit in TGn E (+0.21).
+- Two different things cost. In AWGN it is the clip: 5 / 2 and 6 / 2 lose the same
+  (+0.10 at 24 Mb/s, +0.09 at 48), 6 / 3 nothing; the rates hit are 24 and 48 Mb/s. In
+  fading it is the step, clip over levels: at one width the smaller clip is the better
+  (5 / 1 beats 5 / 2, 6 / 1.5 beats 6 / 3), and every rate hit has the 3/4 code (9, 18, 36,
+  54 Mb/s); 6, 12, 24, 48 Mb/s lose under 0.1 dB with any six-bit format.
+- A reading, not measured: a weak subcarrier's soft values, already scaled down by its
+  gain, round to zero, and a zero is what a punctured bit is; the 3/4 code has the least
+  distance to spare. The quantiser without a zero level (`softg4`) tests it.
+- Five bits are out: the question "do five bits hold the budget" has the answer no.

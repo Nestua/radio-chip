@@ -395,6 +395,7 @@ fn coded_bit_error_rate_matches_commpy() {
         clip: 4.0,
         pilot_tracking: false,
         timing_tracking: false,
+        mid_rise: false,
     };
     let mut rng = Rng::new(0x0f09_0005);
     let mut h = [(0.0, 0.0); 64];

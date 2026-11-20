@@ -38,6 +38,12 @@ pub struct RxOfdmConfig {
     /// Track the timing drift of a sample-clock offset on the pilots' phase slope (needs
     /// `pilot_tracking`).
     pub timing_tracking: bool,
+    /// Quantise without a zero level (mid-rise): the magnitude index i = ⌊|x|·(soft_max+1)/clip⌋,
+    /// at most `soft_max`, comes out as ±(2i + 1), so a weak bit keeps its sign instead of
+    /// becoming an erasure. `soft_max + 1` magnitudes and a sign: the same word as the
+    /// rounding quantiser. An experiment of the G2 sweep (`rxper softg4`); the integer path
+    /// does not have it.
+    pub mid_rise: bool,
 }
 
 impl Default for RxOfdmConfig {
@@ -48,6 +54,7 @@ impl Default for RxOfdmConfig {
             clip: SOFT_CLIP,
             pilot_tracking: true,
             timing_tracking: true,
+            mid_rise: false,
         }
     }
 }
@@ -475,9 +482,22 @@ pub fn soft_bits(eq: &Equalised, modulation: Modulation, cfg: &RxOfdmConfig) -> 
         .iter()
         .zip(&eq.weights)
         .flat_map(|(p, w)| {
-            demap(*p, modulation)
-                .into_iter()
-                .map(move |m| (m * w * scale).round().clamp(-limit, limit) as i32)
+            demap(*p, modulation).into_iter().map(move |m| {
+                let x = m * w;
+                if cfg.mid_rise {
+                    let i = (x.abs() * (limit + 1.0) / cfg.clip)
+                        .floor()
+                        .clamp(0.0, limit);
+                    let v = 2 * (i as i32) + 1;
+                    if x < 0.0 {
+                        -v
+                    } else {
+                        v
+                    }
+                } else {
+                    (x * scale).round().clamp(-limit, limit) as i32
+                }
+            })
         })
         .collect();
     // The interleaver sends coded bit k to position interleaved_index(k). (A symbol with
