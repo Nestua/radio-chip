@@ -878,29 +878,32 @@ the CFO is taken out by the integer rotator? And where is the lower edge of the 
 
 **The hand-off's scale is the thing to measure.** The front's rotator output is Z = 12 bits
 of a 13-bit sample times an 11-bit amplitude: z ≈ y/2, the ADC's last bit rounded away and
-the frame 6 dB lower in the decoder's 12-bit word than in the ADC's. Stage A's unpaired check
-put the integer data path level with the float one from −5 to −42 dBFS *of its own word*: at
+the frame 6 dB lower in the decoder's 12-bit word than in the ADC's. The reviewer's check in
+stage A (one rate, not a committed report) put the integer data path level with the float one from −5 to −42 dBFS *of its own word*: at
 O = 12 that is +1 to −36 dBFS at the ADC, and a frame near the sensitivity sits wherever the
 radio's noise sits at the largest gain. Variants, the front itself unchanged (its Z stays 12):
 
 | Name | O | `in_shift` | FFT word for an ADC sample a |
 |---|---|---|---|
-| 12 / 2 | 12 | 2 | 2·a, the ADC's last bit rounded away (the front's rotator as it is) |
-| 13 / 1 | 13 | 1 | 2·a, nothing rounded away |
+| 12 / 2 | 12 | 2 | 2·a, the ADC's last bit rounded away (the arithmetic of the front's rotator as it is) |
+| 13 / 1 | 13 | 1 | 2·a, the rotated sample rounded to the ADC's last bit, not to twice it |
 | 13 / 2 | 13 | 2 | 4·a, one bit less headroom |
 
 **Reference.** The float receiver on the same ADC samples (float blocker, pole 2⁻⁷, float
 front and `rx_ofdm` at 8 / 3), and the same frame without a gain control: placed at −12 dBFS
-by a gain that knows it, the all-integer chain. For `correct_fixed` alone: the float
-`rx_front::correct` (gate below). The budget of the whole fixed receiver stays 0.2 dB.
+by a gain that knows it, the all-integer chain. For `correct_fixed` alone: the rotation
+`rx_front::correct` makes, written out in the gate. (In all three variants the amplitude is
+1023/1024 of the table's; in hardware the CFO word exists only once the acquisition is
+declared, so the stream this function makes from sample 0 on is the hand-off's to arrange.) The budget of the whole fixed receiver stays 0.2 dB.
 
 **Gates** (`tests/g2_rx_front.rs`): `correct_fixed` (1) worked by hand on a few samples,
-(2) against the float rotation within the bound its table and rounding give, (3) wrapping
-its phase over a long stream, (4) saturating and refusing unusable widths.
+(2) against the float rotation within the bound its table and rounding give, (3) equal to
+the front's mixer at the phase −φ·n over streams in which that phase wraps, (4) saturating
+and refusing unusable widths, (5) the whole chain bringing a frame back from ADC samples.
 
 **Measurements** (`rxagc`, a new tool; every frame's random stream is drawn from the point
 and the frame's number, so a report does not depend on the machine's thread count):
 `per` — frames lost against SNR through the gain control; `level` — against the noise level
-at the largest gain (the lower edge); `dc` — the rows of `rxfront agcdc` through the integer
-chain. Clock offset uniform in ±40 ppm setting CFO and sample-clock offset at 5.8 GHz, as
+at the largest gain (the lower edge); `dc` — seven of the DC cases of `rxfront agcdc` through
+the integer chain (another scene: its counts are not that report's). Clock offset uniform in ±40 ppm setting CFO and sample-clock offset at 5.8 GHz, as
 in `rxper`.

@@ -11,8 +11,8 @@
 #![allow(clippy::unwrap_used)]
 
 use radio_phy::channel::{
-    add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, tgn_taps, Doppler,
-    Multipath, Rng, TgnModel,
+    add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, resample, tgn_taps,
+    Doppler, Multipath, Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
@@ -582,6 +582,11 @@ fn correct_fixed_worked_by_hand() {
         correct_fixed(&[(1024, 3072), (-1024, -3072)], 0, 12, &fx),
         vec![(512, 1534), (-512, -1534)]
     );
+    // The same ties one bit up: 512·1023/1024 = 511.5 → 512, 1536·1023/1024 = 1534.5 → 1534.
+    assert_eq!(
+        correct_fixed(&[(512, 1536), (-512, -1536)], 0, 13, &fx),
+        vec![(512, 1534), (-512, -1534)]
+    );
     // An eighth of a turn (the table's entry 64 of 512: round(1023·cos 45°) = 723):
     // (4095 − 4095j)·(723 + 723j) = 5 921 370, beyond either word: it saturates.
     let z = correct_fixed(&[(0, 0), (4095, -4095)], -(1 << 19), 12, &fx);
@@ -590,6 +595,15 @@ fn correct_fixed_worked_by_hand() {
     assert_eq!(z[1], (4095, 0));
     let z = correct_fixed(&[(0, 0), (-4095, 4095)], -(1 << 19), 12, &fx);
     assert_eq!(z[1], (-2048, 0));
+    let z = correct_fixed(&[(0, 0), (-4095, 4095)], -(1 << 19), 13, &fx);
+    assert_eq!(z[1], (-4096, 0));
+    // The widths at the guard's edges are taken: 1000·1023 = 1 023 000 of 23 bits cut to 2 is
+    // 0.49 → 0, and widened to 30 is ·2^7.
+    assert_eq!(correct_fixed(&y[..1], 0, 2, &fx), vec![(0, 0)]);
+    assert_eq!(
+        correct_fixed(&y[..1], 0, 30, &fx),
+        vec![(1_023_000 << 7, -(511_500 << 7))]
+    );
     // Unusable widths give nothing.
     assert!(correct_fixed(&y, 1, 1, &fx).is_empty());
     assert!(correct_fixed(&y, 1, 31, &fx).is_empty());
@@ -625,7 +639,9 @@ fn correct_fixed_is_the_float_rotation_within_its_bound() {
             -(1 << 21),
         ] {
             // Within ±2896: no rotation of it leaves 13 bits, so nothing saturates.
-            let y: Vec<IQ> = (0..20_000)
+            // Three periods of a table address (2^13 phase units) for the slowest CFOs, so
+            // that their phase visits every remainder equally often.
+            let y: Vec<IQ> = (0..24_576)
                 .map(|_| {
                     let v = |r: &mut Rng| ((r.uniform() * 2.0 - 1.0) * 2896.0) as i64;
                     (v(&mut rng), v(&mut rng))
@@ -664,11 +680,18 @@ fn correct_fixed_is_the_float_rotation_within_its_bound() {
             // rotation lags by half a table address on average (π/2^L = 0.0061 rad), and a
             // phase on table addresses not at all.
             let half = PI / f64::from(1u32 << fx.nco_lut_bits);
+            // A CFO of a unit or two visits three table entries in the whole stream, and their
+            // own rounding (up to half a unit of 1023, 5·10⁻⁴ rad) does not average out.
+            let tolerance = if cfo.abs() < 1000 || cfo == (1 << 21) - 1 {
+                0.1
+            } else {
+                0.01
+            };
             if on_address {
                 assert!(mean_phase.abs() < 2e-4, "{mean_phase}");
             } else {
                 assert!(
-                    (mean_phase + half).abs() < 0.15 * half,
+                    (mean_phase + half).abs() < tolerance * half,
                     "CFO {cfo}: mean phase {mean_phase}, wanted {}",
                     -half
                 );
@@ -678,8 +701,9 @@ fn correct_fixed_is_the_float_rotation_within_its_bound() {
     }
 }
 
-/// At O = Z it is the front's own mixer at the phase −φ·n: the same table, the same narrowing,
-/// and a P-bit accumulator that wraps.
+/// At O = Z it is the front's own mixer at the phase −φ·n mod 2^P: the same table, the same
+/// narrowing. (That the accumulator itself wraps cannot be seen from outside: the table
+/// reduces the phase again.)
 #[test]
 fn correct_fixed_is_the_fronts_mixer_with_a_wrapping_accumulator() {
     let fx = FixedRxConfig::default();
@@ -700,9 +724,10 @@ fn correct_fixed_is_the_fronts_mixer_with_a_wrapping_accumulator() {
 }
 
 /// The whole chain in integers on the ADC's samples: DC blocker, acquisition, the CFO taken
-/// out by `correct_fixed`, the integer decoder started from the CFO word's clock offset.
-/// A frame with a CFO of −180 kHz, a DC offset of −30 dBFS and noise 30 dB down comes back at
-/// every hand-off width of the G0 table; with the CFO left in the samples it does not.
+/// out by `correct_fixed`, the integer decoder started from the clock offset the CFO word
+/// implies at 5.8 GHz. A frame with that clock offset in its CFO and its sample clock, a DC
+/// offset of −30 dBFS and noise 30 dB down comes back at every hand-off width of the G0
+/// table; with the CFO left in the samples it does not.
 #[test]
 fn the_all_integer_chain_decodes_a_frame_from_adc_samples() {
     let fs = 20e6;
@@ -711,7 +736,9 @@ fn the_all_integer_chain_decodes_a_frame_from_adc_samples() {
     let tx = IfftConfig::tx_default();
     let scale = 1.0 / f64::from(1u32 << tx.data.frac_bits());
     let mut rng = Rng::new(0xadc0);
-    for (rate, cfo) in [(Rate::R54, -180e3), (Rate::R6, 120e3), (Rate::R24, 3e3)] {
+    let carrier = 5.8e9;
+    for (rate, ppm) in [(Rate::R54, -31.0), (Rate::R6, 20.7), (Rate::R24, 0.5)] {
+        let cfo = ppm * 1e-6 * carrier;
         let psdu: Vec<u8> = (0..300).map(|_| (rng.next_u64() & 0xff) as u8).collect();
         let f: Vec<C> = build_ppdu(&psdu, rate, 0x5d, &tx)
             .unwrap()
@@ -721,6 +748,7 @@ fn the_all_integer_chain_decodes_a_frame_from_adc_samples() {
         let mut x = vec![(0.0, 0.0); 500];
         x.extend_from_slice(&f);
         x.extend(vec![(0.0, 0.0); 200]);
+        let x = resample(&x, ppm);
         let x = frequency_offset(&x, cfo, fs, 1.0);
         let p = mean_power(&f);
         let x = awgn(&x, 30.0, p, &mut rng);
@@ -749,7 +777,7 @@ fn the_all_integer_chain_decodes_a_frame_from_adc_samples() {
                     a.fft_start,
                     &RxOfdmConfig::default(),
                     &fo,
-                    FixedTracking::unknown(&fo),
+                    FixedTracking::from_clock_offset(a.cfo_hz(&fx, fs) / carrier * 1e6, &fo),
                 )
             };
             let z = correct_fixed(&y, a.cfo_phase, out_bits, &fx);

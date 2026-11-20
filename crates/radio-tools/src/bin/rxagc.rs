@@ -170,7 +170,10 @@ struct Outcome {
 fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outcome {
     let mut rng = Rng::new(mix(pt.scene, number));
     let full = f64::from(ADC_FULL_SCALE);
-    let cfg = RxConfig::new(FS);
+    let cfg = RxConfig {
+        dc_shift: Some(DC_SHIFT),
+        ..RxConfig::new(FS)
+    };
     let cfg_float = RxConfig {
         dc_shift: None,
         ..RxConfig::new(FS)
@@ -367,9 +370,12 @@ fn run(pt: &Point, columns: &[Column], reference: usize, frames: usize) -> Tally
 fn header(columns: &[Column], reference: usize) {
     println!(
         "# Each cell: frames lost (not decoded to the PSDU), then +a−b: lost by this column alone and\n\
-         # by the column '{}' alone (the same frames). level: mean power of the frame's span at\n\
-         # the ADC behind the gain control, dBFS. chg: gain changes per frame up to the hold. held:\n\
-         # frames in which the gain would have changed again before the packet's end without the hold.",
+         # by the column '{}' alone (the same frames). A lost frame is one not acquired, acquired\n\
+         # wrongly (the first acquisition of the stream is the only one tried) or not decoded.\n\
+         # level: signal and noise of the frame's span at the settled gain, before the ADC clips and\n\
+         # without the DC offset, dBFS, the mean of the powers over the frames. chg: gain changes per\n\
+         # frame up to the hold (with no lock inside the packet: all of the stream's). held: frames in\n\
+         # which the gain would have changed again before the packet's end without the hold.",
         columns.get(reference).map_or("", |c| c.name)
     );
 }
@@ -434,7 +440,8 @@ fn preamble_text(what: &str, frames: usize) {
          #   float     = float DC blocker (pole 2^-{DC_SHIFT}), float front, rx_ofdm (8 bits, clip 3);\n\
          #   int O/s   = dc_block_fixed (pole 2^-{DC_SHIFT}), RxFrontFixed, correct_fixed to O bits,\n\
          #               decode_ppdu_fixed with in_bits O and in_shift s, tracker started from the\n\
-         #               CFO word: nothing in floating point from the ADC to the PSDU;\n\
+         #               CFO word (its conversion to ppm is the one float between the ADC and\n\
+         #               the PSDU); the int columns of a row share one acquisition;\n\
          #   known     = the same chain behind a gain that knows the frame (it at {KNOWN_DBFS} dBFS at\n\
          #               the ADC, no gain control, no DC offset);\n\
          #   raw       = the decoder handed the samples before the DC blocker.\n\
@@ -545,7 +552,6 @@ fn per(frames: usize) {
         println!("{}", head_line("rate, SNR", &columns));
         for (ri, rate) in [Rate::R6, Rate::R24, Rate::R54].into_iter().enumerate() {
             for (si, snr) in [30.0, 35.0, 40.0, 50.0, 60.0].into_iter().enumerate() {
-                // 54 Mb/s through TGn D still loses frames to the channel at 30 dB.
                 let pt = Point {
                     scene: (2000 + gi * 100 + ri * 10 + si) as u64,
                     rate,
