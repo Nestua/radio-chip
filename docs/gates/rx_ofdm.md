@@ -539,3 +539,47 @@ Findings:
   gain, round to zero, and a zero is what a punctured bit is; the 3/4 code has the least
   distance to spare. The quantiser without a zero level (`softg4`) tests it.
 - Five bits are out: the question "do five bits hold the budget" has the answer no.
+
+## 2026-11-20 · G2 · the soft-value format: seven and eight bits, and a quantiser without zero
+
+Commands: `rxper softg3 2000` → `reports/rx_ofdm_softg3.txt` (the same frames and grids as
+`softg2`; 6 / 2 repeated as the paired reference — its column is `softg2`'s, cell for cell);
+`rxper softg4 2000` → `reports/rx_ofdm_softg4.txt` (AWGN, TGn B, TGn E).
+
+Worst loss at 10 % PER against the fine reference, dB (rate), and — the steadier figure —
+the frames lost beyond the fine reference's, summed over all grid points of the rates with
+the 3/4 code in fading (TGn B / D / E, of 56 000 / 56 000 / 72 000) and of the other rates
+in AWGN (of 56 000):
+
+| Format | AWGN | TGn B | TGn D | TGn E | extra frames, 3/4 code, B / D / E | extra frames, AWGN, other rates |
+|---|---|---|---|---|---|---|
+| 6 / 2 | +0.10 (24) | +0.32 (36) | +0.15 (18) | +0.21 (36) | +184 / +266 / +376 | +310 |
+| 7 / 2 | +0.09 (24) | +0.02 (12) | +0.04 (36) | +0.07 (9) | +10 / +40 / +86 | +288 |
+| 7 / 3 | +0.00 (24) | +0.28 (36) | +0.06 (18) | +0.16 (36) | +76 / +134 / +184 | +8 |
+| 7 / 4 | +0.02 (48) | +0.35 (36) | +0.17 (18) | +0.20 (36) | +194 / +258 / +352 | +18 |
+| 8 / 3 | +0.01 (48) | +0.01 (54) | −0.00 (48) | +0.02 (36) | +0 / −2 / +2 | +16 |
+| 8 / 4 | +0.01 (9) | +0.02 (24) | +0.04 (36) | +0.07 (36) | +14 / +34 / +86 | +2 |
+
+Findings:
+
+- **The two costs are separate and each has one cause.** The step (clip over levels)
+  sets the loss of the 3/4-code rates in fading: 7 / 2 and 8 / 4 have one step and one
+  loss (+10 / +40 / +86 and +14 / +34 / +86 frames), as have 6 / 2 and 7 / 4. The clip sets
+  the loss in AWGN at 24 and 48 Mb/s: about +300 frames with a clip of 2 at six or seven
+  bits, under +20 with 3 or 4.
+- **7 / 2 holds 0.2 dB everywhere** (worst +0.09 dB, in AWGN, the clip's). **8 / 3 loses
+  nothing that the measurement resolves** (worst +0.02 dB). 7 / 3 and 7 / 4 miss in TGn B.
+- The quantiser without a zero level (`softg4`, the `m` columns) is not the remedy the
+  earlier entry guessed at: 6m / 2 loses +126 frames at the 3/4 rates in TGn B where 6 / 2
+  loses +184 — about what half a step finer buys, no more — and the same as 6 / 2 in AWGN.
+  A weak bit rounding to zero is not the mechanism; the step is. (`mid_rise` stays in the
+  float receiver's config as the experiment's record and is off by default; the integer
+  path does not have it.)
+- What the format costs downstream is for ADR 0008's count: a bit more per soft value in
+  the deinterleaver's 288 words and in the Viterbi's branch and path metrics per bit added.
+- Open: the LDPC decoder's input was fixed at six bits with a clip of 2 by its own G2
+  (R0-12), in AWGN. Whether fading asks the same of it as of the Viterbi path here has not
+  been measured.
+
+**Decision:** the founder's (the working format was). Until then `SOFT_BITS`, `SOFT_CLIP`
+and `METRIC_BITS` are unchanged.
