@@ -591,3 +591,58 @@ Follows, each behind its own gate and not in this change: `SOFT_BITS` 4 → 8, `
 1.5 → 3 and `METRIC_BITS` (2^M > 2·24·127, so 13) in `viterbi.rs` with R0-10's G1 and G2
 rerun; `rxper fixed` and `fixedw` rerun at the new format (they were measured at 6 / 2), the
 pin of `g2_rx_ofdm` and the constants A regenerated; the LDPC input's question above.
+
+## 2026-11-20 · G2 · the data path at eight bits, clip 3
+
+Commit: the one carrying this entry, on ec240fb (`SOFT_BITS` 8, `SOFT_CLIP` 3,
+`METRIC_BITS` 13 in `viterbi.rs`; the decoder's own G1 and G2 at the format are in
+`docs/gates/viterbi.md`). Commands: `cargo test -p radio-phy --test g2_rx_ofdm` (14 pass;
+the bit-for-bit pin and the constants A regenerated for the format: 70443, 99621, 222759,
+456521); `rxper fixed 2000` → `reports/rx_ofdm_fixed.txt`; `rxper fixedw 2000` →
+`reports/rx_ofdm_fixedw.txt`. Both reports replace the ones measured at 6 / 2.
+
+`rxper fixed` now runs three receivers on the same frames: the float receiver with fine
+soft values (the reference the budget is counted from), the float receiver at 8 / 3, and
+the integer data path at 8 / 3. 2000 frames of 1000 octets per point, clock offset uniform
+in ±40 ppm, the front in float.
+
+SNR at 10 % PER against the fine float receiver, worst rate of each channel (Mb/s), and
+frames over all points of the channel:
+
+| Channel | float 8 / 3, worst | integer 8 / 3, worst | frames lost, fine | float 8 / 3 − fine | integer − float 8 / 3 |
+|---|---|---|---|---|---|
+| AWGN | +0.01 dB (36) | +0.02 dB (48) | 14958 | +6 | +36 |
+| TGn B | +0.02 dB (24) | +0.04 dB (48) | 10868 | +2 | +32 |
+| TGn D | +0.01 dB (36) | +0.03 dB (36, 48, 54) | 10492 | +6 | +18 |
+| TGn E | +0.02 dB (9) | +0.03 dB (36) | 11562 | +0 | +22 |
+
+Findings:
+
+- **The format and the integer data path together cost at most +0.04 dB** in one cell
+  (TGn B, 48 Mb/s) against a budget of 0.2 dB for the whole fixed receiver. The interpolated
+  crossings scatter by a few hundredths either way (the most negative cell is −0.03 dB), so
+  the single cells are at the resolution of the measurement; the frame sums are the
+  steadier figure: the format adds 0 to 6 frames per channel, the integer arithmetic 18 to
+  36 of some 11 000 to 15 000 lost.
+- At 6 / 2 the same comparison gave +0.10 dB in the worst cell and +72 / +46 / +42 / +2
+  frames (entry of 2026-11-19), with the format's own loss of up to 0.32 dB on top and not
+  counted there. The integer path's remaining cost is the same order as before; the
+  format's has gone.
+- **The widths stand** (`fixedw`, frames lost of 2000, same frames in every column). The
+  default (W16 s2 T12 U16 C10 F4, L9 Q11, N16) against float: 190 / 190, 188 / 184, 215 /
+  215, 194 / 188, 130 / 130 at the five points with errors, and no frame lost at the two
+  high-SNR points. The columns that failed at 6 / 2 fail the same way: W14 s2 and W16 s4
+  leave a floor (33 frames at 45 dB in TGn E), U10 loses 254 against 130, C6 205 against
+  188, L7 218 against 188 and 152 against 130. C8, which cost 6 frames at 6 / 2 in AWGN at
+  54 Mb/s, shows none here (188 / 188); one point is not ground to narrow κ on, and C10
+  stays.
+- Where the default differs from float it is with the rotator: "data wide" equals the
+  default to within 1 frame at every point, while "front wide" and L11 Q14 come back to
+  float's count or near it (AWGN 54 Mb/s: 184 and 185 against 188; TGn D 54 Mb/s: 190 and
+  190 against 194). That is 3 to 4 frames of 2000 at single points — the same finding as
+  at 6 / 2, and not enough to widen the table (L9 Q11 stays); the rotator's phase rounding
+  is on stage B's list.
+
+Not measured here, unchanged from stage A's list: the timing tracker in integers, the
+rotator's phase rounding, PER through the gain-control model and the lower edge of the
+input level, DC removal before the decoder (stage B); the LDPC input's format in fading.
