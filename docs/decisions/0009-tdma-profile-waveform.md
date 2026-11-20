@@ -112,8 +112,8 @@ regulator confirm before anything is built on it).
    reaches RTL through `rvec`, under ADR 0004's rules; any block of his that is to be
    reused there is assessed against those rules first, and passes our gates like any
    other. Until then a claim about his code is his, cited as such.
-7. **Two bands, by regulation and not only by choice: video down in 5170–5250 MHz, command
-   up in 2.4 GHz.** If note 1 means what it says, the dock cannot transmit at 5.2 GHz, and
+7. **Two bands, by regulation and by the founder's design point: video down in
+   5170–5250 MHz and in 2.4 GHz together, command up in 2.4 GHz.** If note 1 means what it says, the dock cannot transmit at 5.2 GHz, and
    2.4 GHz is where a fixed outdoor station may. It is also the better direction for the
    weak link: 6.6 dB less path loss, and the uplink no longer shares the video's superframe.
    The chip's TDMA profile therefore runs a transmitter in one band and a receiver in the
@@ -174,35 +174,61 @@ e.i.r.p. limit does not reach: two receive antennas combined (about 3 dB and pro
 from nulls), a low-noise amplifier at the antenna (2 to 3 dB), a larger dish (30 dBi: 7 dB).
 With them 16-QAM in 20 MHz at 10 km comes into reach. At 1 km everything has 20 dB more.
 
-### The design point: built-in antennas (the founder, 2026-11-20)
+### The design point (the founder, 2026-11-20): built-in antennas, four on the drone, four to six on the dock, both bands summed
 
-No tracking dish is planned; the link has to work with antennas that fit the drone and the
-dock, as the market's products do. That makes the receiving side's other means part of the
-design, not options: several receive antennas combined, and a low-noise front end. An
-estimate for 5.2 GHz under CE limits (22.8 dBm from a 2 dBi antenna on the drone), with
-the same 3 dB and 6 dB of allowance, a system noise figure of 3 dB, each pair of combined
-antennas counted as 3 dB of gain, and 2 dB taken off the run's fading requirement for the
-diversity. **None of the multi-antenna figures is measured: e021 had one antenna at each
-end.** Rates are PHY rates in the 20 MHz mode; the modes below QPSK 1/2 do not exist yet.
+No tracking dish. The link works with antennas that fit the drone and the dock, as the
+market's products do; range comes from several receive antennas combined, a low-noise
+front end, both bands carrying video at once, and the rate falling with distance.
 
-| Rate | Dock: 4 patches of 8 dBi | Dock: 2 patches of 8 dBi | Handheld: 2 antennas of 3 dBi |
-|---|---|---|---|
-| 53 Mbit/s (64-QAM 3/4) | 1.1 km | 0.8 km | 0.4 km |
-| 24 Mbit/s (16-QAM 1/2) | 3.4 km | 2.4 km | 1.4 km |
-| 12 Mbit/s (QPSK 1/2) | 6.2 km | 4.4 km | 2.5 km |
-| 6 Mbit/s (half of it) | 8.7 km | 6.2 km | 3.5 km |
-| 3 Mbit/s (a quarter) | 12.3 km | 8.7 km | 4.9 km |
-| 1.5 Mbit/s (an eighth) | 17.4 km | 12.3 km | 6.9 km |
+An estimate under CE limits: 22.8 dBm at 5.2 GHz and 20 dBm at 2.4 GHz from 2 dBi antennas
+on the drone, each in a 20 MHz channel; patches of 8 dBi on the dock; each doubling of
+combined receive antennas counted as 3 dB; a system noise figure of 3 dB; 2 dB taken off
+the run's fading requirement for the diversity; the same 3 dB and 6 dB of allowance.
+**None of the multi-antenna or two-band figures is measured: e021 had one antenna at each
+end and one band.** Rates are PHY rates on a coarse ladder (the run's three modes and
+halvings below QPSK 1/2, which do not exist yet); thermal noise only.
 
-Distances are with the 6 dB margin; without it each doubles, which is how a "maximum
-range" is usually quoted. The handheld column lands where the maker quoted above
-specifies its CE range (6 to 8 km), a check on the estimate from outside.
+| Distance | 4 patches: 5.2 GHz | 4 patches: 2.4 GHz | 4 patches: both | 6 patches: both |
+|---|---|---|---|---|
+| 1 km | 53 | 53 | 106 Mbit/s | 106 Mbit/s |
+| 3 km | 24 | 24 | 47 | 47 |
+| 5 km | 12 | 24 | 35 | 35 |
+| 7 km | 6 | 12 | 18 | 24 |
+| 10 km | 3 | 6 | **9** | **18** |
+| 15 km | 1.5 | 3 | 4.4 | 9 |
+| 20 km | 0.7 | 1.5 | 2.2 | 4.4 |
 
-So with built-in antennas under CE limits: **10 km is reached at about 3 to 5 Mbit/s with
-four receive antennas on the dock, with a margin; 12 Mbit/s reaches about 6 km; tens of
-megabits belong to the first one to three kilometres.** What this asks of the profile:
-rate adaptation over the whole table, modes below QPSK 1/2 for the downlink too (not only
-the uplink), and a receiver for two to four antennas.
+Distances carry the 6 dB margin. With one antenna pair of 3 dBi at a handheld ground end
+the same estimate gives 1.5 to 3 Mbit/s at 5 to 7 km in one band, which is where the maker
+quoted above specifies its CE range — a check from outside. At 2.4 GHz the path loses
+6.6 dB less, which is why it carries the larger half at range; it is also the band with
+the most interference, and an airborne receiver sees all of it, so the 2.4 GHz column is
+the one most likely to fall short in the air.
+
+**The uplink stops being the problem:** four receive antennas on the drone give the
+2.4 GHz command link about 79 dB-Hz at 10 km, megabits per second if sent continuously and
+hundreds of kilobits under the 10 % utilisation rule, without a mode below QPSK 1/2.
+
+What four transmit antennas on the drone do not do: raise the power. The e.i.r.p. limit
+counts the gain of antennas transmitting the same signal coherently. They give transmit
+diversity, a pattern without the airframe's shadow (the best-placed antennas are used),
+and two spatial streams where the signal is strong — the first kilometres, where that
+would double the table's rates.
+
+What this asks of the profile and the chip:
+
+- a receiver for up to four antennas per band, combining per subcarrier. The integer data
+  path of R0-09 already has the form: u = Σ Z_i·H_i*, g = Σ |H_i|² over the antennas, one
+  demapper and one decoder after the sum. Six on the dock is two chips or a wider build:
+  open;
+- two PHY instances at once, one per band, with the MAC splitting or duplicating the video
+  across them (what 802.11be calls multi-link operation, which the roadmap reaches
+  anyway) and 2.4 GHz shared in time between video down and command up;
+- rate adaptation over the whole ladder per band, with modes below QPSK 1/2;
+- the area and power targets of ADR 0008 counted for this configuration, not for one
+  antenna and one band;
+- on the prototype: four receive chains in each of two bands is four two-channel
+  transceivers at the dock (each has one receive synthesiser), not one.
 
 ## Why not the alternatives
 
