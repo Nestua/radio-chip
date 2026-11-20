@@ -28,7 +28,8 @@ pub type ChannelEstimate = [Sample; FFT_SIZE];
 /// Receiver settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RxOfdmConfig {
-    /// Largest soft magnitude handed to the Viterbi decoder.
+    /// Largest soft magnitude handed to the Viterbi decoder (with `mid_rise`: the largest
+    /// magnitude index; the values then reach 2·soft_max + 1).
     pub soft_max: i32,
     /// Soft metric (in half minimum distances of the constellation, on a subcarrier of mean
     /// gain) that maps to `soft_max`.

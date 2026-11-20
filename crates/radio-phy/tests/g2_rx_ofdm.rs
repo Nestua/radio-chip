@@ -20,11 +20,11 @@ use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front_fixed::{FixedRxConfig, IQ};
 use radio_phy::rx_ofdm::{
-    decode_ppdu, equalise, estimate_channel, soft_bits, RxOfdmConfig, Tracking,
+    decode_ppdu, decode_ppdu_from, equalise, estimate_channel, soft_bits, RxOfdmConfig, Tracking,
 };
 use radio_phy::rx_ofdm_fixed::{
-    decode_ppdu_fixed, estimate_channel_fixed, fft64_fixed, symbol_soft_fixed, to_fixed,
-    FixedOfdmConfig,
+    decode_ppdu_fixed, estimate_channel_fixed, fft64_fixed, scale_constant, symbol_soft_fixed,
+    threshold_constant, to_fixed, FixedOfdmConfig,
 };
 
 /// A frame with 192 samples of silence before T1's window (as after an acquisition with no
@@ -293,6 +293,8 @@ fn the_level_window_and_hostile_arguments() {
     for bad in [
         FixedOfdmConfig { in_bits: 0, ..fx },
         FixedOfdmConfig { in_shift: 9, ..fx },
+        // The shifted input must fit the FFT's word.
+        FixedOfdmConfig { in_shift: 6, ..fx },
         FixedOfdmConfig { fft_bits: 31, ..fx },
         FixedOfdmConfig {
             fft_halve: 64,
@@ -399,4 +401,326 @@ fn the_window_walks_over_a_drift_longer_than_the_guard_interval() {
         assert_eq!(d.psdu, data, "{ppm} ppm");
         assert!(d.timing.last().unwrap().abs() > 43.0);
     }
+}
+
+/// Six-bit soft values with a clip of 2, the working format.
+fn six_bits() -> RxOfdmConfig {
+    RxOfdmConfig {
+        soft_max: 31,
+        clip: 2.0,
+        ..RxOfdmConfig::default()
+    }
+}
+
+/// The soft values and common phases of every symbol of `z` from the integer path.
+fn all_soft(
+    z: &[IQ],
+    fft_start: usize,
+    rate: Rate,
+    cfg: &RxOfdmConfig,
+    fx: &FixedOfdmConfig,
+    mut tracking: Tracking,
+) -> Vec<i64> {
+    let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], fx).unwrap();
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let m = if i == 0 {
+            Modulation::Bpsk
+        } else {
+            rate.modulation()
+        };
+        // The window as the tracker has moved it.
+        let start = (fft_start + 144 + 80 * i) as i64 + tracking.shift;
+        let Some(w) = z.get(start as usize..start as usize + 64) else {
+            return out;
+        };
+        let (soft, phi) = symbol_soft_fixed(w, &ch, i, m, cfg, fx, &mut tracking).unwrap();
+        out.extend(soft.iter().map(|&v| i64::from(v)));
+        out.push(phi);
+        i += 1;
+    }
+}
+
+#[test]
+fn wide_words_with_a_slope_on_unequal_pilots_and_with_the_loops_off() {
+    // What the first comparison does not reach: a slope removed while the pilots have
+    // unequal gains (the tracker starts with a drift, as after an acquisition that measured
+    // a clock offset, through a two-path channel), and the receiver with its timing loop or
+    // both loops switched off.
+    let fx = wide();
+    let mut rng = Rng::new(0x0f1c);
+    let drift = Tracking {
+        rate: 2.5e-3,
+        ..Tracking::default()
+    };
+    for (pilot_tracking, timing_tracking, start) in [
+        (true, true, drift),
+        (true, false, Tracking::default()),
+        (false, false, Tracking::default()),
+    ] {
+        let cfg = RxOfdmConfig {
+            pilot_tracking,
+            timing_tracking,
+            ..six_bits()
+        };
+        for rate in [Rate::R9, Rate::R24, Rate::R54] {
+            let x = frame(&psdu(60, &mut rng), rate);
+            let x = two_path(&x, (0.3, -0.5), 3);
+            let x = at_level(&awgn(&x, 25.0, mean_power(&x), &mut rng), -12.0);
+            let z = to_fixed(&x, f64::from(1u32 << 19), 20);
+            let y: Vec<Sample> = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
+            let fft_start = 192 - 4;
+            let h = estimate_channel(&y[fft_start..fft_start + 128]).unwrap();
+            let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], &fx).unwrap();
+            let (mut tf, mut ti) = (start, start);
+            let (mut same, mut total, mut slope) = (0usize, 0usize, 0f64);
+            for i in 0..(x.len() - 320) / 80 {
+                let m = if i == 0 {
+                    Modulation::Bpsk
+                } else {
+                    rate.modulation()
+                };
+                assert_eq!(tf.shift, ti.shift, "{rate:?} symbol {i}: the windows part");
+                let at = (fft_start + 144 + 80 * i) as i64 + tf.shift;
+                let w = at as usize..at as usize + 64;
+                let eq = equalise(&y[w.clone()], &h, i, m, &cfg, &mut tf).unwrap();
+                let want = soft_bits(&eq, m, &cfg);
+                let (got, _) = symbol_soft_fixed(&z[w], &ch, i, m, &cfg, &fx, &mut ti).unwrap();
+                slope = slope.max(tf.slope.abs());
+                for (g, w) in got.iter().zip(&want) {
+                    assert!((g - w).abs() <= 1, "{rate:?} symbol {i}: {g} against {w}");
+                    same += usize::from(g == w);
+                    total += 1;
+                }
+            }
+            assert!(same * 1000 >= total * 990, "{rate:?}: {same} of {total}");
+            // The case is what it says: a slope of a tenth of a sample or more was removed.
+            assert_eq!(slope > 0.01, timing_tracking, "{rate:?}: slope {slope}");
+        }
+    }
+}
+
+#[test]
+fn samples_outside_the_input_width_saturate() {
+    // A stream that overdrives the 12-bit input gives exactly what the same stream clamped
+    // to 12 bits gives; and the FFT's own word clamps what does not fit it.
+    let fx = FixedOfdmConfig::default();
+    let cfg = six_bits();
+    let mut rng = Rng::new(0x0f1d);
+    let x = at_level(&frame(&psdu(40, &mut rng), Rate::R36), -6.0);
+    let hot = to_fixed(&x, 2048.0, 16);
+    let clamped: Vec<IQ> = hot
+        .iter()
+        .map(|v| (v.0.clamp(-2048, 2047), v.1.clamp(-2048, 2047)))
+        .collect();
+    assert!(hot != clamped, "nothing was overdriven");
+    let a = all_soft(&hot, 188, Rate::R36, &cfg, &fx, Tracking::default());
+    let b = all_soft(&clamped, 188, Rate::R36, &cfg, &fx, Tracking::default());
+    assert!(!a.is_empty());
+    assert_eq!(a, b);
+    let big: Vec<IQ> = (0..64)
+        .map(|n| (40_000 - 1_300 * n, 1_250 * n - 40_000))
+        .collect();
+    let fit: Vec<IQ> = big
+        .iter()
+        .map(|v| (v.0.clamp(-32768, 32767), v.1.clamp(-32768, 32767)))
+        .collect();
+    assert_eq!(
+        fft64_fixed(&big, &fx).unwrap(),
+        fft64_fixed(&fit, &fx).unwrap()
+    );
+}
+
+#[test]
+fn the_common_phase_log_is_the_float_receivers() {
+    // A residual carrier offset turns each symbol a little further; the phases the integer
+    // receiver reports are the float receiver's.
+    let fx = FixedOfdmConfig::default();
+    let cfg = six_bits();
+    let mut rng = Rng::new(0x0f1e);
+    let data = psdu(200, &mut rng);
+    let x: Vec<Sample> = frame(&data, Rate::R12)
+        .iter()
+        .enumerate()
+        .map(|(n, s)| {
+            let (sn, cs) = (2.0e-4 * n as f64).sin_cos();
+            (s.0 * cs - s.1 * sn, s.0 * sn + s.1 * cs)
+        })
+        .collect();
+    let z = to_fixed(&at_level(&x, -12.0), 2048.0, 12);
+    let y: Vec<Sample> = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
+    let f = decode_ppdu_from(&y, 188, &cfg, Tracking::default()).unwrap();
+    let d = decode_ppdu_fixed(&z, 188, &cfg, &fx, Tracking::default()).unwrap();
+    assert_eq!(d.psdu, data);
+    assert_eq!(d.common_phase.len(), f.common_phase.len());
+    assert!(f.common_phase.iter().any(|p| p.abs() > 0.2));
+    for (a, b) in d.common_phase.iter().zip(&f.common_phase) {
+        // Not closer than the rotator's step: its table is addressed by the phase's top nine
+        // bits, truncated, so once the tracker's slope is not zero the pilots at +7 and +21
+        // are turned 2π/512 too far and the sum reads π/512 = 0.006 low (`rx_ofdm.md`,
+        // 2026-11-20: open, with stage B).
+        assert!((a - b).abs() < 8e-3, "{a} against {b}");
+    }
+}
+
+#[test]
+fn a_channel_with_an_impossible_shift_is_refused() {
+    // `FixedChannel` is a plain record: a shift no estimate can produce must not reach a
+    // shifter (in a debug build that was a panic).
+    let fx = FixedOfdmConfig::default();
+    let cfg = six_bits();
+    let mut rng = Rng::new(0x0f1f);
+    let z = to_fixed(
+        &at_level(&frame(&psdu(40, &mut rng), Rate::R12), -12.0),
+        2048.0,
+        12,
+    );
+    let mut ch = estimate_channel_fixed(&z[188..316], &fx).unwrap();
+    let mut t = Tracking::default();
+    let w = &z[188 + 144..188 + 208];
+    assert!(symbol_soft_fixed(w, &ch, 0, Modulation::Bpsk, &cfg, &fx, &mut t).is_some());
+    for shift in [64, 200, u32::MAX] {
+        ch.shift = shift;
+        assert!(symbol_soft_fixed(w, &ch, 0, Modulation::Bpsk, &cfg, &fx, &mut t).is_none());
+    }
+}
+
+#[test]
+fn the_default_words_bit_for_bit() {
+    // A pin, not a reference: the soft values and common phases of four frames (every
+    // modulation; a two-path channel, noise, 12-bit samples, the tracker started with a
+    // drift) with the default words, as one hash each. Which rounding is right is the G0
+    // table's business; this keeps every rounding, saturation and constant where the table
+    // put it, so that a change of one bit anywhere is a decision and not an accident. (The
+    // RTL's G3 will compare whole vectors.)
+    let fx = FixedOfdmConfig::default();
+    let cfg = six_bits();
+    let mut rng = Rng::new(0x0f20);
+    let drift = Tracking {
+        rate: 2.5e-3,
+        ..Tracking::default()
+    };
+    let mut got = Vec::new();
+    // The fifth frame's data is four times louder than its training field: products and
+    // rotations beyond their words, which must saturate.
+    for (rate, loud) in [
+        (Rate::R6, false),
+        (Rate::R18, false),
+        (Rate::R36, false),
+        (Rate::R54, false),
+        (Rate::R54, true),
+    ] {
+        let x = frame(&psdu(1000, &mut rng), rate);
+        let x = two_path(&x, (0.3, -0.5), 3);
+        let x = at_level(&awgn(&x, 25.0, mean_power(&x), &mut rng), -12.0);
+        let mut z = to_fixed(&x, 2048.0, 12);
+        if loud {
+            for (n, v) in z.iter_mut().enumerate() {
+                *v = if n < 188 + 128 {
+                    (v.0 / 4, v.1 / 4)
+                } else {
+                    (v.0.clamp(-500, 500), v.1.clamp(-500, 500))
+                };
+            }
+        }
+        // The working format and the Viterbi gate's present one (other scale constants).
+        let mut v = all_soft(&z, 188, rate, &cfg, &fx, drift);
+        v.extend(all_soft(
+            &z,
+            188,
+            rate,
+            &RxOfdmConfig::default(),
+            &fx,
+            drift,
+        ));
+        assert!(v.len() > 10_000);
+        // FNV-1a, 64 bits, over the values as little-endian words.
+        let hash = v
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        got.push(hash);
+    }
+    assert_eq!(
+        got,
+        [
+            243_358_123_135_322_777u64,
+            3_030_051_595_941_715_739,
+            15_086_622_981_977_932_429,
+            15_298_782_481_584_580_196,
+            6_381_563_594_027_211_405
+        ],
+        "{got:?}"
+    );
+}
+
+#[test]
+fn the_window_stays_when_the_timing_loop_is_off() {
+    // A tracker state with a slope in it (left by an earlier packet, say) moves no window
+    // when the loop is off: the float receiver's rule.
+    let fx = FixedOfdmConfig::default();
+    let mut rng = Rng::new(0x0f21);
+    let x = at_level(&frame(&psdu(40, &mut rng), Rate::R12), -12.0);
+    let z = to_fixed(&x, 2048.0, 12);
+    let y: Vec<Sample> = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
+    let h = estimate_channel(&y[188..316]).unwrap();
+    let ch = estimate_channel_fixed(&z[188..316], &fx).unwrap();
+    let w = 188 + 144..188 + 208;
+    for (pilot_tracking, timing_tracking) in [(true, false), (false, true), (false, false)] {
+        let cfg = RxOfdmConfig {
+            pilot_tracking,
+            timing_tracking,
+            ..six_bits()
+        };
+        for slope in [0.3, -0.3] {
+            let start = Tracking {
+                slope,
+                ..Tracking::default()
+            };
+            let (mut tf, mut ti) = (start, start);
+            equalise(&y[w.clone()], &h, 0, Modulation::Bpsk, &cfg, &mut tf).unwrap();
+            symbol_soft_fixed(&z[w.clone()], &ch, 0, Modulation::Bpsk, &cfg, &fx, &mut ti).unwrap();
+            assert_eq!(tf.shift, 0);
+            assert_eq!(ti.shift, 0, "{pilot_tracking} {timing_tracking} {slope}");
+        }
+    }
+}
+
+#[test]
+fn the_constants_worked_by_hand() {
+    // κ_c = c/(2√E)·2^10 and A = 2√E·52·soft_max/clip·2^4, worked outside the model
+    // (√2 = 1.414214, √10 = 3.162278, √42 = 6.480741), rounded to nearest.
+    use Modulation::{Bpsk, Qam16, Qam64, Qpsk};
+    let fx = FixedOfdmConfig::default();
+    // 2/(2·3.162278)·1024 = 323.82; 4/(2·6.480741)·1024 = 316.01; half of it 158.01.
+    assert_eq!(threshold_constant(2, Qam16, &fx), 324);
+    assert_eq!(threshold_constant(4, Qam64, &fx), 316);
+    assert_eq!(threshold_constant(2, Qam64, &fx), 158);
+    // Six bits, clip 2: 2·√E·52·15.5·16 = 12896·2√E → 25792, 36475.40, 81561.47, 167151.26.
+    let six: Vec<i64> = [Bpsk, Qpsk, Qam16, Qam64]
+        .iter()
+        .map(|&m| scale_constant(m, &six_bits(), &fx))
+        .collect();
+    assert_eq!(six, [25792, 36475, 81561, 167151]);
+    // Four bits, clip 1.5: 3882.667·2√E → 7765.33, 10981.84, 24556.14, 50325.11.
+    let four: Vec<i64> = [Bpsk, Qpsk, Qam16, Qam64]
+        .iter()
+        .map(|&m| scale_constant(m, &RxOfdmConfig::default(), &fx))
+        .collect();
+    assert_eq!(four, [7765, 10982, 24556, 50325]);
+    // No scale without a usable clip, soft range or widths.
+    for (soft_max, clip) in [(31, 0.0), (31, -1.0), (31, f64::NAN), (-5, 2.0)] {
+        let cfg = RxOfdmConfig {
+            soft_max,
+            clip,
+            ..six_bits()
+        };
+        assert_eq!(scale_constant(Qpsk, &cfg, &fx), 0);
+    }
+    let bad = FixedOfdmConfig { in_bits: 0, ..fx };
+    assert_eq!(scale_constant(Qpsk, &six_bits(), &bad), 0);
+    assert_eq!(threshold_constant(2, Qam16, &bad), 0);
 }

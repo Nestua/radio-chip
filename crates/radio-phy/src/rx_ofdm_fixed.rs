@@ -153,6 +153,8 @@ pub fn fft64_fixed(x: &[IQ], fx: &FixedOfdmConfig) -> Option<[IQ; FFT_SIZE]> {
     fft_with(x, fx, &twiddles(fx)?)
 }
 
+// IEEE 802.11-2020 §17.3.5.10: the transmitter's 64-point inverse transform; this is its
+// forward counterpart, over 8.
 fn fft_with(x: &[IQ], fx: &FixedOfdmConfig, rom: &[IQ; FFT_SIZE / 2]) -> Option<[IQ; FFT_SIZE]> {
     if x.len() != FFT_SIZE {
         return None;
@@ -286,10 +288,38 @@ fn rotate(a: IQ, phase: i64, fx: &FixedOfdmConfig, t: &Tables) -> IQ {
     )
 }
 
-/// round(c/(2·√E)·g): the demapper's threshold at grid value `c` on a subcarrier of gain `g`.
-fn threshold(g: i64, c: u32, modulation: Modulation, fx: &FixedOfdmConfig) -> i64 {
+/// κ_c = round(c/(2·√E)·2^C): the constant of the demapper's threshold at grid value `c`, a
+/// ROM entry (for C = 10: 324 for 16-QAM's c = 2; 316 and 158 for 64-QAM's c = 4 and 2).
+/// 0 for unusable widths.
+pub fn threshold_constant(c: u32, modulation: Modulation, fx: &FixedOfdmConfig) -> i64 {
+    if !fx.is_valid() {
+        return 0;
+    }
     let kappa = f64::from(c) / (2.0 * f64::from(mean_energy(modulation)).sqrt());
-    let k = (kappa * f64::from(1u32 << fx.kappa_bits)).round() as i128;
+    (kappa * f64::from(1u32 << fx.kappa_bits)).round() as i64
+}
+
+/// A = round(2·√E·52·soft_max/clip·2^F): the constant the per-packet scale is made from, one
+/// per modulation and soft format (for six bits, clip 2, F = 4: 25792, 36475, 81561, 167151).
+/// 0 — every soft value an erasure — for a clip that is not a positive number, a negative
+/// `soft_max` or unusable widths.
+pub fn scale_constant(modulation: Modulation, cfg: &RxOfdmConfig, fx: &FixedOfdmConfig) -> i64 {
+    if !fx.is_valid() {
+        return 0;
+    }
+    let limit = f64::from(cfg.soft_max.max(0));
+    let a = 2.0 * f64::from(mean_energy(modulation)).sqrt() * 52.0 * limit / cfg.clip
+        * f64::from(1u32 << fx.scale_frac);
+    if a.is_finite() && a > 0.0 {
+        a.round().min(1e15) as i64
+    } else {
+        0
+    }
+}
+
+/// round(κ_c·g): the demapper's threshold at grid value `c` on a subcarrier of gain `g`.
+fn threshold(g: i64, c: u32, modulation: Modulation, fx: &FixedOfdmConfig) -> i64 {
+    let k = i128::from(threshold_constant(c, modulation, fx));
     rsh_even(i128::from(g) * k, fx.kappa_bits) as i64
 }
 
@@ -350,6 +380,11 @@ fn symbol_with(
     tracking: &mut Tracking,
     t: &Tables,
 ) -> Option<(Vec<i32>, i64)> {
+    // No estimate has a shift this large (a gain is at most 2·W + 3 bits); a record built by
+    // hand must not reach the shifter with one.
+    if ch.shift > 2 * fx.fft_bits + 3 {
+        return None;
+    }
     let z = window_fft(window, fx, t)?;
     let p_bits = fx.front.nco_phase_bits;
     let turn_units = (1u64 << p_bits) as f64;
@@ -365,6 +400,8 @@ fn symbol_with(
     };
     let (mut theta, mut phi) = (0i64, 0i64);
     if cfg.pilot_tracking {
+        // IEEE 802.11-2020 §17.3.5.9: pilots at −21, −7, 7, 21, base {1, 1, 1, −1} times the
+        // polarity sequence p_n (index 0 for SIGNAL).
         let polarity = i64::from(pilot_polarity(polarity_index));
         let mut p = [(0i64, 0i64); 4];
         for ((slot, &c), &base) in p.iter_mut().zip(&PILOT_SUBCARRIERS).zip(&PILOT_BASE) {
@@ -402,13 +439,7 @@ fn symbol_with(
     let n_bpsc = modulation.bits_per_subcarrier();
     // Per packet and modulation in hardware: A·2ⁿ/Σg, n the bit length of Σg.
     let limit = i128::from(cfg.soft_max.max(0));
-    let a_real = 2.0 * f64::from(mean_energy(modulation)).sqrt() * 52.0 * limit as f64 / cfg.clip
-        * f64::from(1u32 << fx.scale_frac);
-    let a = if a_real.is_finite() && a_real > 0.0 {
-        a_real.round().min(1e15) as i128
-    } else {
-        0
-    };
+    let a = i128::from(scale_constant(modulation, cfg, fx));
     let n = bit_len(i128::from(ch.gain_sum));
     let q = if ch.gain_sum > 0 {
         (a << n) / i128::from(ch.gain_sum)
