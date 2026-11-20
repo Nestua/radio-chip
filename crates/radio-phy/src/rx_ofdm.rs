@@ -332,8 +332,8 @@ pub fn demap(point: Sample, modulation: Modulation) -> Vec<f64> {
 /// The timing tracker's step for one symbol (step 1 of [`equalise`]): `p` are the four pilots
 /// P(k) at −21, −7, 7, 21, `gain` the channel gains |H|² there, `mean_gain` that of the 52
 /// used subcarriers (any common scale), `polarity_index` the symbol's place in time. Leaves
-/// the slope to remove in `tracking.slope`. Shared with the integer receiver, whose tracker
-/// is still this one (`rx_ofdm_fixed`).
+/// the slope to remove in `tracking.slope`. The integer receiver's tracker is this fit in
+/// its batch form (`rx_ofdm_fixed::FixedTracking`).
 pub(crate) fn track_timing(
     p: &[Sample; 4],
     gain: [f64; 4],

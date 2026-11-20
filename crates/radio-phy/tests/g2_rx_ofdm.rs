@@ -24,8 +24,19 @@ use radio_phy::rx_ofdm::{
 };
 use radio_phy::rx_ofdm_fixed::{
     decode_ppdu_fixed, estimate_channel_fixed, fft64_fixed, scale_constant, symbol_soft_fixed,
-    threshold_constant, to_fixed, FixedOfdmConfig,
+    threshold_constant, to_fixed, tracker_constants, FixedOfdmConfig, FixedTracking,
+    TrackerConstants,
 };
+
+/// The integer tracker with nothing known about the clock.
+fn unknown(fx: &FixedOfdmConfig) -> FixedTracking {
+    FixedTracking::unknown(fx)
+}
+
+/// A drift of 2.5·10⁻³ rad per subcarrier per symbol as a clock offset in ppm (a sample of
+/// timing is 2π/64 rad per subcarrier, a symbol 80 samples): 318.3 ppm.
+const DRIFT_RATE: f64 = 2.5e-3;
+const DRIFT_PPM: f64 = DRIFT_RATE / (2.0 * std::f64::consts::PI / 64.0 * 80e-6);
 
 /// A frame with 192 samples of silence before T1's window (as after an acquisition with no
 /// back-off: STF 160, GI2 32) — the frame itself starts at sample 0.
@@ -171,6 +182,11 @@ fn wide() -> FixedOfdmConfig {
         prod_bits: 40,
         kappa_bits: 20,
         scale_frac: 8,
+        rate_frac: 20,
+        track_bits: 30,
+        coef_frac: 24,
+        var_frac: 16,
+        rot_round: false,
         front: FixedRxConfig {
             cordic_iters: 24,
             cordic_bits: 30,
@@ -206,7 +222,7 @@ fn wide_words_give_the_float_receivers_soft_values() {
         let fft_start = 192 - 4;
         let h = estimate_channel(&y[fft_start..fft_start + 128]).unwrap();
         let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], &fx).unwrap();
-        let (mut tf, mut ti) = (Tracking::default(), Tracking::default());
+        let (mut tf, mut ti) = (Tracking::default(), unknown(&fx));
         let symbols = (x.len() - 320) / 80;
         let (mut same, mut total) = (0usize, 0usize);
         for i in 0..symbols {
@@ -258,7 +274,7 @@ fn every_rate_comes_back_with_the_default_words() {
                 x.extend(vec![(0.0, 0.0); 8]);
                 let x = at_level(&awgn(&x, 30.0, mean_power(&x), &mut rng), -12.0);
                 let z = to_fixed(&x, 2048.0, 12);
-                let d = decode_ppdu_fixed(&z, 192 - 6, &cfg, &fx, Tracking::default())
+                let d = decode_ppdu_fixed(&z, 192 - 6, &cfg, &fx, unknown(&fx))
                     .unwrap_or_else(|e| panic!("{rate:?} notch {notch}: {e}"));
                 assert_eq!(d.signal.rate, rate);
                 assert_eq!(d.psdu, data, "{rate:?} notch {notch}");
@@ -280,16 +296,16 @@ fn the_level_window_and_hostile_arguments() {
     let x = frame(&data, Rate::R24);
     for dbfs in [-3.0, -15.0, -30.0, -40.0] {
         let z = to_fixed(&at_level(&x, dbfs), 2048.0, 12);
-        let d = decode_ppdu_fixed(&z, 190, &cfg, &fx, Tracking::default()).unwrap();
+        let d = decode_ppdu_fixed(&z, 190, &cfg, &fx, unknown(&fx)).unwrap();
         assert_eq!(d.psdu, data, "{dbfs} dBFS");
     }
     // Nothing panics: silence, a truncated stream, a start beyond it, unusable widths,
     // samples outside the stated width (they saturate).
     let z = to_fixed(&at_level(&x, -12.0), 2048.0, 12);
-    assert!(decode_ppdu_fixed(&vec![(0, 0); 2000], 190, &cfg, &fx, Tracking::default()).is_err());
-    assert!(decode_ppdu_fixed(&z[..600], 190, &cfg, &fx, Tracking::default()).is_err());
-    assert!(decode_ppdu_fixed(&z, usize::MAX - 3, &cfg, &fx, Tracking::default()).is_err());
-    assert!(decode_ppdu_fixed(&[], 0, &cfg, &fx, Tracking::default()).is_err());
+    assert!(decode_ppdu_fixed(&vec![(0, 0); 2000], 190, &cfg, &fx, unknown(&fx)).is_err());
+    assert!(decode_ppdu_fixed(&z[..600], 190, &cfg, &fx, unknown(&fx)).is_err());
+    assert!(decode_ppdu_fixed(&z, usize::MAX - 3, &cfg, &fx, unknown(&fx)).is_err());
+    assert!(decode_ppdu_fixed(&[], 0, &cfg, &fx, unknown(&fx)).is_err());
     for bad in [
         FixedOfdmConfig { in_bits: 0, ..fx },
         FixedOfdmConfig { in_shift: 9, ..fx },
@@ -325,26 +341,26 @@ fn the_level_window_and_hostile_arguments() {
         },
     ] {
         assert!(!bad.is_valid(), "{bad:?}");
-        assert!(decode_ppdu_fixed(&z, 190, &cfg, &bad, Tracking::default()).is_err());
+        assert!(decode_ppdu_fixed(&z, 190, &cfg, &bad, unknown(&bad)).is_err());
         assert!(estimate_channel_fixed(&z[190..318], &bad).is_none());
     }
     let wild: Vec<IQ> = z
         .iter()
         .map(|v| (v.0 * 1_000_000, v.1 * 1_000_000))
         .collect();
-    let _ = decode_ppdu_fixed(&wild, 190, &cfg, &fx, Tracking::default());
+    let _ = decode_ppdu_fixed(&wild, 190, &cfg, &fx, unknown(&fx));
     let hostile = RxOfdmConfig {
         soft_max: -5,
         clip: 0.0,
         ..cfg
     };
-    let _ = decode_ppdu_fixed(&z, 190, &hostile, &fx, Tracking::default());
+    let _ = decode_ppdu_fixed(&z, 190, &hostile, &fx, unknown(&fx));
     let hostile = RxOfdmConfig {
         soft_max: i32::MAX,
         clip: f64::NAN,
         ..cfg
     };
-    let _ = decode_ppdu_fixed(&z, 190, &hostile, &fx, Tracking::default());
+    let _ = decode_ppdu_fixed(&z, 190, &hostile, &fx, unknown(&fx));
 }
 
 #[test]
@@ -363,7 +379,7 @@ fn the_window_follows_a_clock_offset() {
         let x = resample(&x, ppm);
         let x = at_level(&awgn(&x, 25.0, mean_power(&x), &mut rng), -12.0);
         let z = to_fixed(&x, 2048.0, 12);
-        for start in [Tracking::from_clock_offset(ppm), Tracking::default()] {
+        for start in [FixedTracking::from_clock_offset(ppm, &fx), unknown(&fx)] {
             let d = decode_ppdu_fixed(&z, 192 - 8, &cfg, &fx, start).unwrap();
             assert_eq!(d.psdu, data, "{ppm} ppm");
             let end = *d.timing.last().unwrap();
@@ -377,7 +393,7 @@ fn the_window_follows_a_clock_offset() {
             timing_tracking: false,
             ..cfg
         };
-        let d = decode_ppdu_fixed(&z, 192 - 8, &off, &fx, Tracking::default());
+        let d = decode_ppdu_fixed(&z, 192 - 8, &off, &fx, unknown(&fx));
         assert!(d.map_or(true, |d| d.psdu != data));
     }
 }
@@ -396,8 +412,14 @@ fn the_window_walks_over_a_drift_longer_than_the_guard_interval() {
     x.extend(vec![(0.0, 0.0); 80]);
     for ppm in [400.0, -400.0] {
         let z = to_fixed(&at_level(&resample(&x, ppm), -12.0), 2048.0, 12);
-        let d =
-            decode_ppdu_fixed(&z, 192 - 4, &cfg, &fx, Tracking::from_clock_offset(ppm)).unwrap();
+        let d = decode_ppdu_fixed(
+            &z,
+            192 - 4,
+            &cfg,
+            &fx,
+            FixedTracking::from_clock_offset(ppm, &fx),
+        )
+        .unwrap();
         assert_eq!(d.psdu, data, "{ppm} ppm");
         assert!(d.timing.last().unwrap().abs() > 43.0);
     }
@@ -419,7 +441,7 @@ fn all_soft(
     rate: Rate,
     cfg: &RxOfdmConfig,
     fx: &FixedOfdmConfig,
-    mut tracking: Tracking,
+    mut tracking: FixedTracking,
 ) -> Vec<i64> {
     let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], fx).unwrap();
     let mut out = Vec::new();
@@ -451,13 +473,18 @@ fn wide_words_with_a_slope_on_unequal_pilots_and_with_the_loops_off() {
     let fx = wide();
     let mut rng = Rng::new(0x0f1c);
     let drift = Tracking {
-        rate: 2.5e-3,
+        rate: DRIFT_RATE,
         ..Tracking::default()
     };
-    for (pilot_tracking, timing_tracking, start) in [
-        (true, true, drift),
-        (true, false, Tracking::default()),
-        (false, false, Tracking::default()),
+    for (pilot_tracking, timing_tracking, start, start_fixed) in [
+        (
+            true,
+            true,
+            drift,
+            FixedTracking::start(DRIFT_PPM, 40.0, &fx),
+        ),
+        (true, false, Tracking::default(), unknown(&fx)),
+        (false, false, Tracking::default(), unknown(&fx)),
     ] {
         let cfg = RxOfdmConfig {
             pilot_tracking,
@@ -473,7 +500,7 @@ fn wide_words_with_a_slope_on_unequal_pilots_and_with_the_loops_off() {
             let fft_start = 192 - 4;
             let h = estimate_channel(&y[fft_start..fft_start + 128]).unwrap();
             let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], &fx).unwrap();
-            let (mut tf, mut ti) = (start, start);
+            let (mut tf, mut ti) = (start, start_fixed);
             let (mut same, mut total, mut slope) = (0usize, 0usize, 0f64);
             for i in 0..(x.len() - 320) / 80 {
                 let m = if i == 0 {
@@ -515,8 +542,8 @@ fn samples_outside_the_input_width_saturate() {
         .map(|v| (v.0.clamp(-2048, 2047), v.1.clamp(-2048, 2047)))
         .collect();
     assert!(hot != clamped, "nothing was overdriven");
-    let a = all_soft(&hot, 188, Rate::R36, &cfg, &fx, Tracking::default());
-    let b = all_soft(&clamped, 188, Rate::R36, &cfg, &fx, Tracking::default());
+    let a = all_soft(&hot, 188, Rate::R36, &cfg, &fx, unknown(&fx));
+    let b = all_soft(&clamped, 188, Rate::R36, &cfg, &fx, unknown(&fx));
     assert!(!a.is_empty());
     assert_eq!(a, b);
     let big: Vec<IQ> = (0..64)
@@ -551,17 +578,19 @@ fn the_common_phase_log_is_the_float_receivers() {
     let z = to_fixed(&at_level(&x, -12.0), 2048.0, 12);
     let y: Vec<Sample> = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
     let f = decode_ppdu_from(&y, 188, &cfg, Tracking::default()).unwrap();
-    let d = decode_ppdu_fixed(&z, 188, &cfg, &fx, Tracking::default()).unwrap();
+    let d = decode_ppdu_fixed(&z, 188, &cfg, &fx, unknown(&fx)).unwrap();
     assert_eq!(d.psdu, data);
     assert_eq!(d.common_phase.len(), f.common_phase.len());
     assert!(f.common_phase.iter().any(|p| p.abs() > 0.2));
+    let mut worst = 0f64;
     for (a, b) in d.common_phase.iter().zip(&f.common_phase) {
-        // Not closer than the rotator's step: its table is addressed by the phase's top nine
-        // bits, truncated, so once the tracker's slope is not zero the pilots at +7 and +21
-        // are turned 2π/512 too far and the sum reads π/512 = 0.006 low (`rx_ofdm.md`,
-        // 2026-11-20: open, with stage B).
-        assert!((a - b).abs() < 8e-3, "{a} against {b}");
+        // The rotator's phase is rounded to its table's address (half an address added):
+        // truncated, the pilots at +7 and +21 are turned 2π/512 too far once the slope is
+        // not zero and the sum reads π/512 = 0.006 low.
+        worst = worst.max((a - b).abs());
+        assert!((a - b).abs() < 1.5e-3, "{a} against {b}");
     }
+    println!("largest difference of the common phase: {worst:.2e} rad");
 }
 
 #[test]
@@ -577,7 +606,7 @@ fn a_channel_with_an_impossible_shift_is_refused() {
         12,
     );
     let mut ch = estimate_channel_fixed(&z[188..316], &fx).unwrap();
-    let mut t = Tracking::default();
+    let mut t = unknown(&fx);
     let w = &z[188 + 144..188 + 208];
     assert!(symbol_soft_fixed(w, &ch, 0, Modulation::Bpsk, &cfg, &fx, &mut t).is_some());
     for shift in [64, 200, u32::MAX] {
@@ -597,10 +626,7 @@ fn the_default_words_bit_for_bit() {
     let fx = FixedOfdmConfig::default();
     let cfg = six_bits();
     let mut rng = Rng::new(0x0f20);
-    let drift = Tracking {
-        rate: 2.5e-3,
-        ..Tracking::default()
-    };
+    let drift = FixedTracking::start(DRIFT_PPM, 40.0, &fx);
     let mut got = Vec::new();
     // The fifth frame's data is four times louder than its training field: products and
     // rotations beyond their words, which must saturate.
@@ -647,11 +673,11 @@ fn the_default_words_bit_for_bit() {
     assert_eq!(
         got,
         [
-            12_483_171_598_162_887_096u64,
-            1_581_067_360_675_375_941,
-            6_175_653_753_861_819_291,
-            858_923_681_772_431_541,
-            13_600_387_931_793_789_518
+            14_636_983_848_939_621_610u64,
+            2_722_506_916_840_601_925,
+            2_803_077_607_927_797_426,
+            16_026_798_777_574_690_161,
+            12_466_612_513_770_086_848
         ],
         "{got:?}"
     );
@@ -680,7 +706,10 @@ fn the_window_stays_when_the_timing_loop_is_off() {
                 slope,
                 ..Tracking::default()
             };
-            let (mut tf, mut ti) = (start, start);
+            let mut ti = unknown(&fx);
+            // The same slope in the integer tracker's units, 2π/2^22 per subcarrier.
+            ti.theta = (slope / (2.0 * std::f64::consts::PI) * 4_194_304.0) as i64;
+            let mut tf = start;
             equalise(&y[w.clone()], &h, 0, Modulation::Bpsk, &cfg, &mut tf).unwrap();
             symbol_soft_fixed(&z[w.clone()], &ch, 0, Modulation::Bpsk, &cfg, &fx, &mut ti).unwrap();
             assert_eq!(tf.shift, 0);
@@ -724,4 +753,331 @@ fn the_constants_worked_by_hand() {
     let bad = FixedOfdmConfig { in_bits: 0, ..fx };
     assert_eq!(scale_constant(Qpsk, &six_bits(), &bad), 0);
     assert_eq!(threshold_constant(2, Qam16, &bad), 0);
+}
+
+/// A channel record with the given gains on the pilots at −21, −7, 7, 21 and a gain sum.
+fn pilots_of(g: [i64; 4], gain_sum: i64) -> radio_phy::rx_ofdm_fixed::FixedChannel {
+    let mut gain = [0i64; 64];
+    // FFT bins of −21, −7, 7, 21.
+    for (bin, v) in [43usize, 57, 7, 21].into_iter().zip(g) {
+        gain[bin] = v;
+    }
+    radio_phy::rx_ofdm_fixed::FixedChannel {
+        hs: [(0, 0); 64],
+        shift: 0,
+        gain,
+        gain_sum,
+    }
+}
+
+#[test]
+fn the_tracker_constants_worked_by_hand() {
+    // a = g₀ + g₃, b = g₁ + g₂, N_o = g₀g₃b, N_i = g₁g₂a, D = 9N_o + N_i, cut to 16 bits;
+    // outer = 3N_o/(14D), inner = N_i/(14D) in 16 fractional bits, variance = 5Σg·ab/(52D)
+    // in 10.
+    let fx = FixedOfdmConfig::default();
+    let c = |g, sum| tracker_constants(&pilots_of(g, sum), &fx);
+    // Equal gains: D = 20g³, so 3/140 and 1/140 (1404.3 and 468.1) and a variance of 1.
+    assert_eq!(
+        c([1000; 4], 52_000),
+        TrackerConstants {
+            outer: 1404,
+            inner: 468,
+            variance: 1024
+        }
+    );
+    // Inner pilots twice as strong, mean gain 1500: N_o = 4·10⁹, N_i = 8·10⁹, D = 44·10⁹
+    // (36 bits: shift 20 → 3814, 7629, 41961). 3·3814/(14·41961) = 1276.4/2¹⁶,
+    // 7629/(14·41961) = 851.1/2¹⁶; variance 5·1500·8·10⁶/(44·10⁹) = 1.3636 → 1396.
+    assert_eq!(
+        c([1000, 2000, 2000, 1000], 78_000),
+        TrackerConstants {
+            outer: 1276,
+            inner: 851,
+            variance: 1396
+        }
+    );
+    // Small numbers, no shift: N_o = 3·2·12 = 72, N_i = 5·7·5 = 175, D = 823:
+    // 216/11522 → 1228.6, 175/11522 → 995.4, 5·208·60/(52·823) = 1.458 → 1493.
+    assert_eq!(
+        c([3, 5, 7, 2], 208),
+        TrackerConstants {
+            outer: 1229,
+            inner: 995,
+            variance: 1493
+        }
+    );
+    // One outer pilot gone: only the inner pair measures (1/14 → 4681), and with a variance
+    // of 7.5 nominal ones the measurement is not used (the limit is 3).
+    let weak = c([0, 2000, 2000, 1000], 78_000);
+    assert_eq!((weak.outer, weak.inner, weak.variance), (0, 4681, 7680));
+    // No pair at all, gains no estimate produces, unusable widths: nothing.
+    let none = TrackerConstants::default();
+    assert_eq!(c([0, 0, 5, 5], 100), none);
+    assert_eq!(c([i64::MAX; 4], i64::MAX), none);
+    assert_eq!(c([-5, -5, -5, -5], -20), none);
+    let bad = FixedOfdmConfig {
+        track_bits: 2,
+        ..fx
+    };
+    assert_eq!(tracker_constants(&pilots_of([1000; 4], 52_000), &bad), none);
+}
+
+#[test]
+fn the_fit_worked_by_hand() {
+    // The prior of 40 ppm weighs 25·(0.016/(2π/64·80·40·10⁻⁶))² = 64 845.6 → 64 846 (times a
+    // variance of 1). Times τ = 7, 12, 17.
+    let fx = FixedOfdmConfig::default();
+    let mut t = FixedTracking::unknown(&fx);
+    assert_eq!((t.rate0, t.weight), (0, 64_846));
+    let lambda = 64_846;
+    // One measurement moves the offset alone: det = 49 + λ − 49, numerator 0.
+    t.learn(-777, 0, lambda, &fx);
+    assert_eq!((t.delta, t.measured), (0, -777));
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(0, 0, lambda, &fx);
+    // Second: n = 2, Στ = 19, Στ² = 193, Σz = e, Στz = 12e; det = 2·(193 + λ) − 361
+    // = 129 717, numerator 24e − 19e = 5e. With e = 129 717 the rate is 5 units per τ:
+    // δ = 5·2¹⁰.
+    t.learn(129_717, 1, lambda, &fx);
+    assert_eq!(t.delta, 5120);
+    // Third, measured where predicted (error 0): z = 5·17 = 85; n = 3, Στ = 36, Στ² = 482,
+    // Σz = 129 802, Στz = 1 558 049; det = 3·65 328 − 1296 = 194 688, numerator
+    // 4 674 147 − 4 672 872 = 1275; δ = 1275·1024/194 688 = 6.7 → 6 (toward zero).
+    t.learn(0, 2, lambda, &fx);
+    assert_eq!(t.delta, 6);
+    // Toward zero for a negative quotient too: the mirror image.
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(0, 0, lambda, &fx);
+    t.learn(-129_717, 1, lambda, &fx);
+    assert_eq!(t.delta, -5120);
+    t.learn(0, 2, lambda, &fx);
+    assert_eq!(t.delta, -6);
+    // The starts: 40 ppm is 40·16·10⁻⁶ samples per τ, 2¹⁶ units a sample, 2¹⁰ fractional:
+    // 42 949.67 → 42 950. The hint's 2 ppm weighs 400 times the 40 ppm prior.
+    let hint = FixedTracking::from_clock_offset(40.0, &fx);
+    assert_eq!((hint.rate0, hint.weight), (42_950, 25_938_223));
+    let fixed = FixedTracking::fixed(-40.0, &fx);
+    assert_eq!(fixed.rate0, -42_950);
+    assert!(fixed.weight < 0);
+    // A tracker that learns nothing keeps δ; so does one fed a negative weight.
+    let mut f = fixed;
+    f.learn(50_000, 0, lambda, &fx);
+    f.learn(90_000, 1, lambda, &fx);
+    assert_eq!(f.delta, 0);
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(1, 0, -1, &fx);
+    t.learn(90_000, 1, -1, &fx);
+    assert_eq!(t.delta, 0);
+    // Not numbers: a rate of 0 and nothing learned. A symbol index beyond any frame: no
+    // overflow, δ kept.
+    for (ppm, std) in [(f64::NAN, 40.0), (f64::INFINITY, 2.0), (10.0, f64::NAN)] {
+        let s = FixedTracking::start(ppm, std, &fx);
+        assert!(s.weight < 0, "{ppm} {std}");
+        assert!(ppm.is_finite() || s.rate0 == 0);
+    }
+    assert_eq!(FixedTracking::start(1e300, 40.0, &fx).rate0, 1 << 26);
+    let mut t = FixedTracking::unknown(&fx);
+    t.learn(i64::MAX, usize::MAX, i128::MAX, &fx);
+    t.learn(i64::MIN, usize::MAX - 1, 5, &fx);
+    assert_eq!(t.delta, 0);
+}
+
+#[test]
+fn the_fit_is_the_recursive_least_squares_of_the_float_tracker() {
+    // The batch quotient against the recursion the float tracker runs (written out here in
+    // the textbook form: gain K = P·φ/(φᵀPφ + v), φ = (1, τ)), on measurements with a drift,
+    // an offset and noise, for the two priors and three variances. The measurement fed to
+    // the integer fit is what is left after its own prediction, as in the receiver.
+    let fx = FixedOfdmConfig::default();
+    let mut rng = Rng::new(0x0f30);
+    for (weight, var_q) in [
+        (64_846i64, 1024i64),
+        (64_846, 400),
+        (64_846, 3000),
+        (25_938_223, 1024),
+    ] {
+        let lambda = (i128::from(weight) * i128::from(var_q) + 512) >> 10;
+        let v = var_q as f64 / 1024.0;
+        let mut t = FixedTracking::unknown(&fx);
+        t.weight = weight;
+        // Float recursion in the same units: state (offset, rate per τ), covariance in units
+        // of the nominal variance; prior on the rate 1/weight, flat on the offset.
+        let (mut ob, mut rb) = (0f64, 0f64);
+        let (mut pbb, mut pbr, mut prr) = (1e12f64, 0f64, 1.0 / weight as f64);
+        let (offset, rate) = (9000.0, 37.3);
+        for i in 0..1367usize {
+            let tau = 7.0 + 5.0 * i as f64;
+            let noise = 10_000.0 * (rng.next_u64() as f64 / u64::MAX as f64 - 0.5);
+            let z = (offset + rate * tau + noise).round();
+            // Float.
+            let (gb, gr) = (pbb + pbr * tau, pbr + prr * tau);
+            let s = gb + gr * tau + v;
+            let (kb, kr) = (gb / s, gr / s);
+            let innovation = z - (ob + rb * tau);
+            ob += kb * innovation;
+            rb += kr * innovation;
+            (pbb, pbr, prr) = (pbb - kb * gb, pbr - kb * gr, prr - kr * gr);
+            // Integer: the error against its own prediction δ·τ (half to even, as the model).
+            let exact = i128::from(t.delta) * (7 + 5 * i as i128);
+            let mut predicted = exact >> 10;
+            let rem = exact - (predicted << 10);
+            if rem > 512 || (rem == 512 && predicted & 1 == 1) {
+                predicted += 1;
+            }
+            t.learn((z as i128 - predicted) as i64, i, lambda, &fx);
+            let want = rb * 1024.0;
+            // One unit of the quotient's truncation, and the float recursion's own rounding.
+            assert!(
+                (t.delta as f64 - want).abs() <= 1.0 + want.abs() * 1e-6,
+                "weight {weight} variance {v} symbol {i}: {} against {want}",
+                t.delta
+            );
+        }
+        // The case is what it says: the rate is found (37.3 units per τ; the noise leaves
+        // about 0.04 of scatter, and 1367 symbols outweigh either prior).
+        let found = t.delta as f64 / 1024.0;
+        assert!((found - rate).abs() < 0.5, "weight {weight}: {found}");
+    }
+}
+
+#[test]
+fn the_tracker_in_the_receiver_is_the_float_one() {
+    // The whole tracker in the receiver: the same 12-bit samples through the float receiver
+    // and the integer one symbol by symbol, near the sensitivity limit and at a high SNR,
+    // through a two-path channel, with a clock offset of either sign, started from nothing,
+    // from the hint and fixed. Each symbol's measured slope and the drift applied agree.
+    //
+    // One event parts the two and is not an error of either: a pilot pair whose angle falls
+    // on ±π (a pilot the noise has all but cancelled) reads +π in one receiver and −π in the
+    // other when their predictions differ in the last digits. The measurement then differs by
+    // a turn times the pair's coefficient. Such a symbol ends the frame's comparison and is
+    // counted; this run has one (6 Mb/s, 6 dB, −40 ppm, symbol 38).
+    use radio_phy::channel::resample;
+    let fx = FixedOfdmConfig::default();
+    let cfg = RxOfdmConfig::default();
+    let mut rng = Rng::new(0x0f31);
+    let unit = 2.0 * std::f64::consts::PI / 4_194_304.0;
+    let (mut worst_slope, mut worst_drift, mut compared, mut wraps) = (0f64, 0f64, 0usize, 0usize);
+    for (rate, snr, ppm) in [
+        (Rate::R6, 6.0, 40.0),
+        (Rate::R6, 6.0, -40.0),
+        (Rate::R54, 28.0, 33.0),
+        (Rate::R24, 18.0, -17.0),
+        (Rate::R12, 9.0, 0.0),
+    ] {
+        let data = psdu(800, &mut rng);
+        let mut x = frame(&data, rate);
+        let symbols = (x.len() - 320) / 80;
+        x.extend(vec![(0.0, 0.0); 16]);
+        let x = two_path(&resample(&x, ppm), (0.25, 0.3), 2);
+        let x = at_level(&awgn(&x, snr, mean_power(&x), &mut rng), -12.0);
+        let z = to_fixed(&x, 2048.0, 12);
+        let y: Vec<Sample> = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
+        let fft_start = 192 - 6;
+        let h = estimate_channel(&y[fft_start..fft_start + 128]).unwrap();
+        let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], &fx).unwrap();
+        let c = tracker_constants(&ch, &fx);
+        let turns = [c.outer, c.inner].map(|k| k as f64 / 65_536.0 * 2.0 * std::f64::consts::PI);
+        for (float, fixed) in [
+            (Tracking::default(), FixedTracking::unknown(&fx)),
+            (
+                Tracking::from_clock_offset(ppm + 1.5),
+                FixedTracking::from_clock_offset(ppm + 1.5, &fx),
+            ),
+            (Tracking::fixed(ppm), FixedTracking::fixed(ppm, &fx)),
+        ] {
+            let (mut tf, mut ti) = (float, fixed);
+            for i in 0..symbols {
+                let m = if i == 0 {
+                    Modulation::Bpsk
+                } else {
+                    rate.modulation()
+                };
+                assert_eq!(
+                    tf.shift, ti.shift,
+                    "{rate:?} {ppm} symbol {i}: the windows part"
+                );
+                let at = (fft_start + 144 + 80 * i) as i64 + tf.shift;
+                let w = at as usize..at as usize + 64;
+                equalise(&y[w.clone()], &h, i, m, &cfg, &mut tf).unwrap();
+                symbol_soft_fixed(&z[w], &ch, i, m, &cfg, &fx, &mut ti).unwrap();
+                let slope = (ti.measured as f64 * unit - tf.measured).abs();
+                if turns.iter().any(|t| (slope - t).abs() < 1e-3) {
+                    wraps += 1;
+                    break;
+                }
+                let drift = (ti.timing(&fx) - tf.timing()).abs();
+                assert!(
+                    slope < 2e-4,
+                    "{rate:?} {ppm} ppm symbol {i}: measured {} against {}",
+                    ti.measured as f64 * unit,
+                    tf.measured
+                );
+                assert!(
+                    drift < 0.005,
+                    "{rate:?} {ppm} ppm symbol {i}: {} against {} samples",
+                    ti.timing(&fx),
+                    tf.timing()
+                );
+                (worst_slope, worst_drift) = (worst_slope.max(slope), worst_drift.max(drift));
+                compared += 1;
+            }
+            // The case is what it says: the drift is there to follow.
+            // (A start from nothing learns little in the 31 symbols of the 54 Mb/s frame.)
+            assert!(
+                ppm == 0.0 || ti.weight == 64_846 || tf.timing().abs() > 0.03,
+                "{rate:?} {ppm}"
+            );
+        }
+    }
+    assert!(wraps <= 1, "{wraps} frames ended by a pair at ±π");
+    assert!(compared > 2000, "{compared}");
+    println!(
+        "{compared} symbols, {wraps} ended by a pair at ±π; largest difference: measured slope \
+         {worst_slope:.2e} rad per subcarrier, drift {worst_drift:.5} samples"
+    );
+}
+
+#[test]
+fn a_weak_pilot_pair_is_not_followed() {
+    // A two-path channel with its notch on the pilot at −21: x[n] − 0.9·e^(−j2π·21/64)·x[n−1]
+    // leaves that pilot a gain of 0.01 against 1.46, 3.47 and 2.81 on the other three (mean
+    // 1.8), so the outer pair weighs 0.01 and the measurement's variance is 5·1.8/1.12 ≈ 8
+    // nominal ones: beyond the limit of 3, in both receivers. The slope is still measured and
+    // reported, and neither tracker learns from it, although the clock is 40 ppm off.
+    use radio_phy::channel::resample;
+    let fx = FixedOfdmConfig::default();
+    let cfg = RxOfdmConfig::default();
+    let mut rng = Rng::new(0x0f32);
+    let x = resample(&frame(&psdu(300, &mut rng), Rate::R6), 40.0);
+    let phase = -2.0 * std::f64::consts::PI * 21.0 / 64.0;
+    let x = two_path(&x, (-0.9 * phase.cos(), -0.9 * phase.sin()), 1);
+    let x = at_level(&awgn(&x, 25.0, mean_power(&x), &mut rng), -12.0);
+    let z = to_fixed(&x, 2048.0, 12);
+    let y: Vec<Sample> = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
+    let fft_start = 192 - 4;
+    let h = estimate_channel(&y[fft_start..fft_start + 128]).unwrap();
+    let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], &fx).unwrap();
+    let c = tracker_constants(&ch, &fx);
+    assert!(
+        (4 * 1024..16 * 1024).contains(&c.variance),
+        "variance {} / 1024",
+        c.variance
+    );
+    let (mut tf, mut ti) = (Tracking::default(), FixedTracking::unknown(&fx));
+    let unit = 2.0 * std::f64::consts::PI / 4_194_304.0;
+    let mut largest = 0f64;
+    for i in 0..60 {
+        let w = fft_start + 144 + 80 * i..fft_start + 208 + 80 * i;
+        equalise(&y[w.clone()], &h, i, Modulation::Bpsk, &cfg, &mut tf).unwrap();
+        symbol_soft_fixed(&z[w], &ch, i, Modulation::Bpsk, &cfg, &fx, &mut ti).unwrap();
+        assert_eq!((tf.rate, ti.delta, ti.theta), (0.0, 0, 0), "symbol {i}");
+        let (a, b) = (ti.measured as f64 * unit, tf.measured);
+        assert!((a - b).abs() < 2e-4, "symbol {i}: measured {a} against {b}");
+        largest = largest.max(b.abs());
+    }
+    // The case is what it says: there was a slope to follow (40 ppm over 60 symbols is 0.19
+    // samples, 0.019 rad per subcarrier).
+    assert!(largest > 0.01, "{largest}");
 }

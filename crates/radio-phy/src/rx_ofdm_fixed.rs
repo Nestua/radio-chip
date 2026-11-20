@@ -9,8 +9,11 @@
 //! g = |Hs|², the soft value is (2·√E·52·soft_max/clip)·m/Σg, where m is the demapper's value
 //! on u with its thresholds scaled by g. One division per packet and modulation.
 //!
-//! Stage A leaves the timing tracker's arithmetic in float ([`crate::rx_ofdm::Tracking`]):
-//! it takes the four pilots and their gains as integers and returns the slope as a phase.
+//! The timing tracker (stage B, [`FixedTracking`]) is the float one's
+//! ([`crate::rx_ofdm::Tracking`]) least-squares fit in its batch form: integer sums and one
+//! division per symbol, the pilot pairs' weights three quotients per packet
+//! ([`tracker_constants`]). No floating point between the samples and the soft values; the
+//! tracker's start from a clock offset in ppm is the one conversion at the boundary.
 
 use std::f64::consts::PI;
 
@@ -25,8 +28,8 @@ use crate::ofdm::{
 use crate::ppdu::{data_symbols, long_training_sequence, MAX_PSDU_LEN};
 use crate::rx_front_fixed::{cordic_table, cordic_with, nco_table, rotate_with, FixedRxConfig, IQ};
 use crate::rx_ofdm::{
-    descramble, signal_from_soft, symbol_start, track_timing, Decoded, RxOfdmConfig, RxOfdmError,
-    SymbolLog, Tracking, ONE_SAMPLE,
+    descramble, signal_from_soft, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, SymbolLog,
+    TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
 };
 use crate::viterbi::{decode, Termination};
 
@@ -50,6 +53,18 @@ pub struct FixedOfdmConfig {
     pub kappa_bits: u32,
     /// Fractional bits F of the per-modulation scale constant.
     pub scale_frac: u32,
+    /// Fractional bits R of the tracker's drift rate (units of 2π/2^P per subcarrier per fifth
+    /// of a symbol).
+    pub rate_frac: u32,
+    /// Bits M the denominator of the tracker's per-packet quotients is normalised to.
+    pub track_bits: u32,
+    /// Fractional bits K of the two pilot-pair coefficients.
+    pub coef_frac: u32,
+    /// Fractional bits V of the measurement's relative variance.
+    pub var_frac: u32,
+    /// Half a table address is added to the data path's rotation phases before the table is
+    /// addressed (rounding instead of the front's truncation).
+    pub rot_round: bool,
     /// The front's rotator (P, L, Q) and CORDIC (N, W_c, A), shared.
     pub front: FixedRxConfig,
 }
@@ -66,6 +81,11 @@ impl Default for FixedOfdmConfig {
             prod_bits: 16,
             kappa_bits: 10,
             scale_frac: 4,
+            rate_frac: 10,
+            track_bits: 16,
+            coef_frac: 16,
+            var_frac: 10,
+            rot_round: true,
             front: FixedRxConfig::default(),
         }
     }
@@ -84,6 +104,11 @@ impl FixedOfdmConfig {
             && (6..=40).contains(&self.prod_bits)
             && (2..=20).contains(&self.kappa_bits)
             && self.scale_frac <= 8
+            && self.rate_frac <= 20
+            && (4..=30).contains(&self.track_bits)
+            && (4..=24).contains(&self.coef_frac)
+            && (2..=16).contains(&self.var_frac)
+            && self.front.nco_phase_bits >= 8
             && self.front.is_valid()
             && self.front.angle_bits <= self.front.nco_phase_bits
     }
@@ -278,7 +303,13 @@ fn channel_with(ltf: &[IQ], fx: &FixedOfdmConfig, t: &Tables) -> Option<FixedCha
 
 /// a·e^(jφ) for a P-bit phase φ, narrowed back to U bits (half to even, saturating).
 fn rotate(a: IQ, phase: i64, fx: &FixedOfdmConfig, t: &Tables) -> IQ {
-    let r = rotate_with(phase, &fx.front, &t.nco);
+    let step = fx.front.nco_phase_bits - fx.front.nco_lut_bits;
+    let half = if fx.rot_round && step > 0 {
+        1i64 << (step - 1)
+    } else {
+        0
+    };
+    let r = rotate_with(phase.wrapping_add(half), &fx.front, &t.nco);
     let (ar, ai) = (i128::from(a.0), i128::from(a.1));
     let (rr, ri) = (i128::from(r.0), i128::from(r.1));
     let down = fx.front.nco_amp_bits - 1;
@@ -344,6 +375,264 @@ fn demap_axis(
     }
 }
 
+/// The timing tracker's per-packet constants, from the channel gains of the four pilots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TrackerConstants {
+    /// Coefficient of the outer pair's angle (pilots at ±21), K fractional bits:
+    /// 3·N_o/(14·D).
+    pub outer: i64,
+    /// Coefficient of the inner pair's angle (pilots at ±7), K fractional bits: N_i/(14·D).
+    pub inner: i64,
+    /// The measurement's variance against a flat channel of the same mean gain, V fractional
+    /// bits: 5·Σg·a·b/(52·D). 0: no usable pilot pair.
+    pub variance: i64,
+}
+
+/// The tracker's constants for one packet. With g the gains at −21, −7, 7, 21, a = g₀ + g₃
+/// and b = g₁ + g₂, the float tracker's pair weights g₀g₃/a and g₁g₂/b are cleared of their
+/// divisions: N_o = g₀·g₃·b, N_i = g₁·g₂·a, D = 9·N_o + N_i. D is cut to M bits (and the
+/// numerators by the same shift, truncating) and three quotients are taken: the slope left
+/// in a symbol is `outer`·∠outer + `inner`·∠inner, its variance `variance`. All zero for
+/// unusable widths, no pilot pair, or gains no estimate can produce.
+pub fn tracker_constants(ch: &FixedChannel, fx: &FixedOfdmConfig) -> TrackerConstants {
+    constants_of(ch, fx).unwrap_or_default()
+}
+
+fn constants_of(ch: &FixedChannel, fx: &FixedOfdmConfig) -> Option<TrackerConstants> {
+    fx.is_valid().then_some(())?;
+    let mut g = [0i128; 4];
+    for (slot, &c) in g.iter_mut().zip(&PILOT_SUBCARRIERS) {
+        *slot = i128::from(ch.gain[fft_bin(c)].max(0));
+    }
+    let (a, b) = (g[0].checked_add(g[3])?, g[1].checked_add(g[2])?);
+    let no = g[0].checked_mul(g[3])?.checked_mul(b)?;
+    let ni = g[1].checked_mul(g[2])?.checked_mul(a)?;
+    let d = no.checked_mul(9)?.checked_add(ni)?;
+    if d <= 0 {
+        return None;
+    }
+    let s = bit_len(d).saturating_sub(fx.track_bits);
+    let dn = d >> s;
+    // Rounded half up; everything here is non-negative.
+    let coefficient = |num: i128| -> Option<i64> {
+        let q = ((num << (fx.coef_frac + 1)).checked_add(14 * dn)?) / (28 * dn);
+        i64::try_from(q).ok()
+    };
+    let spread = i128::from(ch.gain_sum.max(0))
+        .checked_mul(a)?
+        .checked_mul(b)?;
+    let variance = ((spread >> s).checked_mul(5)? << fx.var_frac) / (52 * dn);
+    Some(TrackerConstants {
+        outer: coefficient(3 * (no >> s))?,
+        inner: coefficient(ni >> s)?,
+        variance: i64::try_from(variance).ok()?,
+    })
+}
+
+/// A measurement whose variance is more than this many times the nominal one is not used
+/// ([`crate::rx_ofdm::TIMING_MAX_VARIANCE`], an integer here).
+const MAX_VARIANCE: i64 = 3;
+
+/// The timing tracker's state across the symbols of a PPDU, in integers: the float
+/// [`crate::rx_ofdm::Tracking`]'s fit measured(τ) = offset + rate·τ in its batch form. Time τ
+/// is in fifths of a symbol from the middle of the long training field (7 for SIGNAL, then
+/// 5 per symbol: 112 samples and 80), phases in units of 2π/2^P per subcarrier (one sample
+/// of timing is 2^(P−6)), rates with R more fractional bits per unit of τ.
+///
+/// The sums n, Στ, Στ², Σz, Στz of the measurements z (each taken against the prior rate)
+/// give the correction to the prior rate as one quotient per symbol,
+/// δ = 2^R·(n·Στz − Στ·Σz) / (n·(Στ² + λ) − (Στ)²), truncated toward zero, where λ is the
+/// prior's weight times the packet's variance. For the longest frame (1367 symbols) the sums
+/// need 11, 23, 35, 31 and 43 bits and the quotient is 64 bits by 45.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedTracking {
+    /// Prior drift rate (R fractional bits).
+    pub rate0: i64,
+    /// Weight of the prior: 25·(σ/drift per symbol of the prior's deviation)², σ the nominal
+    /// measurement's deviation ([`TIMING_MEASUREMENT_STD`]). Negative: the tracker learns
+    /// nothing and applies `rate0`.
+    pub weight: i64,
+    /// Learned correction δ to `rate0` (R fractional bits).
+    pub delta: i64,
+    /// Whole samples the FFT window has been moved (negative: earlier).
+    pub shift: i64,
+    /// Slope removed from the last symbol's data: its drift plus what the window's moves
+    /// took.
+    pub theta: i64,
+    /// The last symbol's drift, (rate0 + δ)·τ.
+    pub drift: i64,
+    /// The last symbol's measured slope against what was predicted.
+    pub measured: i64,
+    n: i128,
+    s1: i128,
+    s2: i128,
+    y0: i128,
+    y1: i128,
+}
+
+impl FixedTracking {
+    /// A tracker whose prior is a clock offset of `ppm` (the transmitter fast against the
+    /// receiver) known to `std_ppm` (1 σ); `std_ppm` of 0 or less: applied and never
+    /// corrected. The one place a float enters: in hardware the rate comes from the front's
+    /// CFO word times a constant of the channel, and the two weights used are ROM constants.
+    /// Values that are not numbers give a rate of 0 and a tracker that learns nothing.
+    pub fn start(ppm: f64, std_ppm: f64, fx: &FixedOfdmConfig) -> Self {
+        let p = fx.front.nco_phase_bits.clamp(8, 40);
+        // A fifth of a symbol is 16 samples; a sample of timing is 2^(P−6) units of slope.
+        let per_ppm = 16e-6 * (1u64 << (p - 6)) as f64 * f64::from(1u32 << fx.rate_frac.min(20));
+        let limit = (1u64 << (p - 6 + fx.rate_frac.min(20))) as f64;
+        let rate0 = if ppm.is_finite() {
+            (ppm * per_ppm).round().clamp(-limit, limit) as i64
+        } else {
+            0
+        };
+        // σ against the drift per symbol of one deviation of the prior, squared, in τ units.
+        let per_symbol = 2.0 * PI / FFT_SIZE as f64 * 80e-6 * std_ppm;
+        let weight = if std_ppm.is_finite() && std_ppm > 0.0 && ppm.is_finite() {
+            (25.0 * (TIMING_MEASUREMENT_STD / per_symbol).powi(2))
+                .round()
+                .clamp(0.0, (1u64 << 40) as f64) as i64
+        } else {
+            -1
+        };
+        Self {
+            rate0,
+            weight,
+            delta: 0,
+            shift: 0,
+            theta: 0,
+            drift: 0,
+            measured: 0,
+            n: 0,
+            s1: 0,
+            s2: 0,
+            y0: 0,
+            y1: 0,
+        }
+    }
+
+    /// Nothing known about the clock offset: the standard's worst case as the prior
+    /// ([`TIMING_PRIOR_PPM`]).
+    pub fn unknown(fx: &FixedOfdmConfig) -> Self {
+        Self::start(0.0, TIMING_PRIOR_PPM, fx)
+    }
+
+    /// The start when the front's CFO gave the clock offset
+    /// ([`crate::rx_ofdm::Tracking::from_clock_offset`]).
+    pub fn from_clock_offset(ppm: f64, fx: &FixedOfdmConfig) -> Self {
+        Self::start(ppm, crate::rx_ofdm::TIMING_HINT_PPM, fx)
+    }
+
+    /// A tracker that applies the drift of a clock offset of `ppm` and learns nothing.
+    pub fn fixed(ppm: f64, fx: &FixedOfdmConfig) -> Self {
+        Self::start(ppm, 0.0, fx)
+    }
+
+    /// How late the nominal window of the last symbol was, in samples.
+    pub fn timing(&self, fx: &FixedOfdmConfig) -> f64 {
+        self.drift as f64 / (1u64 << (fx.front.nco_phase_bits.clamp(8, 40) - 6)) as f64
+    }
+
+    /// (rate0 + δ)·τ for symbol `i`, in slope units.
+    fn drift_at(&self, i: usize, fx: &FixedOfdmConfig) -> i64 {
+        let tau = 7 + 5 * i as i128;
+        let rate = i128::from(self.rate0) + i128::from(self.delta);
+        sat(
+            rsh_even(rate.saturating_mul(tau), fx.rate_frac),
+            fx.front.nco_phase_bits + 1,
+        )
+    }
+
+    /// One symbol's measurement into the fit: `err` is the slope measured in symbol `i`
+    /// (0 for SIGNAL) after the predicted drift was removed, `lambda` the prior's weight for
+    /// this packet (`weight`·variance). Updates δ. A tracker that learns nothing, or sums
+    /// beyond any frame's, leave δ as it is.
+    pub fn learn(&mut self, err: i64, i: usize, lambda: i128, fx: &FixedOfdmConfig) {
+        self.measured = err;
+        if self.weight < 0 || lambda < 0 {
+            return;
+        }
+        let step = || -> Option<(i128, i128, i128, i128, i128, i64)> {
+            let tau = i128::try_from(i).ok()?.checked_mul(5)?.checked_add(7)?;
+            // The measurement against the prior rate: what was predicted with δ comes back.
+            let z = i128::from(err).checked_add(rsh_even(
+                i128::from(self.delta).checked_mul(tau)?,
+                fx.rate_frac,
+            ))?;
+            let n = self.n + 1;
+            let s1 = self.s1.checked_add(tau)?;
+            let s2 = self.s2.checked_add(tau.checked_mul(tau)?)?;
+            let y0 = self.y0.checked_add(z)?;
+            let y1 = self.y1.checked_add(tau.checked_mul(z)?)?;
+            let det = n
+                .checked_mul(s2.checked_add(lambda)?)?
+                .checked_sub(s1.checked_mul(s1)?)?;
+            let num = n.checked_mul(y1)?.checked_sub(s1.checked_mul(y0)?)?;
+            let delta = if det > 0 {
+                i64::try_from(num.checked_mul(1i128 << fx.rate_frac)? / det).ok()?
+            } else {
+                self.delta
+            };
+            Some((n, s1, s2, y0, y1, delta))
+        };
+        if let Some((n, s1, s2, y0, y1, delta)) = step() {
+            (self.n, self.s1, self.s2, self.y0, self.y1, self.delta) = (n, s1, s2, y0, y1, delta);
+        }
+    }
+}
+
+/// `v` wrapped to a `bits`-wide two's-complement word.
+fn wrap(v: i128, bits: u32) -> i64 {
+    let full = 1i128 << bits;
+    ((v + full / 2).rem_euclid(full) - full / 2) as i64
+}
+
+/// The tracker's step for one symbol: the pilots `p` at −21, −7, 7, 21 (U bits, the
+/// transmitted signs removed), symbol `i`. The angles of the two pairs' products come from
+/// the CORDIC, widened to P bits; the predicted slope's turn (42 and 14 subcarriers of it)
+/// is subtracted from them modulo a turn, which is the float tracker's rotation of the pilots
+/// before it measures. Leaves the slope to remove in `tracking.theta`.
+fn track_fixed(
+    p: &[IQ; 4],
+    ch: &FixedChannel,
+    i: usize,
+    tracking: &mut FixedTracking,
+    fx: &FixedOfdmConfig,
+    t: &Tables,
+) {
+    let p_bits = fx.front.nco_phase_bits;
+    let moved = i128::from(tracking.shift) << (p_bits - 6);
+    let predicted = i128::from(tracking.drift_at(i, fx)) + moved;
+    let c = tracker_constants(ch, fx);
+    let angle = |hi: IQ, lo: IQ, span: i128| -> i128 {
+        // hi·conj(lo), cut to the CORDIC's 64-bit inputs (it normalises further itself).
+        let (ar, ai) = (i128::from(hi.0), i128::from(hi.1));
+        let (br, bi) = (i128::from(lo.0), i128::from(lo.1));
+        let (re, im) = (ar * br + ai * bi, ai * br - ar * bi);
+        let s = bit_len(re).max(bit_len(im)).saturating_sub(62);
+        let a = cordic_with((re >> s) as i64, (im >> s) as i64, &fx.front, &t.cordic);
+        let wide = i128::from(a) << (p_bits - fx.front.angle_bits);
+        i128::from(wrap(wide - span * predicted, p_bits))
+    };
+    let (outer, inner) = (angle(p[3], p[0], 42), angle(p[2], p[1], 14));
+    let err = rsh_even(
+        i128::from(c.outer) * outer + i128::from(c.inner) * inner,
+        fx.coef_frac,
+    );
+    let usable = c.variance > 0 && c.variance <= MAX_VARIANCE << fx.var_frac;
+    if usable {
+        let lambda = rsh_even(
+            i128::from(tracking.weight) * i128::from(c.variance),
+            fx.var_frac,
+        );
+        tracking.learn(sat(err, p_bits + 1), i, lambda, fx);
+    } else {
+        tracking.measured = sat(err, p_bits + 1);
+    }
+    tracking.drift = tracking.drift_at(i, fx);
+    tracking.theta = sat(i128::from(tracking.drift) + moved, p_bits + 1);
+}
+
 /// The soft values of one symbol in coded order (deinterleaved), 48·N_BPSC of them, and the
 /// common phase removed (units of 2π/2^P): `window` is the symbol's 64-sample FFT window as
 /// the tracker has moved it, `polarity_index` 0 for SIGNAL and k + 1 for DATA symbol k.
@@ -355,7 +644,7 @@ pub fn symbol_soft_fixed(
     modulation: Modulation,
     cfg: &RxOfdmConfig,
     fx: &FixedOfdmConfig,
-    tracking: &mut Tracking,
+    tracking: &mut FixedTracking,
 ) -> Option<(Vec<i32>, i64)> {
     symbol_with(
         window,
@@ -377,7 +666,7 @@ fn symbol_with(
     modulation: Modulation,
     cfg: &RxOfdmConfig,
     fx: &FixedOfdmConfig,
-    tracking: &mut Tracking,
+    tracking: &mut FixedTracking,
     t: &Tables,
 ) -> Option<(Vec<i32>, i64)> {
     // No estimate has a shift this large (a gain is at most 2·W + 3 bits); a record built by
@@ -387,7 +676,6 @@ fn symbol_with(
     }
     let z = window_fft(window, fx, t)?;
     let p_bits = fx.front.nco_phase_bits;
-    let turn_units = (1u64 << p_bits) as f64;
     // u(k) = Z(k)·Hs*(k) after the packet's shift, U bits.
     let u = |c: i8| -> IQ {
         let b = fft_bin(c);
@@ -410,23 +698,8 @@ fn symbol_with(
             *slot = (s * v.0, s * v.1);
         }
         if cfg.timing_tracking {
-            // Stage B: this step in integers. Today the float tracker on the integer pilots.
-            let pf = p.map(|v| (v.0 as f64, v.1 as f64));
-            let gain = PILOT_SUBCARRIERS.map(|c| ch.gain[fft_bin(c)] as f64);
-            track_timing(
-                &pf,
-                gain,
-                ch.gain_sum as f64 / 52.0,
-                polarity_index,
-                tracking,
-            );
-            let slope = tracking.slope / (2.0 * PI) * turn_units;
-            // A slope that is not a number (a hostile tracker state) removes nothing.
-            theta = if slope.is_finite() {
-                slope.round().clamp(-turn_units, turn_units) as i64
-            } else {
-                0
-            };
+            track_fixed(&p, ch, polarity_index, tracking, fx, t);
+            theta = tracking.theta;
         }
         let mut sum = (0i64, 0i64);
         for (v, &c) in p.iter().zip(&PILOT_SUBCARRIERS) {
@@ -478,9 +751,11 @@ fn symbol_with(
     }
     // The window follows the slope left in it, as the float receiver's.
     if cfg.pilot_tracking && cfg.timing_tracking {
-        if tracking.slope > ONE_SAMPLE / 2.0 {
+        // Half a sample of slope: 2^(P−7).
+        let half = 1i64 << (p_bits - 7);
+        if tracking.theta > half {
             tracking.shift = tracking.shift.saturating_sub(1);
-        } else if tracking.slope < -ONE_SAMPLE / 2.0 {
+        } else if tracking.theta < -half {
             tracking.shift = tracking.shift.saturating_add(1);
         }
     }
@@ -500,7 +775,7 @@ fn window_of<'a>(
     z: &'a [IQ],
     fft_start: usize,
     i: usize,
-    tracking: &Tracking,
+    tracking: &FixedTracking,
 ) -> Result<&'a [IQ], RxOfdmError> {
     let start = i64::try_from(symbol_start(fft_start, i))
         .ok()
@@ -525,7 +800,7 @@ pub fn decode_ppdu_fixed(
     fft_start: usize,
     cfg: &RxOfdmConfig,
     fx: &FixedOfdmConfig,
-    mut tracking: Tracking,
+    mut tracking: FixedTracking,
 ) -> Result<Decoded, RxOfdmError> {
     let unusable = RxOfdmError::Truncated { needed: 0, have: 0 };
     let t = tables(fx).ok_or(unusable)?;
@@ -539,7 +814,7 @@ pub fn decode_ppdu_fixed(
         .and_then(|ltf| channel_with(ltf, fx, &t))
         .ok_or(short)?;
     let phase = |phi: i64| phi as f64 * 2.0 * PI / (1u64 << fx.front.nco_phase_bits) as f64;
-    let symbol = |i: usize, m: Modulation, tr: &mut Tracking| {
+    let symbol = |i: usize, m: Modulation, tr: &mut FixedTracking| {
         let w = window_of(z, fft_start, i, tr)?;
         symbol_with(w, &ch, i, m, cfg, fx, tr, &t).ok_or(short)
     };
@@ -547,7 +822,7 @@ pub fn decode_ppdu_fixed(
     let signal = signal_from_soft(&soft)?;
     let mut log = SymbolLog {
         common_phase: vec![phase(phi)],
-        timing: vec![tracking.timing()],
+        timing: vec![tracking.timing(fx)],
     };
     if !(1..=MAX_PSDU_LEN).contains(&signal.length) {
         return Err(RxOfdmError::SignalLength);
@@ -566,7 +841,7 @@ pub fn decode_ppdu_fixed(
         let (soft, phi) = symbol(i, modulation, &mut tracking)?;
         all.extend(soft);
         log.common_phase.push(phase(phi));
-        log.timing.push(tracking.timing());
+        log.timing.push(tracking.timing(fx));
     }
     // §17.3.5.3: the encoder is back in state 0 after SERVICE, the PSDU and the six tail bits.
     let tail = 16 + 8 * signal.length + 6;

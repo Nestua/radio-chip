@@ -13,6 +13,8 @@
 //! - `fixed`, `fixedw`: G2 of the integer data path (`rx_ofdm_fixed`): the loss against the
 //!   float receiver on the same 12-bit samples over the grids of `softg2`, and the frames lost
 //!   near 10 % PER with one width changed at a time.
+//! - `fixedi`: the integer receiver alone on the frames of `fixed`, with the rotator's phase
+//!   truncated and rounded.
 //! - `softg2`: the G2 sweep of the soft-value format (R0-09): the candidates on the same
 //!   frames, fine grids around the 10 % crossings, AWGN and TGn B, D and E.
 //!
@@ -33,7 +35,7 @@ use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{acquire, correct, RxConfig};
 use radio_phy::rx_front_fixed::FixedRxConfig;
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig};
+use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
 
@@ -165,16 +167,26 @@ fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<
                 y = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
             }
             for (k, r) in receivers.iter().enumerate() {
-                let start = if r.hint {
-                    Tracking::from_clock_offset(a.cfo_hz / CARRIER_HZ * 1e6)
-                } else {
-                    Tracking::default()
-                };
+                let ppm = a.cfo_hz / CARRIER_HZ * 1e6;
                 let ok = match (&r.fixed, &z) {
-                    (Some(fx), Some(z)) => decode_ppdu_fixed(z, a.fft_start, &r.cfg, fx, start)
-                        .is_ok_and(|d| d.psdu == psdu),
-                    _ => decode_ppdu_from(&y, a.fft_start, &r.cfg, start)
-                        .is_ok_and(|d| d.psdu == psdu),
+                    (Some(fx), Some(z)) => {
+                        let start = if r.hint {
+                            FixedTracking::from_clock_offset(ppm, fx)
+                        } else {
+                            FixedTracking::unknown(fx)
+                        };
+                        decode_ppdu_fixed(z, a.fft_start, &r.cfg, fx, start)
+                            .is_ok_and(|d| d.psdu == psdu)
+                    }
+                    _ => {
+                        let start = if r.hint {
+                            Tracking::from_clock_offset(ppm)
+                        } else {
+                            Tracking::default()
+                        };
+                        decode_ppdu_from(&y, a.fft_start, &r.cfg, start)
+                            .is_ok_and(|d| d.psdu == psdu)
+                    }
                 };
                 lost[k] += usize::from(!ok);
             }
@@ -331,7 +343,12 @@ fn soft_formats(tag: &str, formats: &[(&'static str, i32, f64)], frames: usize) 
 /// The width sweep of the integer data path: frames lost of the same frames near 10 % PER,
 /// the float receiver first, then the default widths, then one width changed at a time.
 fn widths(frames: usize) {
-    let d = FixedOfdmConfig::default();
+    // The base of the sweep keeps the rotator's phase truncated (the default before this
+    // sweep chose the rounding): the columns "round" show what the rounding changes.
+    let d = FixedOfdmConfig {
+        rot_round: false,
+        ..FixedOfdmConfig::default()
+    };
     let front = |f: FixedRxConfig| FixedOfdmConfig { front: f, ..d };
     let variants: Vec<(&'static str, FixedOfdmConfig)> = vec![
         (
@@ -343,6 +360,10 @@ fn widths(frames: usize) {
                 prod_bits: 40,
                 kappa_bits: 20,
                 scale_frac: 8,
+                rate_frac: 20,
+                track_bits: 30,
+                coef_frac: 24,
+                var_frac: 16,
                 front: FixedRxConfig {
                     cordic_iters: 24,
                     cordic_bits: 30,
@@ -376,6 +397,10 @@ fn widths(frames: usize) {
                 prod_bits: 40,
                 kappa_bits: 20,
                 scale_frac: 8,
+                rate_frac: 20,
+                track_bits: 30,
+                coef_frac: 24,
+                var_frac: 16,
                 ..d
             },
         ),
@@ -405,6 +430,37 @@ fn widths(frames: usize) {
         ),
         ("F8", FixedOfdmConfig { scale_frac: 8, ..d }),
         ("default", d),
+        (
+            "round",
+            FixedOfdmConfig {
+                rot_round: true,
+                ..d
+            },
+        ),
+        (
+            "round L8",
+            FixedOfdmConfig {
+                rot_round: true,
+                front: FixedRxConfig {
+                    nco_lut_bits: 8,
+                    ..d.front
+                },
+                ..d
+            },
+        ),
+        ("R6", FixedOfdmConfig { rate_frac: 6, ..d }),
+        ("R8", FixedOfdmConfig { rate_frac: 8, ..d }),
+        ("M8", FixedOfdmConfig { track_bits: 8, ..d }),
+        (
+            "M12",
+            FixedOfdmConfig {
+                track_bits: 12,
+                ..d
+            },
+        ),
+        ("K8", FixedOfdmConfig { coef_frac: 8, ..d }),
+        ("K12", FixedOfdmConfig { coef_frac: 12, ..d }),
+        ("V4", FixedOfdmConfig { var_frac: 4, ..d }),
         (
             "W14 s0",
             FixedOfdmConfig {
@@ -517,7 +573,7 @@ fn widths(frames: usize) {
     println!(
         "\n## widths of the integer data path: frames lost of {frames} (rounded up), 1000 octets, the same frames for every column,\n\
          # 12-bit samples at {ADC_LEVEL_DBFS} dBFS, eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.\n\
-         # default = W16 s2 T12 U16 C10 F4, rotator L9 Q11, CORDIC N16; each other column changes what its name says;\n\
+         # default = W16 s2 T12 U16 C10 F4, rotator L9 Q11 (truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says (round: half a table address added to the rotation phase);\n\
          # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
          # columns: {}",
         rx.iter().map(|r| r.name).collect::<Vec<_>>().join(" | ")
@@ -887,6 +943,59 @@ fn main() -> ExitCode {
                 ),
                 (
                     "TGn E, static, float against integer data path (G2)",
+                    TgnModel::E,
+                    [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
+                    9,
+                ),
+            ] {
+                sweep(name, Channel::Tgn(m), &rx, start, 1.0, points, frames);
+            }
+        }
+        "fixedi" => {
+            // The integer receiver alone on the frames of `fixed` (the same seeds, so the
+            // float columns of `fixed` need not be run again when only the integer path
+            // has changed): with the rotator's phase truncated and rounded.
+            let rx = [
+                Receiver {
+                    fixed: Some(FixedOfdmConfig {
+                        rot_round: false,
+                        ..FixedOfdmConfig::default()
+                    }),
+                    ..receiver("integer, phase truncated", true, base())
+                },
+                Receiver {
+                    fixed: Some(FixedOfdmConfig {
+                        rot_round: true,
+                        ..FixedOfdmConfig::default()
+                    }),
+                    ..receiver("integer, phase rounded", true, base())
+                },
+            ];
+            let frames = n.unwrap_or(2000);
+            sweep(
+                "AWGN, integer data path alone (G2)",
+                Channel::Awgn,
+                &rx,
+                [2.5, 3.5, 5.5, 7.5, 10.5, 13.5, 17.5, 18.5],
+                0.5,
+                7,
+                frames,
+            );
+            for (name, m, start, points) in [
+                (
+                    "TGn B, static, integer data path alone (G2)",
+                    TgnModel::B,
+                    [7.5, 12.0, 11.0, 15.5, 16.5, 20.5, 23.5, 26.0],
+                    7,
+                ),
+                (
+                    "TGn D, static, integer data path alone (G2)",
+                    TgnModel::D,
+                    [6.0, 10.0, 10.0, 13.5, 15.0, 19.0, 22.0, 24.5],
+                    7,
+                ),
+                (
+                    "TGn E, static, integer data path alone (G2)",
                     TgnModel::E,
                     [5.0, 9.0, 9.0, 12.5, 14.0, 18.0, 21.0, 23.5],
                     9,

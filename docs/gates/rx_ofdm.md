@@ -646,3 +646,57 @@ Findings:
 Not measured here, unchanged from stage A's list: the timing tracker in integers, the
 rotator's phase rounding, PER through the gain-control model and the lower edge of the
 input level, DC removal before the decoder (stage B); the LDPC input's format in fading.
+
+## 2026-11-20 · G0 · R0-09 G2, stage B: the timing tracker in integers
+
+Model: `rx_ofdm_fixed.rs`, `FixedTracking`, `tracker_constants`. It replaces the float
+tracker that stage A left behind an integer interface; between the samples and the soft
+values there is no floating point now. The reference is the float tracker (`rx_ofdm.rs`,
+`Tracking`: a recursive least-squares fit of measured(t) = offset + rate·t, of which only
+rate·t is removed from the data).
+
+**Units.** Phases in units of 2π/2^P per subcarrier (P the rotator's 22: one sample of
+timing is 2^(P−6) = 65 536). Time τ in fifths of a symbol from the middle of the long
+training field: 7 for SIGNAL (112 samples), then 5 per symbol, an integer. Rates per unit
+of τ with R more fractional bits.
+
+**Per packet** (after the channel estimate; three quotients on one denominator). With g the
+gains at −21, −7, 7, 21, a = g₀ + g₃, b = g₁ + g₂, the float tracker's pair weights g₀g₃/a
+and g₁g₂/b are cleared of their divisions:
+
+| Quantity | Arithmetic | Width |
+|---|---|---|
+| N_o, N_i, D | g₀·g₃·b, g₁·g₂·a, 9·N_o + N_i | 46, 46, 50 bits for U = 16 |
+| normalisation | D cut to M bits by a right shift (leading-zero count), the same shift on N_o, N_i and Σg·a·b, truncating | M |
+| pair coefficients | c_o = 3·N_o/(14·D), c_i = N_i/(14·D), K fractional bits, rounded half up (at most 1/42 and 1/14) | K |
+| variance | v = 5·Σg·a·b/(52·D), V fractional bits, truncated: the measurement's variance against a flat channel of the same mean gain | V |
+| prior's weight | λ = round(w·v), w a ROM constant: 25·(σ/drift per symbol of the prior's deviation)², σ = 0.016 rad: 64 846 for the 40 ppm prior, 25 938 223 for the front's CFO hint (2 ppm) | 35 bits |
+
+**Per symbol** i (τ = 7 + 5i):
+
+| Step | Arithmetic |
+|---|---|
+| Prediction | drift = round((r₀ + δ)·τ / 2^R), half to even; θ_pred = drift + shift·2^(P−6) (what the window's moves took) |
+| Measurement | the CORDIC's angle of p₃·p₀* and of p₂·p₁* (A bits, widened to P), less 42·θ_pred and 14·θ_pred modulo a turn; e = round((c_o·∠outer + c_i·∠inner)/2^K), half to even. Subtracting the predicted turn from the angle is the float tracker's rotation of the pilots before it measures, without the rotator |
+| Fit | if 0 < v ≤ 3: z = e + round(δ·τ/2^R); n += 1, Στ += τ, Στ² += τ², Σz += z, Στz += τ·z; δ = 2^R·(n·Στz − Στ·Σz) / (n·(Στ² + λ) − (Στ)²), truncated toward zero |
+| Applied | drift with the new δ; θ = drift + shift·2^(P−6) goes to the rotator; beyond half a sample (2^(P−7)) the window moves by one for the next symbol |
+
+The quotient is the float recursion's rate exactly (the batch form of the same least
+squares; the float tracker's prior on the offset, 10⁶ nominal variances, is taken as flat).
+For the longest frame (1367 symbols) the sums need 11, 23, 35, 31 and 43 bits; the division
+is 64 bits by 45, once per symbol (4 µs), so a serial divider. r₀ is the prior rate: 0, or
+from the clock offset the front's CFO gives. Here that conversion is the one float at the
+boundary (`FixedTracking::start`, ppm in); in hardware it is the CFO word times a constant
+of the channel's centre frequency, and where that product is formed is ADR 0008's hand-off.
+
+**Parameters** (`FixedOfdmConfig`): R = 10, M = 16, K = 16, V = 10 to start with; the sweep
+(`rxper fixedw`) confirms or narrows them. `rot_round` adds half a table address to the
+data path's rotation phases (the open item of stage A's review: the front's rotator
+truncates).
+
+**Gates:** `tests/g2_rx_ofdm.rs`. (1) The per-packet constants worked by hand. (2) The fit
+worked by hand on three symbols, both signs, and the starts' constants. (3) The fit against
+the float recursion written out in the test, 1367 symbols, two priors, three variances.
+(4) In the receiver: each symbol's measured slope and applied drift against the float
+receiver on the same samples, from 6 dB up, three starts. (5) A notch on a pilot: measured,
+reported, not followed. (6) The bit-for-bit pin.

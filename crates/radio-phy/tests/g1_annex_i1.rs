@@ -343,8 +343,9 @@ fn annex_waveform_decodes() {
     // The integer data path (R0-09 G2, stage A) on the same samples as a 12-bit ADC would
     // hand them over, the frame at −12 dBFS, with the default words.
     {
-        use radio_phy::rx_ofdm::Tracking;
-        use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig};
+        use radio_phy::rx_ofdm_fixed::{
+            decode_ppdu_fixed, to_fixed, FixedOfdmConfig, FixedTracking,
+        };
         let p = y.iter().map(|v| v.0 * v.0 + v.1 * v.1).sum::<f64>() / y.len() as f64;
         let z = to_fixed(&y, 2048.0 * (10f64.powf(-1.2) / p).sqrt(), 12);
         for backoff in [0usize, 2, 4, 8, 15] {
@@ -353,7 +354,7 @@ fn annex_waveform_decodes() {
                 192 - backoff,
                 &RxOfdmConfig::default(),
                 &FixedOfdmConfig::default(),
-                Tracking::default(),
+                FixedTracking::unknown(&FixedOfdmConfig::default()),
             )
             .unwrap();
             assert_eq!(d.signal.rate, Rate::R36);
