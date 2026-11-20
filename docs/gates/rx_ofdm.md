@@ -767,10 +767,10 @@ tracker in integers, the rotator's phase truncated):
 - **The integer tracker costs nothing that these points resolve:** the base column is the
   one measured with the float tracker inside (entry above: 190, 188, 215, 194, 130).
 - **The rotator's phase is rounded now** (`rot_round`, default on: half a table address
-  added before the table is addressed, one adder). Over the five points it gives back 7
-  frames of the 9 the base loses against float; the common phase the receiver reports
+  added before the table is addressed, one adder). Over the five points it gives back 8
+  frames of the 10 the base loses against float; the common phase the receiver reports
   agrees with the float receiver's to 5·10⁻⁴ rad (was 6·10⁻³, the truncation's bias). With
-  rounding, a table of 2⁸ entries is not enough (+9 frames over the five points against
+  rounding, a table of 2⁸ entries is not enough (+14 frames over the five points against
   2⁹), so L stays 9. The front's own rotator (CFO correction, RTL and vectors exist) is
   not changed: a constant phase offset there is absorbed by the channel estimate.
 - **The tracker's widths are not tight.** R 6, M 8, K 8, V 4 lose nothing here (K 8: one
