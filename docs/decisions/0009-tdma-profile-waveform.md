@@ -229,6 +229,11 @@ What this asks of the profile and the chip:
   costs a doubling of the per-chain part (input, gain control, synchronisation, FFT,
   channel estimate); the decoders do not multiply. A dock with six antennas in each of two
   bands would need twelve chains: two chips, or four antennas per band;
+- **more antennas than chains, with selection** (the founder, 2026-11-20): a switch in
+  front of the chains lets the link use the antennas that are not in the airframe's shadow
+  and point best, as the market's products do (one maker's dock lists nine antennas on two
+  transmit and four receive chains, its large aircraft eight). A switch is far cheaper than
+  a chain; the choice is made by the MAC from what each antenna last received;
 - **one to four transmit chains.** More do not raise the permitted power; four cover
   diversity, the choice of the unshadowed antennas and two spatial streams;
 - **multi-link operation as the direction** (the founder, 2026-11-20): two PHY instances
@@ -285,6 +290,14 @@ What this asks of the profile and the chip:
   transmit and receive but one for both receive channels (to be checked against its
   documentation): transmit in one band and receive in the other fits one device; two
   receive antennas in one band fit one device; receiving in two bands at once does not.
+- **The process node for this configuration** (a first count for ADR 0008, good to a
+  factor of two): eight receive chains at 20 MHz, two links, the decoders, the MAC and a
+  small processor come to roughly 2 to 4 million gate equivalents and 3 to 7 Mbit of
+  memory. Our own probe gives about 0.1 million gates per mm² routed at 130 nm, so tens of
+  mm² and watts there: 130 nm stays what the roadmap makes it, the test vehicle for
+  blocks. With typical densities of smaller nodes (not from a PDK of ours) the same design
+  is of the order of 12 mm² at 65 nm, 5 mm² at 40 nm and 2 to 3 mm² at 28 or 22 nm, where
+  the pads, not the logic, set the die. The roadmap's second step, 22FDX, fits it.
 - **Dependence on one person** for the prototype's code, and his agreement to how it is
   used and where it lives. FPGA headroom on his board (block RAM at 89 %).
 
