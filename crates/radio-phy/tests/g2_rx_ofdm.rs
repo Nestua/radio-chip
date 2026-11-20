@@ -624,7 +624,7 @@ fn the_default_words_bit_for_bit() {
                 };
             }
         }
-        // The working format and the Viterbi gate's present one (other scale constants).
+        // The format the reports of stage A were measured at, and the Viterbi decoder's.
         let mut v = all_soft(&z, 188, rate, &cfg, &fx, drift);
         v.extend(all_soft(
             &z,
@@ -647,11 +647,11 @@ fn the_default_words_bit_for_bit() {
     assert_eq!(
         got,
         [
-            243_358_123_135_322_777u64,
-            3_030_051_595_941_715_739,
-            15_086_622_981_977_932_429,
-            15_298_782_481_584_580_196,
-            6_381_563_594_027_211_405
+            12_483_171_598_162_887_096u64,
+            1_581_067_360_675_375_941,
+            6_175_653_753_861_819_291,
+            858_923_681_772_431_541,
+            13_600_387_931_793_789_518
         ],
         "{got:?}"
     );
@@ -705,12 +705,13 @@ fn the_constants_worked_by_hand() {
         .map(|&m| scale_constant(m, &six_bits(), &fx))
         .collect();
     assert_eq!(six, [25792, 36475, 81561, 167151]);
-    // Four bits, clip 1.5: 3882.667·2√E → 7765.33, 10981.84, 24556.14, 50325.11.
-    let four: Vec<i64> = [Bpsk, Qpsk, Qam16, Qam64]
+    // Eight bits, clip 3 (the Viterbi decoder's format): 2·√E·52·127/3·16 = 35221.33·2√E
+    // → 70442.67, 99620.97, 222759.27, 456520.66.
+    let eight: Vec<i64> = [Bpsk, Qpsk, Qam16, Qam64]
         .iter()
         .map(|&m| scale_constant(m, &RxOfdmConfig::default(), &fx))
         .collect();
-    assert_eq!(four, [7765, 10982, 24556, 50325]);
+    assert_eq!(eight, [70443, 99621, 222759, 456521]);
     // No scale without a usable clip, soft range or widths.
     for (soft_max, clip) in [(31, 0.0), (31, -1.0), (31, f64::NAN), (-5, 2.0)] {
         let cfg = RxOfdmConfig {
