@@ -907,3 +907,182 @@ and the frame's number, so a report does not depend on the machine's thread coun
 at the largest gain (the lower edge); `dc` — seven of the DC cases of `rxfront agcdc` through
 the integer chain (another scene: its counts are not that report's). Clock offset uniform in ±40 ppm setting CFO and sample-clock offset at 5.8 GHz, as
 in `rxper`.
+
+## 2026-11-20 · G2 + measurements · stage B, second part: the receiver behind the gain control
+
+Commits 0697d36 (G0, `correct_fixed`, its gates), 37e51be (after the review), 762575d,
+16875f6 and 2f7ce65 (`rxagc`). Commands:
+`cargo test -p radio-phy --test g2_rx_front` (14 pass, 4 new);
+`rxagc per 2000` → `reports/rx_ofdm_agc_per.txt` (build server, Linux x86-64, rustc 1.100.0,
+the binary of 762575d: the header's wording was corrected after it, the arithmetic not);
+`rxagc level 2000`, `rxagc dc 2000`, `rxagc pole 2000` → `reports/rx_ofdm_agc_level.txt`,
+`…_dc.txt`, `…_pole.txt` (this machine, macOS arm64; `level` and `dc` were run twice, with
+the binaries of 762575d and of 16875f6: every figure identical). A frame's random stream comes from
+the row and the frame's number, so the reports do not depend on the thread count (the
+reviewer ran 3 threads against 10: identical output); between the two machines the frames
+agree only as far as their `sin` and `cos` do.
+
+**`correct_fixed`, the gate.** The four tests were written before the function and seen
+failing (they did not compile). Mutations, one at a time, restored with `cp` and `touch`,
+each fails at least one test — mine (16): the step added; the phase advanced before use;
+one bit fewer dropped; the width guard removed, 2..=31, 1..=30, 3..=29, 2..=24, 3..=30; the
+rotator conjugated; the sample conjugated; the step halved; the output floored; the phase
+starting one step in; half up at 13 bits; the negative limit −4095 at 13 bits. The reviewer's
+(24, own list in the review below): 19 killed at first, the five survivors are the last
+five of mine and die with the tests added after the review. Not observable, so not a
+mutation: the accumulator's own wrap (the table reduces the phase again).
+
+**1. Through the gain control the all-integer receiver is the float one**
+(`per`; noise at −30 dBFS at the largest gain, no DC offset; both chains have the DC blocker
+at 2⁻⁷ in the decoder's path). SNR at 10 % PER against the float chain behind a gain that
+knows the frame, worst rate, and frames lost over the grid (paired against the float chain
+behind the gain control: lost by the column alone / by float alone):
+
+| Grid | float, gain control | int 12 / 2 | int 13 / 1 | int 13 / 2 | frames lost by float | int 12 / 2, paired | int 13 / 2, paired |
+|---|---|---|---|---|---|---|---|
+| AWGN, 8 rates × 6 points | −0.02 … +0.01 dB | −0.03 … +0.02 | −0.03 … +0.03 | −0.02 … +0.02 | 16 966 | +564 / −451 | +475 / −401 |
+| TGn D, 8 rates × 6 points (54 Mb/s does not cross 10 %) | −0.01 … +0.10 dB | −0.03 … +0.11 | −0.02 … +0.16 | −0.03 … +0.15 | 13 602 | +222 / −188 | +226 / −170 |
+
+- In AWGN no cell is further than 0.03 dB from the reference; the gain control costs the
+  float chain nothing there (16 966 lost against 16 983 behind the known gain).
+- The +0.10 to +0.16 dB are one rate, 36 Mb/s through TGn D, in every column including the
+  integer chain behind the known gain (+0.16): its curve is shallow there (303 → 207 → 173
+  frames over 2 dB), so 8 frames move the crossing by that much. In frames the integer
+  chain loses 34 more than float of 13 602 over the TGn D grid, 113 of 16 966 in AWGN
+  (0.7 %; the 13-bit hand-offs 74 to 83).
+- 54 Mb/s through TGn D does not cross 10 % inside its grid in any column, and the AWGN
+  crossings of 48 and 54 Mb/s stand at 18.9 and 20.8 dB where `rxper fixed` has 18.5 and
+  19.9: that is finding 3, not the gain control.
+- Where the gain moves (30 to 60 dB, 3 to 11 changes per frame, 6 / 24 / 54 Mb/s): no frame
+  of 6 or 24 Mb/s is lost in AWGN by any chain, and the integer chains lose within 6 frames
+  of float in every row (the TGn D block: 1442 against 1439 over its fifteen rows).
+- Near the sensitivity the gain hardly moves with the noise at −30 dBFS (in AWGN the column
+  `chg` is 0.00 up to 20 dB, through TGn D it reaches one change per frame from 24 dB): the
+  low rates' rows measure a fixed level of −27 to −10 dBFS, not a transient.
+
+**2. The lower edge of the input level is the hand-off's last bit** (`level`; the same
+frames at every level; frames lost of 2000; "float known" is the reference behind the known
+gain, 208 / 170 / 398 / 195 / 498 for the five points):
+
+| Noise at the largest gain | AWGN 6 Mb/s 3.5 dB: float / 12-2 / 13-1 / 13-2 | AWGN 24 Mb/s 11.5 dB | AWGN 54 Mb/s 20 dB | TGn D 6 Mb/s 8.5 dB | TGn D 54 Mb/s 26.5 dB |
+|---|---|---|---|---|---|
+| −36 dBFS | 211 / 212 / 206 / 208 | 170 / 174 / 174 / 174 | 399 / 411 / 410 / 412 | 198 / 201 / 197 / 196 | 499 / 494 / 498 / 497 |
+| −42 dBFS | 210 / 213 / 223 / 219 | 179 / 182 / 181 / 181 | 397 / 414 / 408 / 412 | 200 / 202 / 200 / 199 | 496 / 501 / 500 / 501 |
+| −48 dBFS | 219 / 240 / 233 / 223 | 174 / 191 / 183 / 185 | 402 / 442 / 423 / 422 | 197 / 208 / 202 / 201 | 500 / 506 / 500 / 506 |
+| −54 dBFS | 230 / 350 / 272 / 260 | 182 / 257 / 216 / 199 | 406 / 545 / 447 / 458 | 204 / 226 / 212 / 207 | 497 / 517 / 519 / 512 |
+| −60 dBFS | 302 / 936 / 470 / 412 | 223 / 629 / 343 / 300 | 474 / 1029 / 736 / 683 | 218 / 316 / 242 / 233 | 510 / 607 / 560 / 558 |
+
+- With the front's rotator as it is (12 / 2) the integer chain starts to lose against the
+  float one when the noise at the largest gain is at −48 dBFS (17 to 40 frames of 2000 in
+  the AWGN rows, +10 % of the losses) and has lost a third to a half as many frames again
+  at −54 dBFS.
+  **Requirement for the radio in front (to ADR 0008): the noise at the largest gain at or
+  above −42 dBFS at the ADC**, or one more bit in the hand-off.
+- One more bit (13 / 1 or 13 / 2) moves the edge down by about one row (6 dB): at −54 dBFS
+  the 13-bit hand-offs lose what 12 / 2 loses at −48. 13 / 1 and 13 / 2 differ by less than
+  the rows resolve (13 / 2 a little better at the lowest levels), so the loss is the
+  rotator's rounding of the ADC's last bit, not the FFT word. Stage A's "level with float
+  down to −42 dBFS of its own word" is the same fact seen from the decoder's side.
+- The float chain on the same ADC samples loses from −54 dBFS on: there the ADC's own
+  12 bits are the limit, which no hand-off recovers.
+- The upper edge was not approached: the control locks at −10 dBFS and the three hand-offs
+  agree there, 13 / 2 with one bit less headroom included.
+
+**3. The DC blocker at 2⁻⁷ in the decoder's path costs the high rates more than everything
+else in this entry** (`pole`; no DC offset; the blocker's pole in both paths; "raw" is the
+float chain with the decoder handed the samples before the blocker; frames lost of 2000):
+
+| Point | float raw | float 2⁻⁷ | 2⁻⁸ | 2⁻⁹ | 2⁻¹¹ | int 13 / 2: 2⁻⁷ | 2⁻⁸ | 2⁻⁹ |
+|---|---|---|---|---|---|---|---|---|
+| AWGN 54 Mb/s 25 / 30 / 40 / 60 dB | 0 / 0 / 0 / 0 | 32 / 16 / 12 / 8 | 2 / 1 / 0 / 1 | 0 | 0 | 31 / 16 / 12 / 5 | 3 / 1 / 0 / 1 | 0 |
+| AWGN 24 Mb/s 11.5 dB | 158 | 171 | 164 | 159 | 161 | 169 | 166 | 161 |
+| AWGN 36 Mb/s 14.5 dB | 214 | 251 | 227 | 225 | 212 | 252 | 234 | 233 |
+| AWGN 48 Mb/s 18.5 dB | 213 | 326 | 283 | 241 | 221 | 334 | 273 | 255 |
+| AWGN 54 Mb/s 20 dB | 167 | 403 | 278 | 200 | 172 | 412 | 287 | 202 |
+| TGn D 6 Mb/s 8.5 dB | 182 | 183 | 182 | 182 | 183 | 183 | 181 | 183 |
+| TGn D 24 Mb/s 17 dB | 208 | 216 | 208 | 209 | 207 | 216 | 212 | 211 |
+| TGn D 36 Mb/s 21.5 dB | 184 | 281 | 225 | 197 | 187 | 284 | 222 | 194 |
+| TGn D 54 Mb/s 26.5 dB | 226 | 511 | 415 | 304 | 259 | 517 | 416 | 310 |
+| TGn D 54 Mb/s 40 dB | 0 | 251 | 153 | 55 | 14 | 251 | 152 | 61 |
+| TGn D 54 Mb/s 60 dB | 0 | 267 | 175 | 67 | 29 | 267 | 177 | 68 |
+
+- With nothing to remove, the blocker as it is more than doubles the frames lost at
+  54 Mb/s near the sensitivity (403 against 167 in AWGN, 511 against 226 through TGn D) and
+  leaves a floor of 13 % of the 54 Mb/s frames through TGn D at 40 and 60 dB, where the
+  samples before it lose none. It is why `per`'s 48 and 54 Mb/s crossings stand 0.4 and
+  0.9 dB above `rxper fixed`'s and 54 Mb/s through TGn D never reaches 10 %. 6 Mb/s does
+  not feel it, 24 Mb/s hardly.
+- A slower pole helps by about a factor of two per two bits and is not a cure at any pole
+  an F = 10 blocker can hold: at 2⁻⁹ the fading floor is still 3 %, at 2⁻¹¹ (float only)
+  1 %.
+- `rx_front.md` (R0-07e, second half) had this as "8 of 2000 at 25 dB" in a scene without
+  a sample-clock offset and asked for a look with R0-09 G2; this is the look. The cause is
+  not established here. A guess to be tested, not a finding: the blocker is a high-pass
+  with a memory of 128 samples, longer than a symbol, placed before the CFO is taken out,
+  so at the largest CFOs (±232 kHz of a 312.5 kHz spacing) the subcarrier next to DC falls
+  on its skirt and carries its own earlier symbols.
+- **For ADR 0008: the decoder cannot be handed the output of this blocker.** What it is
+  handed instead (the estimate frozen was worse in `rxfront agcdc`; an offset estimated
+  over the long training field and subtracted; a notch after the CFO is out; a pole
+  switched after the acquisition) is to be measured there with `rxagc`.
+
+**4. With a DC offset the integer chain follows the float one, and the offset must be
+removed** (`dc`; 54 Mb/s at 25 / 30 / 40 / 60 dB; frames lost of 2000):
+
+| DC offset | float | float raw | int 12 / 2 | int 13 / 2 | int 13 / 2 raw |
+|---|---|---|---|---|---|
+| none | 32 / 16 / 12 / 8 | 0 / 0 / 0 / 0 | 32 / 16 / 11 / 6 | 31 / 16 / 12 / 5 | 0 / 0 / 0 / 0 |
+| per index, −40 dBFS | 39 / 15 / 10 / 8 | 1 / 0 / 0 / 0 | 36 / 14 / 11 / 9 | 36 / 15 / 11 / 10 | 1 / 0 / 0 / 0 |
+| per index, −30 dBFS | 62 / 18 / 19 / 14 | 507 / 385 / 377 / 344 | 61 / 20 / 19 / 15 | 62 / 20 / 19 / 15 | 504 / 385 / 375 / 345 |
+| per index, −20 dBFS | 234 / 69 / 99 / 89 | 1664 / 1625 / 1636 / 1634 | 239 / 72 / 102 / 93 | 238 / 72 / 98 / 94 | 1666 / 1626 / 1634 / 1636 |
+| before the gain, −20 dBFS at the largest | 68 / 30 / 36 / 30 | 1347 / 385 / 0 / 0 | 67 / 30 / 36 / 29 | 70 / 31 / 36 / 30 | 1342 / 385 / 0 / 0 |
+| before the gain, −10 dBFS | 1115 / 199 / 218 / 209 | 1933 / 1604 / 386 / 0 | 1115 / 199 / 218 / 208 | 1119 / 199 / 215 / 207 | 1933 / 1610 / 387 / 0 |
+
+- In every row the integer chains are within a few frames of the float chain, paired
+  (at most +9 / −4). The fixed blocker and the 12-bit hand-off add nothing of their own
+  under an offset.
+- Without a removal an offset 20 dB below the packet (−30 dBFS) loses a fifth of the
+  54 Mb/s frames and one 10 dB below it four fifths, in integers as in float. 6 Mb/s
+  (report) loses no frame in any blocked column and, raw, only under an offset above the
+  packet (10 dB SNR: 179 per index at −20 dBFS; before the gain 182 at −20 and 1808 at
+  −10 dBFS).
+- So finding 3 and this one pull against each other: the decoder needs the offset gone
+  and cannot afford this blocker. With the blocker the columns of this table carry its
+  own floor (the row "none").
+- The row before the gain at −10 dBFS at 25 dB (1115 lost in every blocked column) is the
+  blinded gain control of `rx_front.md`, unchanged in integers.
+
+**What this is not.** One seed per row. The gain control is a model after one chip's
+published state machine; the hold on the gain, the phase jumps and every DC level are
+assumptions (`channel.md`). The blocker is told nothing; `restart` and `rescale` exist in
+the float model only and were not rerun. A lost frame is not split into not acquired and
+not decoded. Only the first acquisition of a stream is tried. TGn B and E, frames other
+than 1000 octets and the upper edge of the level were not run. The front's own G2 on
+these frames is not separated from the data path's (the integer columns share one
+acquisition, so differences among them are the hand-off alone; float against integer
+includes the front).
+
+**Independent review (fresh agent, the code and G0, not this entry), 2026-11-20,** on
+commit 762575d. No defect in `correct_fixed` or in the tool's arithmetic: it rederived the
+function, recomputed every hand-worked number, found the float bound tight (worst error
+0.93 to 0.98 of it), the three hand-offs to be what G0's table says, the draw order to
+support "the same frames", the hold's indexing equal to `rxfront agcdc`'s, the two chains
+treated alike, and the output identical at 3 and 10 threads. Found and corrected: rounding,
+negative limit and the guard's inner edges not pinned at 13 bits (five surviving mutants,
+tests added); the chain test started the tracker from nothing while its comment said from
+the CFO word, and had no sample-clock offset (now ±31 ppm in both); the mean-phase check
+passed for the slowest CFOs by the stream's length (the stream is whole table periods
+now, and the tolerance says what a CFO of one unit can average); G0's "unpaired check",
+"nothing rounded away", "the front's rotator as it is", "the rows of `rxfront agcdc`" and
+the tool's "nothing in floating point"; the header's description of `level` and `chg`.
+Left as they are: a panicking thread would show only in the `frames` column; `level` is a
+float sum whose last digit could depend on the thread partition. Not checked by the
+reviewer: any run above 30 frames per point, `scripts/check.sh`, the `is_valid` guard's
+removal (it would allocate a 2²⁸-entry table), the `pole` command (written after it).
+
+**Open**
+- What the decoder is handed instead of the 2⁻⁷ blocker's output, and the guess about the
+  cause tested (losses against |CFO|): ADR 0008, with `rxagc`.
+- The hand-off's width: 12 bits with a requirement on the radio's noise level, or 13.
+- `restart` / `rescale` in the fixed blocker if ADR 0008 keeps a control.
+- `rxper` still seeds per thread; `rxagc`'s per-frame seed is the pattern to move it to.
