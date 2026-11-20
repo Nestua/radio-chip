@@ -6,6 +6,7 @@
 //! - `level`: frames lost against the noise level at the largest gain (the lower edge of the
 //!   input level), near 10 % PER.
 //! - `dc`: the DC offsets of `rxfront agcdc` through the integer chain.
+//! - `pole`: what the DC blocker's pole costs 54 Mb/s frames with no offset to remove.
 //!
 //! The scene: a 1000-octet frame, a clock offset uniform in ±40 ppm that sets CFO and
 //! sample-clock offset at 5.8 GHz (as `rxper`), noise, then `channel::FastAttackAgc` (power
@@ -44,7 +45,7 @@ const OCTETS: usize = 1000;
 const JUMP_DEG: f64 = 30.0;
 /// Level of the frame at the ADC when the gain is the one that knows the frame (`rxper`'s).
 const KNOWN_DBFS: f64 = -12.0;
-/// Pole of both DC blockers, 2^(−7).
+/// Pole of both DC blockers unless a column says otherwise, 2^(−7).
 const DC_SHIFT: u32 = 7;
 
 fn threads() -> usize {
@@ -120,6 +121,8 @@ struct Column {
     known: bool,
     /// The decoder is handed the samples before the DC blocker (the acquisition is not).
     raw: bool,
+    /// The DC blocker's pole, 2^(−shift).
+    shift: u32,
 }
 
 const fn col(name: &'static str, chain: Chain) -> Column {
@@ -128,6 +131,7 @@ const fn col(name: &'static str, chain: Chain) -> Column {
         chain,
         known: false,
         raw: false,
+        shift: DC_SHIFT,
     }
 }
 
@@ -170,10 +174,6 @@ struct Outcome {
 fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outcome {
     let mut rng = Rng::new(mix(pt.scene, number));
     let full = f64::from(ADC_FULL_SCALE);
-    let cfg = RxConfig {
-        dc_shift: Some(DC_SHIFT),
-        ..RxConfig::new(FS)
-    };
     let cfg_float = RxConfig {
         dc_shift: None,
         ..RxConfig::new(FS)
@@ -236,11 +236,11 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
         to_adc(&x, gain)
     });
 
-    // One front per kind and ADC stream, made when a column first asks for it.
+    // One front per kind, ADC stream and pole, made when a column first asks for it.
     type FloatFront = (Vec<C>, Vec<C>, Option<(usize, f64)>);
     type IntFront = (Vec<IQ>, Vec<IQ>, Option<(usize, i64, f64)>);
-    let mut float_fronts: [Option<FloatFront>; 2] = [None, None];
-    let mut int_fronts: [Option<IntFront>; 2] = [None, None];
+    let mut float_fronts: Vec<((bool, u32), FloatFront)> = Vec::new();
+    let mut int_fronts: Vec<((bool, u32), IntFront)> = Vec::new();
     let empty: Vec<(i16, i16)> = Vec::new();
     let ok = columns
         .iter()
@@ -250,18 +250,22 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
             } else {
                 &adc_agc
             };
-            let slot = usize::from(c.known);
+            let key = (c.known, c.shift);
             match c.chain {
                 Chain::Float => {
-                    let (raw, blocked, acq) = float_fronts[slot].get_or_insert_with(|| {
+                    if float_fronts.iter().all(|f| f.0 != key) {
                         let raw: Vec<C> = adc
                             .iter()
                             .map(|s| (f64::from(s.0) / full, f64::from(s.1) / full))
                             .collect();
-                        let blocked = dc_block(&raw, DC_SHIFT);
+                        let blocked = dc_block(&raw, c.shift);
                         let acq = acquire(&blocked, 0, &cfg_float).map(|a| (a.fft_start, a.cfo_hz));
-                        (raw, blocked, acq)
-                    });
+                        float_fronts.push((key, (raw, blocked, acq)));
+                    }
+                    let Some((_, (raw, blocked, acq))) = float_fronts.iter().find(|f| f.0 == key)
+                    else {
+                        return false;
+                    };
                     acq.is_some_and(|(fft_start, cfo_hz)| {
                         let y = correct(if c.raw { raw } else { blocked }, cfo_hz, FS);
                         let start = Tracking::from_clock_offset(cfo_hz / CARRIER_HZ * 1e6);
@@ -269,7 +273,11 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
                     })
                 }
                 Chain::Int { out_bits, in_shift } => {
-                    let (raw, blocked, acq) = int_fronts[slot].get_or_insert_with(|| {
+                    if int_fronts.iter().all(|f| f.0 != key) {
+                        let cfg = RxConfig {
+                            dc_shift: Some(c.shift),
+                            ..RxConfig::new(FS)
+                        };
                         let raw: Vec<IQ> = adc
                             .iter()
                             .map(|s| (i64::from(s.0), i64::from(s.1)))
@@ -277,8 +285,12 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
                         let blocked = dc_block_fixed(adc, &cfg, &fx);
                         let acq = acquire_fixed(adc, &cfg, &fx)
                             .map(|a| (a.fft_start, a.cfo_phase, a.cfo_hz(&fx, FS)));
-                        (raw, blocked, acq)
-                    });
+                        int_fronts.push((key, (raw, blocked, acq)));
+                    }
+                    let Some((_, (raw, blocked, acq))) = int_fronts.iter().find(|f| f.0 == key)
+                    else {
+                        return false;
+                    };
                     acq.is_some_and(|(fft_start, cfo_phase, cfo_hz)| {
                         let fo = FixedOfdmConfig {
                             in_bits: out_bits,
@@ -691,6 +703,53 @@ fn dc(frames: usize) {
     }
 }
 
+/// What the DC blocker's own pole costs with no offset to remove: the no-DC rows of `dc` at
+/// 54 Mb/s (the same frames) with slower poles in both blockers. The integer blocker keeps
+/// F = 10 fractional bits, which a pole of 2^(−9) still leaves a bit above.
+fn pole(frames: usize) {
+    let with = |name: &'static str, chain: Chain, shift: u32| Column {
+        shift,
+        ..col(name, chain)
+    };
+    let columns = [
+        Column {
+            raw: true,
+            ..col("float raw", Chain::Float)
+        },
+        col("float 2^-7", Chain::Float),
+        with("float 2^-8", Chain::Float, 8),
+        with("float 2^-9", Chain::Float, 9),
+        with("float 2^-11", Chain::Float, 11),
+        col("int 13/2 2^-7", INT_13_2),
+        with("int 13/2 2^-8", INT_13_2, 8),
+        with("int 13/2 2^-9", INT_13_2, 9),
+    ];
+    let reference = 0;
+    const IDLE: f64 = -30.0;
+    preamble_text("pole", frames);
+    println!(
+        "# Noise at {IDLE} dBFS at the largest gain, AWGN, no DC offset; the frames of `dc`'s rows without\n\
+         # an offset. Columns: the pole of the DC blocker, 2^-k, in the acquisition's path and the\n\
+         # decoder's alike; 'float raw' is the blocker at 2^-7 before the acquisition only."
+    );
+    header(&columns, reference);
+    println!("\n## 54 Mb/s");
+    println!("{}", head_line("SNR", &columns));
+    for (si, snr) in [25.0, 30.0, 40.0, 60.0].into_iter().enumerate() {
+        let pt = Point {
+            scene: 4000 + si as u64,
+            rate: Rate::R54,
+            snr_db: snr,
+            ch: Channel::Awgn,
+            idle_dbfs: IDLE,
+            per_index_dbfs: none(),
+            before_dbfs: none(),
+        };
+        let t = run(&pt, &columns, reference, frames);
+        println!("{}", row_line(&format!("{snr} dB"), &t, reference));
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
@@ -699,8 +758,9 @@ fn main() -> ExitCode {
         "per" => per(n.unwrap_or(2000)),
         "level" => level(n.unwrap_or(2000)),
         "dc" => dc(n.unwrap_or(2000)),
+        "pole" => pole(n.unwrap_or(2000)),
         _ => {
-            eprintln!("usage: rxagc per|level|dc [frames]");
+            eprintln!("usage: rxagc per|level|dc|pole [frames]");
             return ExitCode::from(2);
         }
     }
