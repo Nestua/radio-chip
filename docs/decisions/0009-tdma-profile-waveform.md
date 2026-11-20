@@ -1,7 +1,9 @@
 # ADR 0009 — The long-range TDMA profile: the colleague's work as the lab and field prototype; the silicon's waveform stays 802.11's; two bands
 
-Status: **proposed** · 2026-11-20 · PHY architecture, licences and CE/RED (risk points): the
-founder decides. Does not amend ADR 0001, 0003 or 0004.
+Status: **accepted** · proposed 2026-11-20, accepted by the founder 2026-11-20 · PHY
+architecture, licences and CE/RED (risk points). Does not amend ADR 0001, 0003 or 0004.
+The text below is the proposal as it was put to the founder; "proposed decision" is the
+decision.
 Sources: `docs/reviews/2026-11-20-e021-waveform-comparison.md` (the comparison run); the
 review of `waverage/phy-sim` of 2026-11-18 (reproduced on the build server; its record is
 not yet in this repository, so its figures are this ADR's word until it is committed); two
