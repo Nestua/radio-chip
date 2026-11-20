@@ -1,0 +1,270 @@
+{
+ "experiment": "e021_wifi_waveforms.he10.awgn",
+ "date": "2026-11-19T22:49:49",
+ "git": "none",
+ "sionna": "2.2.0",
+ "torch": "2.15.0+cpu",
+ "profile": "reference",
+ "device": "cpu",
+ "threads": 2,
+ "seconds": 12288,
+ "configs": {
+  "he10|awgn": {
+   "waveform": "he10",
+   "channel": "awgn",
+   "numerology": {
+    "name": "he10",
+    "bandwidth_hz": 10000000.0,
+    "fft_size": 256,
+    "cp_len": 32,
+    "num_guard": [
+     7,
+     6
+    ],
+    "dc_null": true,
+    "num_ofdm_symbols": 14,
+    "pilot_ofdm_symbols": [
+     0
+    ],
+    "continual_pilot_subcarriers": [
+     5,
+     31,
+     73,
+     99,
+     142,
+     168,
+     210,
+     236
+    ],
+    "subcarrier_spacing_hz": 39062.5,
+    "symbol_duration_us": 28.799999999999997,
+    "frame_duration_us": 403.2,
+    "num_effective_subcarriers": 242,
+    "num_data_res": 3042
+   },
+   "preamble_s": 7.2e-05,
+   "cn0_offset_db": 69.75575400668582,
+   "curves": {
+    "qpsk-1/2": {
+     "points": [
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 250,
+       "codeword_errors": 250,
+       "bits": 760500,
+       "bit_errors": 144929,
+       "esno_db": -0.33064746203973217,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.1905706771860618,
+       "seconds": 68.58
+      },
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 250,
+       "codeword_errors": 250,
+       "bits": 760500,
+       "bit_errors": 118234,
+       "esno_db": 0.16935253796026783,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.15546877054569364,
+       "seconds": 70.67
+      },
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 250,
+       "codeword_errors": 250,
+       "bits": 760500,
+       "bit_errors": 62122,
+       "esno_db": 0.6693525379602678,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.08168573307034846,
+       "seconds": 68.8
+      },
+      {
+       "frames": 500,
+       "frame_errors": 144,
+       "codewords": 500,
+       "codeword_errors": 144,
+       "bits": 1521000,
+       "bit_errors": 3073,
+       "esno_db": 1.1693525379602678,
+       "fer": 0.288,
+       "bler": 0.288,
+       "ber": 0.002020381328073636,
+       "seconds": 136.8
+      },
+      {
+       "frames": 5000,
+       "frame_errors": 1,
+       "codewords": 5000,
+       "codeword_errors": 1,
+       "bits": 15210000,
+       "bit_errors": 3,
+       "esno_db": 1.6693525379602678,
+       "fer": 0.0002,
+       "bler": 0.0002,
+       "ber": 1.9723865877712032e-07,
+       "seconds": 1390.8
+      }
+     ],
+     "esno_db_at_fer10": 1.2420789094437499,
+     "esno_db_at_fer1": 1.400388793521781,
+     "net_rate_bps": 6401515.151515151,
+     "cn0_dbhz_at_fer1": 71.1561428002076
+    },
+    "16qam-1/2": {
+     "points": [
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 250,
+       "codeword_errors": 250,
+       "bits": 1521000,
+       "bit_errors": 243991,
+       "esno_db": 4.845008826427358,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.16041485864562788,
+       "seconds": 222.2
+      },
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 250,
+       "codeword_errors": 250,
+       "bits": 1521000,
+       "bit_errors": 196204,
+       "esno_db": 5.345008826427358,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.12899671268902038,
+       "seconds": 219.7
+      },
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 250,
+       "codeword_errors": 250,
+       "bits": 1521000,
+       "bit_errors": 94139,
+       "esno_db": 5.845008826427358,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.06189283366206443,
+       "seconds": 221.6
+      },
+      {
+       "frames": 250,
+       "frame_errors": 103,
+       "codewords": 250,
+       "codeword_errors": 103,
+       "bits": 1521000,
+       "bit_errors": 2126,
+       "esno_db": 6.345008826427358,
+       "fer": 0.412,
+       "bler": 0.412,
+       "ber": 0.0013977646285338592,
+       "seconds": 219.8
+      },
+      {
+       "frames": 5000,
+       "frame_errors": 0,
+       "codewords": 5000,
+       "codeword_errors": 0,
+       "bits": 30420000,
+       "bit_errors": 0,
+       "esno_db": 6.845008826427358,
+       "fer": 0.0,
+       "bler": 0.0,
+       "ber": 0.0,
+       "seconds": 4379.7
+      }
+     ],
+     "esno_db_at_fer10": 6.371479022615763,
+     "esno_db_at_fer1": 6.414527186598636,
+     "net_rate_bps": 12803030.303030303,
+     "cn0_dbhz_at_fer1": 76.17028119328445
+    },
+    "64qam-3/4": {
+     "points": [
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 500,
+       "codeword_errors": 500,
+       "bits": 3422000,
+       "bit_errors": 303058,
+       "esno_db": 14.078828193240938,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.08856165984804208,
+       "seconds": 214.8
+      },
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 500,
+       "codeword_errors": 500,
+       "bits": 3422000,
+       "bit_errors": 228157,
+       "esno_db": 14.578828193240938,
+       "fer": 1.0,
+       "bler": 1.0,
+       "ber": 0.06667358270017533,
+       "seconds": 215.8
+      },
+      {
+       "frames": 250,
+       "frame_errors": 250,
+       "codewords": 500,
+       "codeword_errors": 499,
+       "bits": 3422000,
+       "bit_errors": 111633,
+       "esno_db": 15.078828193240938,
+       "fer": 1.0,
+       "bler": 0.998,
+       "ber": 0.032622150789012275,
+       "seconds": 217.1
+      },
+      {
+       "frames": 500,
+       "frame_errors": 195,
+       "codewords": 1000,
+       "codeword_errors": 224,
+       "bits": 6844000,
+       "bit_errors": 7023,
+       "esno_db": 15.578828193240938,
+       "fer": 0.39,
+       "bler": 0.224,
+       "ber": 0.0010261542957334892,
+       "seconds": 432.5
+      },
+      {
+       "frames": 5000,
+       "frame_errors": 0,
+       "codewords": 10000,
+       "codeword_errors": 0,
+       "bits": 68440000,
+       "bit_errors": 0,
+       "esno_db": 16.078828193240938,
+       "fer": 0.0,
+       "bler": 0.0,
+       "ber": 0.0,
+       "seconds": 4206.7
+      }
+     ],
+     "esno_db_at_fer10": 15.60432475576843,
+     "esno_db_at_fer1": 15.647461431902293,
+     "net_rate_bps": 28804713.804713804,
+     "cn0_dbhz_at_fer1": 85.40321543858812
+    }
+   }
+  }
+ }
+}
