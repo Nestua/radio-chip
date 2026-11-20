@@ -14,15 +14,34 @@ an investor or a grant reviewer. Durations are estimates; stages overlap.
 | **R3** FPGA link | Zynq + AD9361, two nodes, Linux netdev; WebRTC and MAVLink unchanged on top; reference oscillator TCXO ≤ ±2 ppm (R0-08 G0) | Video from the drone over 10 km | 9–15 months |
 | **R4** Serial module | Own board for the drone, CE/RED | CE/RED passed, module in series production | 12–24 months |
 | **R5** Baseband ASIC | Digital chip: baseband + MAC + RISC-V, external RF transceiver; MPW on the IHP open PDK, then GF 22FDX | First silicon works with the external RF | 2–4 years |
-| **R6** Full SoC | Own RF on the die: Wi-Fi 6/6E, HaLow, TDMA | Serial open chip | 4+ years |
+| **R5b** One package | Our baseband die and a bought transceiver die in one package: one part for the customer, no analogue design of ours | The packaged part passes the R4 module's tests | after R5 |
+| **R6** Full SoC | RF on the die through a licensed RF block or a partner, not designed from nothing: Wi-Fi 6/6E, HaLow, TDMA; Bluetooth LE | Serial open chip | 4+ years |
 
 ## Profiles of the one core
 
-- **Long-range TDMA** — 802.11 OFDM PHY with 5/10/20 MHz channels plus our TDMA MAC with the dock
-  as master (the approach MikroTik NV2 and Ubiquiti airMAX proved at 10+ km). First user: Nestua.
+- **Long-range TDMA** — 802.11 OFDM PHY plus our TDMA MAC (the approach MikroTik NV2 and
+  Ubiquiti airMAX proved at 10+ km). First user: Nestua. Since ADR 0009: the 802.11ax format
+  with its midamble at 20 MHz and at half clock; video down in 5.2 and 2.4 GHz together,
+  command up in 2.4 GHz; built-in antennas, four on the drone and four per band on the dock;
+  the drone opens each frame period (frame-based access). The colleague's n10 radio is the
+  lab and field prototype on the way; a flight on it does not close R3.
 - **Wi-Fi 4 → 6/6E → 7** — Wi-Fi 4 is the stepping stone; the target is Wi-Fi 6/6E (OFDMA,
   1024-QAM, 6 GHz); Wi-Fi 7 after that.
 - **HaLow (802.11ah)** — the same OFDM, roughly 10× slower clocking, 863–868 MHz in the EU.
+
+## Parameters of the one design (the founder, 2026-11-20; ADR 0009)
+
+So that the long-range configuration is one setting of a general Wi-Fi design and not a
+chip of its own:
+
+| Question | Now | Later |
+|---|---|---|
+| Receive chains and bandwidth | a pool sized by chains × bandwidth, 160 MHz of samples: eight chains of 20 MHz, two of 80 MHz or one of 160 MHz, assigned at run time; more antennas than chains, with selection; one to four transmit chains | the pool's size is a parameter: 320 MHz is one more doubling, when a radio and a market ask for it |
+| Links | multi-link operation, built first for the TDMA profile's two bands | Wi-Fi 7's multi-link on the same machinery |
+| Decoders | the number of decoder cores is its own parameter (tens of megabits for the long-range link, over a gigabit for a two-stream 80 MHz client) | — |
+| Radio | a defined digital interface to the transceivers (serial: eight chains are too many pins), calibration from the digital side | R5b, then R6 |
+| Bluetooth | an arbiter in the MAC that shares the 2.4 GHz chain in time | digital Bluetooth LE after the Wi-Fi core; qualification and its patent licence with the lawyer |
+| Process | 130 nm (IHP) for test chips of blocks only | 40 nm or below for the eight-chain design; 22FDX, already the plan, fits it (first count in ADR 0009; ADR 0008 does the real one) |
 
 ## Budget envelope (lean path, rough orders)
 
