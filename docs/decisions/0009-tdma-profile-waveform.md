@@ -217,18 +217,30 @@ would double the table's rates.
 
 What this asks of the profile and the chip:
 
-- a receiver for up to four antennas per band, combining per subcarrier. The integer data
-  path of R0-09 already has the form: u = Σ Z_i·H_i*, g = Σ |H_i|² over the antennas, one
-  demapper and one decoder after the sum. Six on the dock is two chips or a wider build:
-  open;
-- two PHY instances at once, one per band, with the MAC splitting or duplicating the video
-  across them (what 802.11be calls multi-link operation, which the roadmap reaches
-  anyway) and 2.4 GHz shared in time between video down and command up;
+- **a pool of one to eight receive chains, assigned at run time** (the founder,
+  2026-11-20: the wider build, usable dynamically with one to eight antennas). A chain is
+  one antenna in one band; the pool is split between the links as the link needs — four and
+  four for two bands on the drone or on a dock with four patches per band, eight on one
+  band, one alone for a small device — and chains not in use are clock-gated, so power
+  follows the number in use. Combining is per subcarrier; the integer data path of R0-09
+  already has the form: u = Σ Z_i·H_i*, g = Σ |H_i|² over the chains of a link, one
+  demapper and one decoder after the sum. Eight is 802.11ax's own upper number of spatial
+  streams, so the Wi-Fi profiles use the same pool. Each doubling buys about 3 dB and
+  costs a doubling of the per-chain part (input, gain control, synchronisation, FFT,
+  channel estimate); the decoders do not multiply. A dock with six antennas in each of two
+  bands would need twelve chains: two chips, or four antennas per band;
+- **one to four transmit chains.** More do not raise the permitted power; four cover
+  diversity, the choice of the unshadowed antennas and two spatial streams;
+- **multi-link operation as the direction** (the founder, 2026-11-20): two PHY instances
+  at once, one per band, with the MAC splitting or duplicating the video across them —
+  802.11be's multi-link operation, which the roadmap reaches anyway, built first for the
+  TDMA profile — and 2.4 GHz shared in time between video down and command up;
 - rate adaptation over the whole ladder per band, with modes below QPSK 1/2;
 - the area and power targets of ADR 0008 counted for this configuration, not for one
-  antenna and one band;
-- on the prototype: four receive chains in each of two bands is four two-channel
-  transceivers at the dock (each has one receive synthesiser), not one.
+  antenna and one band; and the sample interface to the radios: eight chains of parallel
+  12-bit I and Q are too many pins, so a serial interface is part of that ADR;
+- on the prototype: eight receive chains in two bands are four two-channel transceivers
+  (each has one receive synthesiser), not one.
 
 ## Why not the alternatives
 
