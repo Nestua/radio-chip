@@ -247,6 +247,30 @@ What this asks of the profile and the chip:
 - on the prototype: eight receive chains in two bands are four two-channel transceivers
   (each has one receive synthesiser), not one.
 
+### So that the chip does not become a drone-only chip (the founder, 2026-11-20)
+
+General Wi-Fi chips come in three classes (makers' published figures, 2026-11-20): IoT
+parts with one chain and 20 MHz (Wi-Fi 6, 2.4 GHz or dual band, with Bluetooth LE, 40 nm
+class); client parts with two chains and 80 to 320 MHz (Wi-Fi 6 and 7, multi-link, 14 nm
+class); access-point parts with 4 to 16 streams. A drone link of eight chains at 20 MHz is
+none of these, so the configuration above must be one setting of a design that also has
+theirs:
+
+- **the number of chains and the widest channel are parameters of the build, and the pool
+  is sized by their product.** Eight chains of 20 MHz, two of 80 MHz and one of 160 MHz are
+  the same 160 MHz of samples; in the 802.11ax numerology they are eight transforms of 256
+  points, two of 1024 or one of 2048. If the data path is built around that product, the
+  drone's chip and a two-chain 80 MHz client chip (the class of the part this project set
+  out to replace) are one design. To be settled in ADR 0008;
+- what does not scale that way is the decoder: a two-stream 80 MHz client carries over a
+  gigabit per second at the top rates, the long-range link tens of megabits. The number of
+  decoder cores is its own parameter;
+- the Wi-Fi obligations stay on the list whatever the TDMA profile needs: 40 and 80 MHz,
+  the higher modulations, OFDMA and multi-user MIMO as a client, the legacy 2.4 GHz modes;
+- named, not solved: every IoT and client part on the market is one chip with its radio
+  and with Bluetooth; ours is a baseband with an external radio and no Bluetooth (roadmap,
+  R5).
+
 ## Why not the alternatives
 
 - **n10 as the chip's TDMA waveform, as it is.** Equal quality in the operating region; a
