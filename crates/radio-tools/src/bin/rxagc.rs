@@ -704,7 +704,8 @@ fn dc(frames: usize) {
 }
 
 /// What the DC blocker's own pole costs with no offset to remove: the no-DC rows of `dc` at
-/// 54 Mb/s (the same frames) with slower poles in both blockers. The integer blocker keeps
+/// 54 Mb/s (the same frames), then points near 10 % PER and through TGn D, with slower poles
+/// in both blockers. The integer blocker keeps
 /// F = 10 fractional bits, which a pole of 2^(−9) still leaves a bit above.
 fn pole(frames: usize) {
     let with = |name: &'static str, chain: Chain, shift: u32| Column {
@@ -733,7 +734,7 @@ fn pole(frames: usize) {
          # decoder's alike; 'float raw' is the blocker at 2^-7 before the acquisition only."
     );
     header(&columns, reference);
-    println!("\n## 54 Mb/s");
+    println!("\n## 54 Mb/s, AWGN: the frames of `dc`");
     println!("{}", head_line("SNR", &columns));
     for (si, snr) in [25.0, 30.0, 40.0, 60.0].into_iter().enumerate() {
         let pt = Point {
@@ -747,6 +748,36 @@ fn pole(frames: usize) {
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(&format!("{snr} dB"), &t, reference));
+    }
+    // Near the sensitivity and through a fading channel, where `per` and `level` stand
+    // above `rxper fixed`, whose decoder is handed the samples before the blocker.
+    println!("\n## Near 10 % PER and through TGn D (frames of their own)");
+    println!("{}", head_line("channel, rate, SNR", &columns));
+    let d = Channel::Tgn(TgnModel::D);
+    let rows: [(&str, Channel, Rate, f64); 10] = [
+        ("AWGN 24 Mb/s 11.5 dB", Channel::Awgn, Rate::R24, 11.5),
+        ("AWGN 36 Mb/s 14.5 dB", Channel::Awgn, Rate::R36, 14.5),
+        ("AWGN 48 Mb/s 18.5 dB", Channel::Awgn, Rate::R48, 18.5),
+        ("AWGN 54 Mb/s 20.0 dB", Channel::Awgn, Rate::R54, 20.0),
+        ("TGn D  6 Mb/s  8.5 dB", d, Rate::R6, 8.5),
+        ("TGn D 24 Mb/s 17.0 dB", d, Rate::R24, 17.0),
+        ("TGn D 36 Mb/s 21.5 dB", d, Rate::R36, 21.5),
+        ("TGn D 54 Mb/s 26.5 dB", d, Rate::R54, 26.5),
+        ("TGn D 54 Mb/s 40.0 dB", d, Rate::R54, 40.0),
+        ("TGn D 54 Mb/s 60.0 dB", d, Rate::R54, 60.0),
+    ];
+    for (k, (name, ch, rate, snr)) in rows.into_iter().enumerate() {
+        let pt = Point {
+            scene: 5000 + k as u64,
+            rate,
+            snr_db: snr,
+            ch,
+            idle_dbfs: IDLE,
+            per_index_dbfs: none(),
+            before_dbfs: none(),
+        };
+        let t = run(&pt, &columns, reference, frames);
+        println!("{}", row_line(name, &t, reference));
     }
 }
 

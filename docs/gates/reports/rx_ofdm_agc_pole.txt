@@ -1,0 +1,45 @@
+# rxagc pole: 2000 frames per point of 1000 octets, a new PSDU per frame, clock offset
+# uniform in ±40 ppm (CFO and sample clock, carrier 5.8 GHz), channel::FastAttackAgc (power
+# over 16 samples, lock left on a large overload, 2 detector clocks per sample, lock level
+# −10 dBFS, largest gain 73 dB), the gain held from the first lock inside the packet
+# (assumed), phase jump ±30° per gain change (assumed), 12-bit ADC.
+# Chains on the ADC's samples:
+#   float     = float DC blocker (pole 2^-7), float front, rx_ofdm (8 bits, clip 3);
+#   int O/s   = dc_block_fixed (pole 2^-7), RxFrontFixed, correct_fixed to O bits,
+#               decode_ppdu_fixed with in_bits O and in_shift s, tracker started from the
+#               CFO word (its conversion to ppm is the one float between the ADC and
+#               the PSDU); the int columns of a row share one acquisition;
+#   known     = the same chain behind a gain that knows the frame (it at -12 dBFS at
+#               the ADC, no gain control, no DC offset);
+#   raw       = the decoder handed the samples before the DC blocker.
+# A frame's random stream depends on the row and the frame's number only.
+# Noise at -30 dBFS at the largest gain, AWGN, no DC offset; the frames of `dc`'s rows without
+# an offset. Columns: the pole of the DC blocker, 2^-k, in the acquisition's path and the
+# decoder's alike; 'float raw' is the blocker at 2^-7 before the acquisition only.
+# Each cell: frames lost (not decoded to the PSDU), then +a−b: lost by this column alone and
+# by the column 'float raw' alone (the same frames). A lost frame is one not acquired, acquired
+# wrongly (the first acquisition of the stream is the only one tried) or not decoded.
+# level: signal and noise of the frame's span at the settled gain, before the ADC clips and
+# without the DC offset, dBFS, the mean of the powers over the frames. chg: gain changes per
+# frame up to the hold (with no lock inside the packet: all of the stream's). held: frames in
+# which the gain would have changed again before the packet's end without the hold.
+
+## 54 Mb/s, AWGN: the frames of `dc`
+# SNR                                          frames  level   chg  held        float raw       float 2^-7       float 2^-8       float 2^-9      float 2^-11    int 13/2 2^-7    int 13/2 2^-8    int 13/2 2^-9
+  25 dB                                          2000  -10.0  1.00    67                0         32 +32−0           2 +2−0           0 +0−0           0 +0−0         31 +31−0           3 +3−0           0 +0−0
+  30 dB                                          2000  -10.0  2.98    80                0         16 +16−0           1 +1−0           0 +0−0           0 +0−0         16 +16−0           1 +1−0           0 +0−0
+  40 dB                                          2000  -10.0  6.47    52                0         12 +12−0           0 +0−0           0 +0−0           0 +0−0         12 +12−0           0 +0−0           0 +0−0
+  60 dB                                          2000  -10.0 10.48    62                0           8 +8−0           1 +1−0           0 +0−0           0 +0−0           5 +5−0           1 +1−0           0 +0−0
+
+## Near 10 % PER and through TGn D (frames of their own)
+# channel, rate, SNR                           frames  level   chg  held        float raw       float 2^-7       float 2^-8       float 2^-9      float 2^-11    int 13/2 2^-7    int 13/2 2^-8    int 13/2 2^-9
+  AWGN 24 Mb/s 11.5 dB                           2000  -18.2  0.00     0              158       171 +24−11        164 +14−8         159 +9−8         161 +7−4       169 +21−10        166 +17−9       161 +13−10
+  AWGN 36 Mb/s 14.5 dB                           2000  -15.4  0.00     0              214       251 +48−11        227 +22−9        225 +19−8         212 +7−9       252 +54−16       234 +34−14        233 +28−9
+  AWGN 48 Mb/s 18.5 dB                           2000  -11.4  0.00     0              213      326 +128−15       283 +83−13       241 +43−15       221 +26−18      334 +142−21       273 +79−19       255 +60−18
+  AWGN 54 Mb/s 20.0 dB                           2000  -10.0  0.00    11              167      403 +246−10       278 +119−8        200 +40−7       172 +18−13      412 +257−12      287 +132−12       202 +48−13
+  TGn D  6 Mb/s  8.5 dB                          2000  -20.8  0.00     0              182         183 +3−2         182 +2−2         182 +1−1         183 +2−1         183 +3−2         181 +2−3         183 +2−1
+  TGn D 24 Mb/s 17.0 dB                          2000  -13.1  0.06     9              208        216 +12−4         208 +4−4         209 +2−1         207 +2−3        216 +13−5         212 +7−3         211 +4−1
+  TGn D 36 Mb/s 21.5 dB                          2000  -10.6  0.59    60              184        281 +98−1        225 +42−1        197 +13−0         187 +4−1       284 +101−1        222 +40−2        194 +12−2
+  TGn D 54 Mb/s 26.5 dB                          2000  -10.0  1.84    72              226       511 +292−7       415 +197−8        304 +86−8        259 +39−6       517 +299−8      416 +201−11        310 +91−7
+  TGn D 54 Mb/s 40.0 dB                          2000  -10.0  6.74    80                0       251 +251−0       153 +153−0         55 +55−0         14 +14−0       251 +251−0       152 +152−0         61 +61−0
+  TGn D 54 Mb/s 60.0 dB                          2000  -10.0 11.18    89                0       267 +267−0       175 +175−0         67 +67−0         29 +29−0       267 +267−0       177 +177−0         68 +68−0
