@@ -33,7 +33,7 @@ use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{acquire, correct, RxConfig};
 use radio_phy::rx_front_fixed::FixedRxConfig;
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig};
+use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
 
@@ -165,16 +165,26 @@ fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<
                 y = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
             }
             for (k, r) in receivers.iter().enumerate() {
-                let start = if r.hint {
-                    Tracking::from_clock_offset(a.cfo_hz / CARRIER_HZ * 1e6)
-                } else {
-                    Tracking::default()
-                };
+                let ppm = a.cfo_hz / CARRIER_HZ * 1e6;
                 let ok = match (&r.fixed, &z) {
-                    (Some(fx), Some(z)) => decode_ppdu_fixed(z, a.fft_start, &r.cfg, fx, start)
-                        .is_ok_and(|d| d.psdu == psdu),
-                    _ => decode_ppdu_from(&y, a.fft_start, &r.cfg, start)
-                        .is_ok_and(|d| d.psdu == psdu),
+                    (Some(fx), Some(z)) => {
+                        let start = if r.hint {
+                            FixedTracking::from_clock_offset(ppm, fx)
+                        } else {
+                            FixedTracking::unknown(fx)
+                        };
+                        decode_ppdu_fixed(z, a.fft_start, &r.cfg, fx, start)
+                            .is_ok_and(|d| d.psdu == psdu)
+                    }
+                    _ => {
+                        let start = if r.hint {
+                            Tracking::from_clock_offset(ppm)
+                        } else {
+                            Tracking::default()
+                        };
+                        decode_ppdu_from(&y, a.fft_start, &r.cfg, start)
+                            .is_ok_and(|d| d.psdu == psdu)
+                    }
                 };
                 lost[k] += usize::from(!ok);
             }
@@ -331,7 +341,12 @@ fn soft_formats(tag: &str, formats: &[(&'static str, i32, f64)], frames: usize) 
 /// The width sweep of the integer data path: frames lost of the same frames near 10 % PER,
 /// the float receiver first, then the default widths, then one width changed at a time.
 fn widths(frames: usize) {
-    let d = FixedOfdmConfig::default();
+    // The base of the sweep keeps the rotator's phase truncated (the default before this
+    // sweep chose the rounding): the columns "round" show what the rounding changes.
+    let d = FixedOfdmConfig {
+        rot_round: false,
+        ..FixedOfdmConfig::default()
+    };
     let front = |f: FixedRxConfig| FixedOfdmConfig { front: f, ..d };
     let variants: Vec<(&'static str, FixedOfdmConfig)> = vec![
         (
@@ -343,6 +358,10 @@ fn widths(frames: usize) {
                 prod_bits: 40,
                 kappa_bits: 20,
                 scale_frac: 8,
+                rate_frac: 20,
+                track_bits: 30,
+                coef_frac: 24,
+                var_frac: 16,
                 front: FixedRxConfig {
                     cordic_iters: 24,
                     cordic_bits: 30,
@@ -376,6 +395,10 @@ fn widths(frames: usize) {
                 prod_bits: 40,
                 kappa_bits: 20,
                 scale_frac: 8,
+                rate_frac: 20,
+                track_bits: 30,
+                coef_frac: 24,
+                var_frac: 16,
                 ..d
             },
         ),
@@ -405,6 +428,37 @@ fn widths(frames: usize) {
         ),
         ("F8", FixedOfdmConfig { scale_frac: 8, ..d }),
         ("default", d),
+        (
+            "round",
+            FixedOfdmConfig {
+                rot_round: true,
+                ..d
+            },
+        ),
+        (
+            "round L8",
+            FixedOfdmConfig {
+                rot_round: true,
+                front: FixedRxConfig {
+                    nco_lut_bits: 8,
+                    ..d.front
+                },
+                ..d
+            },
+        ),
+        ("R6", FixedOfdmConfig { rate_frac: 6, ..d }),
+        ("R8", FixedOfdmConfig { rate_frac: 8, ..d }),
+        ("M8", FixedOfdmConfig { track_bits: 8, ..d }),
+        (
+            "M12",
+            FixedOfdmConfig {
+                track_bits: 12,
+                ..d
+            },
+        ),
+        ("K8", FixedOfdmConfig { coef_frac: 8, ..d }),
+        ("K12", FixedOfdmConfig { coef_frac: 12, ..d }),
+        ("V4", FixedOfdmConfig { var_frac: 4, ..d }),
         (
             "W14 s0",
             FixedOfdmConfig {
@@ -517,7 +571,7 @@ fn widths(frames: usize) {
     println!(
         "\n## widths of the integer data path: frames lost of {frames} (rounded up), 1000 octets, the same frames for every column,\n\
          # 12-bit samples at {ADC_LEVEL_DBFS} dBFS, eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.\n\
-         # default = W16 s2 T12 U16 C10 F4, rotator L9 Q11, CORDIC N16; each other column changes what its name says;\n\
+         # default = W16 s2 T12 U16 C10 F4, rotator L9 Q11 (truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says (round: half a table address added to the rotation phase);\n\
          # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
          # columns: {}",
         rx.iter().map(|r| r.name).collect::<Vec<_>>().join(" | ")
