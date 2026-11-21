@@ -80,7 +80,7 @@ ltf_corr: vectors/ltf_corr.txt
 	rm -rf obj_dir/ltf_corr && mkdir -p obj_dir/ltf_corr
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/ltf_corr --top-module ltf_corr \
 		$(SRC_ltf_corr) tb/tb_ltf_corr.cpp -o sim_ltf_corr
-	./obj_dir/ltf_corr/sim_ltf_corr vectors/ltf_corr.txt
+	./obj_dir/ltf_corr/sim_ltf_corr vectors/ltf_corr.txt +verilator+rand+reset+2
 
 cordic: vectors/cordic.txt
 	rm -rf obj_dir/cordic && mkdir -p obj_dir/cordic
