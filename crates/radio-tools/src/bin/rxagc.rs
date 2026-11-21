@@ -10,6 +10,7 @@
 //! - `cfo`: that cost against the size of the clock offset (ADR 0008).
 //! - `cand`: what the decoder could be handed instead, under the DC offsets of `dc` (ADR 0008).
 //! - `hold`: the gain held by the control's first lock or by the receiver's acquisition (ADR 0008).
+//! - `edge`: the 13 / 1 hand-off under an offset, small clock offsets, the acquisition's share.
 //!
 //! The scene: a 1000-octet frame, a clock offset uniform in ±40 ppm that sets CFO and
 //! sample-clock offset at 5.8 GHz (as `rxper`), noise, then `channel::FastAttackAgc` (power
@@ -136,6 +137,9 @@ struct Column {
     /// The decoder is handed the samples before the DC blocker less the offset estimated from
     /// the two long training symbols (`ltf_dc_offset`, `ltf_dc_offset_fixed`).
     ltf: bool,
+    /// The column counts the acquisition alone: lost is a frame with none, or with an FFT
+    /// start more than 16 samples from the frame's own T1.
+    acq_only: bool,
 }
 
 const fn col(name: &'static str, chain: Chain) -> Column {
@@ -146,6 +150,7 @@ const fn col(name: &'static str, chain: Chain) -> Column {
         raw: false,
         shift: DC_SHIFT,
         ltf: false,
+        acq_only: false,
     }
 }
 
@@ -285,6 +290,10 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
                     else {
                         return false;
                     };
+                    if c.acq_only {
+                        return acq
+                            .is_some_and(|(fft_start, _)| fft_start.abs_diff(lead + 192) <= 16);
+                    }
                     acq.is_some_and(|(fft_start, cfo_hz)| {
                         let less: Vec<C>;
                         let handed = if c.ltf {
@@ -320,6 +329,10 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
                     else {
                         return false;
                     };
+                    if c.acq_only {
+                        return acq
+                            .is_some_and(|(fft_start, _, _)| fft_start.abs_diff(lead + 192) <= 16);
+                    }
                     acq.is_some_and(|(fft_start, cfo_phase, cfo_hz)| {
                         let fo = FixedOfdmConfig {
                             in_bits: out_bits,
@@ -1064,6 +1077,179 @@ fn hold(frames: usize) {
     }
 }
 
+/// What `cand` left out (ADR 0008's review): the 13 / 1 hand-off under an offset and at the
+/// lower edge, the clock offsets below the estimate's guard, and how many of the frames lost
+/// were lost by the acquisition.
+fn edge(frames: usize) {
+    let columns = [
+        Column {
+            raw: true,
+            ..col("float raw", Chain::Float)
+        },
+        col("float 2^-7", Chain::Float),
+        Column {
+            ltf: true,
+            ..col("float ltf", Chain::Float)
+        },
+        Column {
+            ltf: true,
+            ..col("int 13/1 ltf", INT_13_1)
+        },
+        Column {
+            acq_only: true,
+            ..col("float acq", Chain::Float)
+        },
+        Column {
+            acq_only: true,
+            ..col("int acq", INT_13_1)
+        },
+    ];
+    let reference = 2;
+    preamble_text("edge", frames);
+    println!(
+        "# DC per gain state as in `dc`; the blocker (in every column's acquisition) is told nothing.\n\
+         #   2^-7 = the decoder handed the blocker's output (the chain as it is);\n\
+         #   ltf  = the decoder handed the samples before the blocker less the offset estimated\n\
+         #          from the two long training symbols;\n\
+         #   acq  = the acquisition alone: lost is a frame with none, or with an FFT start more\n\
+         #          than 16 samples from the frame's own T1 (the +a−b of these two columns\n\
+         #          compare unlike things and mean nothing)."
+    );
+    header(&columns, reference);
+    // (title, channel, rate, SNR, scene, noise at the largest gain, clock offset's band)
+    type Row = (
+        &'static str,
+        Channel,
+        Rate,
+        f64,
+        u64,
+        f64,
+        Option<(f64, f64)>,
+    );
+    let a = Channel::Awgn;
+    type Case = (&'static str, f64, f64);
+    let sections: [(&str, Vec<Row>, Vec<Case>); 3] = [
+        (
+            "Where `cand` lost frames under an offset (its frames)",
+            vec![
+                ("AWGN 54 Mb/s 25 dB", a, Rate::R54, 25.0, 4000, -30.0, None),
+                ("AWGN 54 Mb/s 20 dB", a, Rate::R54, 20.0, 5003, -30.0, None),
+                ("AWGN 54 Mb/s 40 dB", a, Rate::R54, 40.0, 4002, -30.0, None),
+            ],
+            vec![
+                ("no DC", none(), none()),
+                ("per index −30 dBFS", -30.0, none()),
+                ("per index −20 dBFS", -20.0, none()),
+                ("before the gain −20 dBFS", none(), -20.0),
+                ("before the gain −10 dBFS", none(), -10.0),
+            ],
+        ),
+        (
+            "Clock offset 0 to 2 ppm: at and below the estimate's guard (0.54 ppm)",
+            vec![
+                (
+                    "AWGN 54 Mb/s 40 dB",
+                    a,
+                    Rate::R54,
+                    40.0,
+                    9000,
+                    -30.0,
+                    Some((0.0, 2.0)),
+                ),
+                (
+                    "AWGN 54 Mb/s 20 dB",
+                    a,
+                    Rate::R54,
+                    20.0,
+                    9001,
+                    -30.0,
+                    Some((0.0, 2.0)),
+                ),
+                (
+                    "AWGN 6 Mb/s 3.5 dB",
+                    a,
+                    Rate::R6,
+                    3.5,
+                    9002,
+                    -30.0,
+                    Some((0.0, 2.0)),
+                ),
+            ],
+            vec![
+                ("no DC", none(), none()),
+                ("per index −30 dBFS", -30.0, none()),
+                ("per index −20 dBFS", -20.0, none()),
+            ],
+        ),
+        (
+            "The lower edge of the level (`level`'s frames)",
+            vec![
+                (
+                    "AWGN 54 Mb/s 20 dB, noise −48 dBFS",
+                    a,
+                    Rate::R54,
+                    20.0,
+                    3002,
+                    -48.0,
+                    None,
+                ),
+                (
+                    "AWGN 54 Mb/s 20 dB, noise −54 dBFS",
+                    a,
+                    Rate::R54,
+                    20.0,
+                    3002,
+                    -54.0,
+                    None,
+                ),
+                (
+                    "AWGN 6 Mb/s 3.5 dB, noise −48 dBFS",
+                    a,
+                    Rate::R6,
+                    3.5,
+                    3000,
+                    -48.0,
+                    None,
+                ),
+                (
+                    "AWGN 6 Mb/s 3.5 dB, noise −54 dBFS",
+                    a,
+                    Rate::R6,
+                    3.5,
+                    3000,
+                    -54.0,
+                    None,
+                ),
+            ],
+            vec![
+                ("no DC", none(), none()),
+                ("per index −50 dBFS", -50.0, none()),
+            ],
+        ),
+    ];
+    for (title, rows, cases) in sections {
+        println!("\n## {title}");
+        println!("{}", head_line("point, DC offset", &columns));
+        for (name, ch, rate, snr, scene, idle, band) in rows {
+            for &(case, per_index, before) in &cases {
+                let pt = Point {
+                    scene,
+                    rate,
+                    snr_db: snr,
+                    ch,
+                    idle_dbfs: idle,
+                    per_index_dbfs: per_index,
+                    before_dbfs: before,
+                    ppm_band: band,
+                    hold_after: None,
+                };
+                let t = run(&pt, &columns, reference, frames);
+                println!("{}", row_line(&format!("{name}, {case}"), &t, reference));
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
@@ -1076,8 +1262,9 @@ fn main() -> ExitCode {
         "cfo" => cfo(n.unwrap_or(2000)),
         "cand" => cand(n.unwrap_or(2000)),
         "hold" => hold(n.unwrap_or(2000)),
+        "edge" => edge(n.unwrap_or(2000)),
         _ => {
-            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold [frames]");
+            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold|edge [frames]");
             return ExitCode::from(2);
         }
     }
