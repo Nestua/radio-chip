@@ -2,7 +2,7 @@
 # uniform in ±40 ppm (CFO and sample clock, carrier 5.8 GHz), channel::FastAttackAgc (power
 # over 16 samples, lock left on a large overload, 2 detector clocks per sample, lock level
 # −10 dBFS, largest gain 73 dB), the gain held from the first lock inside the packet
-# (assumed), phase jump ±30° per gain change (assumed), 12-bit ADC.
+# (assumed; `hold` has rows that hold it later), phase jump ±30° per gain change (assumed), 12-bit ADC.
 # Chains on the ADC's samples:
 #   float     = float DC blocker (pole 2^-7), float front, rx_ofdm (8 bits, clip 3);
 #   int O/s   = dc_block_fixed (pole 2^-7), RxFrontFixed, correct_fixed to O bits,
@@ -16,8 +16,11 @@
 # Noise at -30 dBFS at the largest gain, no DC offset. Rows 'lock': the gain held from the
 # control's first lock inside the packet (as everywhere else). Rows 'declared': held from
 # 479 samples after the packet's first, the latest the acquisition is declared (T1 + 223
-# + 64), or from the first lock if that is later: until then the control is free. The
-# two rows of a point are the same frames.
+# + 64), or from the first lock if that is later: until then the control is free. That
+# sample is fixed by the frame's position, not taken from the chain's own acquisition,
+# and the hold lasts to the stream's end whether or not the frame was acquired. The
+# two rows of a point are the same frames; they differ only in frames whose gain
+# changes between the first lock and that sample (a handful per row).
 #   2^-7 = the decoder handed the blocker's output (the chain as it is);
 #   ltf  = the decoder handed the samples before the blocker less the offset estimated
 #          from the two long training symbols.
