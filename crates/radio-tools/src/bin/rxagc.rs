@@ -298,6 +298,7 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
             lock_hold: 0,
             at_max: true,
             hold: Hold::Front { delay: 0 },
+            clip_release: false,
         };
         // The loop's phase jumps are drawn apart from the frame's and the other columns'.
         keep(&st, agc, &front, mix(mix(pt.scene, number), 0x6a75_6d70)).ok
@@ -465,7 +466,16 @@ struct Keeper {
     at_max: bool,
     /// How the hold is driven.
     hold: Hold,
+    /// A candidate, in this tool only (not in the model, not in ADR 0008): the front's hold
+    /// stops acting on the control once [`CLIP_COUNT`] of the last [`CLIP_WINDOW`] ADC
+    /// samples under it sit on a rail, until the front declares again or its hold falls.
+    clip_release: bool,
 }
+
+/// The candidate release of [`Keeper::clip_release`]: an ADC that clips this much is not
+/// receiving the packet the hold was raised for.
+const CLIP_WINDOW: usize = 4;
+const CLIP_COUNT: usize = 2;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hold {
@@ -539,6 +549,10 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
     );
     // The front's hold after each sample not yet acted on, oldest first.
     let mut line: VecDeque<bool> = VecDeque::new();
+    // The candidate release: which of the last ADC samples sat on a rail, and whether the
+    // hold in force has been given up for it.
+    let mut rails: VecDeque<bool> = VecDeque::new();
+    let mut given_up = false;
     let (mut gain, mut phase) = (f64::NAN, 0.0);
     let mut z: Vec<IQ> = Vec::new();
     let (mut word, mut tag) = (0i64, 0u8);
@@ -572,6 +586,12 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
         };
         let got = hand.push(sample, usize::MAX);
         out.declared += usize::from(got.acquired.is_some());
+        let rail = |v: i16| i32::from(v) <= -ADC_FULL_SCALE || i32::from(v) >= ADC_FULL_SCALE - 1;
+        rails.push_back(rail(sample.0) || rail(sample.1));
+        if rails.len() > CLIP_WINDOW {
+            rails.pop_front();
+        }
+        given_up &= got.acquired.is_none();
         for beat in got.beats {
             match beat {
                 HandoffBeat::Sample { z: v, first } => {
@@ -605,7 +625,11 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
             hand.signal(tag, verdict);
         }
         if delay.is_some() {
-            line.push_back(hand.hold());
+            let hold = hand.hold();
+            given_up &= hold;
+            given_up |=
+                k.clip_release && hold && rails.iter().filter(|r| **r).count() >= CLIP_COUNT;
+            line.push_back(hold && !given_up);
         }
     }
     out
@@ -684,6 +708,7 @@ fn hold_loop(frames: usize) {
         lock_hold,
         at_max,
         hold,
+        clip_release: false,
     };
     let front = Hold::Front { delay: 0 };
     let keepers = [
@@ -695,6 +720,10 @@ fn hold_loop(frames: usize) {
         keeper("nothing", 0, true, Hold::Free),
         keeper("t<max + front +40", 512, false, Hold::Front { delay: 40 }),
         keeper("t<max + front +400", 512, false, Hold::Front { delay: 400 }),
+        Keeper {
+            clip_release: true,
+            ..keeper("front, clip release", 0, true, front)
+        },
     ];
     const IDLE: f64 = -30.0;
     const LOUD: f64 = -5.0;
@@ -719,7 +748,11 @@ fn hold_loop(frames: usize) {
          #                      (a lock on noise is left at the first overload);\n\
          #   front alone      = the front's hold without any timer (decision 2 as amended);\n\
          #   timer<max alone  = that timer and no hold;   nothing = neither;\n\
-         #   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and 20 µs) later.\n\
+         #   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and 20 µs) later, at\n\
+         #                      both its edges: the control stays held that long past the hold's end;\n\
+         #   front, clip release = a candidate that is in this tool only (not in the model, not in ADR 0008): front\n\
+         #                      alone, and the hold stops acting on the control once {CLIP_COUNT} of the last {CLIP_WINDOW} ADC samples\n\
+         #                      under it sit on a rail, until the front declares again or its hold falls.\n\
          # A released control returns to the largest gain and searches (an assumption).\n\
          # Rows 'preamble +': the frame's two training fields alone (320 samples, nothing after them)\n\
          # are sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise.\n\
@@ -727,7 +760,8 @@ fn hold_loop(frames: usize) {
          # frame counted 320 samples after its end.\n\
          # Rows 'noise {LOUD}': the noise at {LOUD} dBFS at the largest gain, above the lock level: the\n\
          # control locks on it below the largest gain.\n\
-         # Rows 'DC': an offset of that size at every gain, its direction per gain index (channel::GainDc).\n\
+         # Rows 'DC per index -20': an offset of -20 dBFS at every gain, its direction per gain index; rows 'DC before\n\
+         # gain -10': an offset of -10 dBFS at the largest gain that falls with the gain, one direction (channel::GainDc).\n\
          # Each cell: frames lost, +a−b against 'from the lock' (lost by this column alone, by that one\n\
          # alone), then acquisitions declared / streams stopped on a failed SIGNAL / streams ended by a new\n\
          # declaration or an overrun of the history / frames whose gain changed after the short training\n\
@@ -786,8 +820,8 @@ fn hold_loop(frames: usize) {
             LOUD,
         ),
     ];
-    // The offsets of `dc` on the frames of rows 2, 11 and 13: (name, row, per index, before
-    // the gain at the largest).
+    // The offsets of `dc` on the frames of the 2nd, 11th and 13th rows: (name, index of the
+    // row in `points`, per index, before the gain at the largest).
     let offsets: [(&str, usize, f64, f64); 6] = [
         ("DC per index -20: AWGN 54 Mb/s 30 dB", 1, -20.0, none()),
         ("DC per index -20: preamble + 54 Mb/s", 10, -20.0, none()),
@@ -902,7 +936,9 @@ fn header(columns: &[Column], reference: usize) {
     println!(
         "# Each cell: frames lost (not decoded to the PSDU), then +a−b: lost by this column alone and\n\
          # by the column '{}' alone (the same frames). A lost frame is one not acquired, acquired\n\
-         # wrongly (the first acquisition of the stream is the only one tried) or not decoded.\n\
+         # wrongly (the first acquisition of the stream is the only one tried; a column 'stream' tries\n\
+         # every one) or not decoded. level, chg and held describe the assumed hold of the other\n\
+         # columns, not the loop of a column 'stream', which also ignores a row's own hold.\n\
          # level: signal and noise of the frame's span at the settled gain, before the ADC clips and\n\
          # without the DC offset, dBFS, the mean of the powers over the frames. chg: gain changes per\n\
          # frame up to the hold (with no lock inside the packet: all of the stream's). held: frames in\n\
