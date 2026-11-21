@@ -18,7 +18,7 @@ use radio_phy::channel::{awgn, fft, mean_power, Rng, Sample};
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
-use radio_phy::rx_front_fixed::{FixedRxConfig, IQ};
+use radio_phy::rx_front_fixed::{FixedRxConfig, IQ, Y_BITS};
 use radio_phy::rx_ofdm::{
     decode_ppdu, decode_ppdu_from, equalise, estimate_channel, soft_bits, RxOfdmConfig, Tracking,
 };
@@ -530,16 +530,16 @@ fn wide_words_with_a_slope_on_unequal_pilots_and_with_the_loops_off() {
 
 #[test]
 fn samples_outside_the_input_width_saturate() {
-    // A stream that overdrives the 12-bit input gives exactly what the same stream clamped
-    // to 12 bits gives; and the FFT's own word clamps what does not fit it.
+    // A stream that overdrives the 13-bit input gives exactly what the same stream clamped
+    // to 13 bits gives; and the FFT's own word clamps what does not fit it.
     let fx = FixedOfdmConfig::default();
     let cfg = six_bits();
     let mut rng = Rng::new(0x0f1d);
     let x = at_level(&frame(&psdu(40, &mut rng), Rate::R36), -6.0);
-    let hot = to_fixed(&x, 2048.0, 16);
+    let hot = to_fixed(&x, 4096.0, 16);
     let clamped: Vec<IQ> = hot
         .iter()
-        .map(|v| (v.0.clamp(-2048, 2047), v.1.clamp(-2048, 2047)))
+        .map(|v| (v.0.clamp(-4096, 4095), v.1.clamp(-4096, 4095)))
         .collect();
     assert!(hot != clamped, "nothing was overdriven");
     let a = all_soft(&hot, 188, Rate::R36, &cfg, &fx, unknown(&fx));
@@ -674,12 +674,14 @@ fn the_default_words_bit_for_bit() {
     }
     assert_eq!(
         got,
+        // Since ADR 0008 with the input at 13 bits and one fractional bit (the earlier values are in
+        // `docs/gates/rx_ofdm.md`, 2026-11-21).
         [
-            797_987_032_209_841_876u64,
-            2_722_506_916_840_601_925,
-            2_803_077_607_927_797_426,
-            16_026_798_777_574_690_161,
-            12_466_612_513_770_086_848
+            5_260_962_740_838_614_106u64,
+            7_941_093_826_470_765_633,
+            3_171_262_636_499_517_186,
+            4_732_824_824_092_512_215,
+            7_729_731_060_040_634_013
         ],
         "{got:?}"
     );
@@ -1010,8 +1012,11 @@ fn the_tracker_in_the_receiver_is_the_float_one() {
                     break;
                 }
                 let drift = (ti.timing(&fx) - tf.timing()).abs();
+                // One fractional bit in the FFT word (ADR 0008's hand-off): the largest
+                // difference is 4.0e-4, in one symbol of a 6 Mb/s frame at 6 dB, and
+                // 1.5e-4 in every other (9.6e-5 with two fractional bits).
                 assert!(
-                    slope < 2e-4,
+                    slope < 5e-4,
                     "{rate:?} {ppm} ppm symbol {i}: measured {} against {}",
                     ti.measured as f64 * unit,
                     tf.measured
@@ -1240,4 +1245,31 @@ fn the_window_moves_beyond_half_a_sample_only() {
         .unwrap();
         assert_eq!((t.theta, t.shift), (theta, shift), "rate {rate0}");
     }
+}
+
+#[test]
+fn the_default_input_is_the_hand_off_of_adr_0008() {
+    // ADR 0008, decision 1: the decoder is handed the rotator's 13 bits (the ADC's LSB kept)
+    // with one fractional bit in the FFT word.
+    let fx = FixedOfdmConfig::default();
+    assert_eq!((fx.in_bits, fx.in_shift), (Y_BITS, 1));
+    assert_eq!(fx.in_bits + fx.in_shift, 14);
+    assert!(fx.is_valid());
+
+    // The thirteenth bit is used: a frame whose mean power is the 12-bit full scale squared
+    // passes at 54 Mb/s with the default input, and not when the input saturates at 12 bits
+    // (a sixth of its components would).
+    let mut rng = Rng::new(0x13b1);
+    let p = psdu(200, &mut rng);
+    let mut x = vec![(0.0, 0.0); 192];
+    x.extend(frame(&p, Rate::R54));
+    let k = (1.0 / mean_power(&x[192..])).sqrt();
+    let z = to_fixed(&x, 2048.0 * k, 13);
+    assert!(z.iter().any(|v| v.0.abs() > 2048 || v.1.abs() > 2048));
+    let cfg = RxOfdmConfig::default();
+    let d = decode_ppdu_fixed(&z, 192 + 160 + 32, &cfg, &fx, unknown(&fx)).unwrap();
+    assert_eq!(d.psdu, p);
+    let twelve = FixedOfdmConfig { in_bits: 12, ..fx };
+    let d = decode_ppdu_fixed(&z, 192 + 160 + 32, &cfg, &twelve, unknown(&twelve));
+    assert!(d.map_or(true, |d| d.psdu != p));
 }

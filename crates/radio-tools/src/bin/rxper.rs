@@ -1,5 +1,5 @@
-//! `rxper` — packet error rate of the whole float receiver (R0-08a front + R0-09 OFDM receiver)
-//! through the channel simulator. Measurements for `docs/gates/rx_ofdm.md`; multi-threaded.
+//! `rxper` — packet error rate of the whole receiver (float: R0-08a front + R0-09 OFDM receiver;
+//! `fixed`, `fixedw`: the integer front, hand-off and decoder) through the channel simulator. Measurements for `docs/gates/rx_ofdm.md`; multi-threaded.
 //!
 //! Usage: `cargo run -q --release -p radio-tools --bin rxper -- <command> [frames per point]`
 //! - `awgn`: PER against SNR for the eight rates, 1000-octet PSDUs (the frame of the standard's
@@ -10,9 +10,10 @@
 //! - `timing`: what the timing tracker costs and saves near 10 % PER.
 //! - `soft`, `soft2`: PER against the soft values' width and clip level, AWGN and TGn B and D
 //!   (a wide survey, then the candidates around a step of 0.1).
-//! - `fixed`, `fixedw`: G2 of the integer data path (`rx_ofdm_fixed`): the loss against the
-//!   float receiver on the same 12-bit samples over the grids of `softg2`, and the frames lost
-//!   near 10 % PER with one width changed at a time.
+//! - `fixed`, `fixedw`: G2 of the integer receiver behind the hand-off of ADR 0008
+//!   (`handoff_fixed`, `rx_ofdm_fixed`): the loss against the float receiver from the same
+//!   12-bit ADC samples and the same (integer) acquisition over the grids of `softg2`, and the
+//!   frames lost near 10 % PER with one width changed at a time.
 //! - `softg2`: the G2 sweep of the soft-value format (R0-09): the candidates on the same
 //!   frames, fine grids around the 10 % crossings, AWGN and TGn B, D and E.
 //!
@@ -30,10 +31,13 @@ use radio_phy::channel::{
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
-use radio_phy::rx_front::{acquire, correct, RxConfig};
-use radio_phy::rx_front_fixed::FixedRxConfig;
+use radio_phy::rx_front::{acquire, correct, ltf_dc_offset, RxConfig};
+use radio_phy::rx_front_fixed::{
+    acquire_fixed, correct_fixed, handoff_fixed, ltf_dc_offset_fixed, remove_dc_fixed, to_adc,
+    FixedRxConfig, ADC_FULL_SCALE, IQ, Y_BITS,
+};
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, to_fixed, FixedOfdmConfig, FixedTracking};
+use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
 
@@ -101,12 +105,10 @@ fn receiver(name: &'static str, hint: bool, cfg: RxOfdmConfig) -> Receiver {
     }
 }
 
-/// Level of the frame in the 12-bit samples both kinds of receiver are handed when any of
-/// them is the integer one, dBFS (0 dBFS: a mean |v|² of full scale squared).
+/// Level of the frame at the 12-bit ADC every receiver starts from when any of them is the
+/// integer one, dBFS (0 dBFS: a mean |v|² of full scale squared): a gain that knows the frame.
 const ADC_LEVEL_DBFS: f64 = -12.0;
-const ADC_FULL: f64 = 2048.0;
 
-/// Frames lost by each receiver out of `frames` (rounded up to the thread count).
 /// One operating point: `ppm` is the clock offset between the two ends, `None` draws it
 /// uniformly in ±40 per frame.
 #[derive(Clone, Copy)]
@@ -118,7 +120,52 @@ struct Scene {
     ppm: Option<f64>,
 }
 
-fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<usize>, usize) {
+/// SplitMix64's output function: the frame's seed from the point's seed and the frame's
+/// number, so that a report does not depend on the machine's thread count (as `rxagc`).
+fn mix(a: u64, b: u64) -> u64 {
+    let mut z = a
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(b)
+        .wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// The acquisition's CFO word (2π/2^P per sample at the default front's P) in the units of a
+/// front with another P: shifted, rounded half up where bits are dropped.
+fn word_at(word: i64, from_bits: u32, to_bits: u32) -> i64 {
+    if to_bits >= from_bits {
+        word << (to_bits - from_bits).min(40)
+    } else {
+        let k = (from_bits - to_bits).min(40);
+        (word + (1i64 << (k - 1))) >> k
+    }
+}
+
+/// The stream an integer receiver with the widths `fx` is handed from the ADC's samples:
+/// ADR 0008's hand-off ([`handoff_fixed`]) at the default width, and the same three steps
+/// narrowed to `fx.in_bits` for the columns of the width sweep. The rotator and the offset's
+/// estimate are the receiver's own front's.
+fn handed(adc: &[(i16, i16)], fft_start: usize, word: i64, fx: &FixedOfdmConfig) -> Vec<IQ> {
+    if fx.in_bits == Y_BITS {
+        return handoff_fixed(adc, fft_start, word, &fx.front).unwrap_or_default();
+    }
+    let dc = ltf_dc_offset_fixed(adc, fft_start, word, &fx.front).unwrap_or((0, 0));
+    correct_fixed(&remove_dc_fixed(adc, dc), word, fx.in_bits, &fx.front)
+}
+
+/// Whether each receiver returned the PSDU of frame `number` of the point.
+///
+/// Without an integer receiver in the set: the float front on the channel's samples
+/// (`acquire`, `correct`) and the float decoder. With one, every receiver starts from the
+/// same 12-bit ADC samples (the frame at [`ADC_LEVEL_DBFS`]) and the same acquisition, the
+/// integer front's (`acquire_fixed`, its DC blocker in its own path only); the decoders are
+/// handed the ADC's samples less the offset estimated from the two long training symbols
+/// with the CFO taken out (ADR 0008, decision 1): in integers ([`handed`]) for the integer
+/// receivers, in floating point (`ltf_dc_offset`, `correct` at the CFO word's frequency) for
+/// the float ones.
+fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool> {
     let Scene {
         rate,
         octets,
@@ -126,79 +173,115 @@ fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<
         ch,
         ppm,
     } = scene;
-    let per_thread = frames.div_ceil(threads());
     let rx = RxConfig::new(FS);
-    let r = par(|t| {
-        let mut rng = Rng::new(seed * 4096 + t as u64);
-        let mut lost = vec![0usize; receivers.len()];
-        for _ in 0..per_thread {
-            let psdu: Vec<u8> = (0..octets).map(|_| (rng.next_u64() & 0xff) as u8).collect();
-            let f = frame(&psdu, rate);
-            let mut x = vec![(0.0, 0.0); 300];
-            x.extend_from_slice(&f);
-            x.extend(vec![(0.0, 0.0); 200]);
-            let x = match ch {
-                Channel::Awgn => fractional_delay(&x, rng.uniform()),
-                Channel::Tgn(m) => {
-                    Multipath::new(tgn_taps(m, false), Doppler::Static, 1, FS, &mut rng).apply(&x)
-                }
-            };
-            // The transmitter's oscillator fast by p ppm against ours: its symbols come p·1e-6
-            // faster and its carrier is p·1e-6·carrier above our local oscillator.
-            let p = ppm.unwrap_or_else(|| (rng.uniform() * 2.0 - 1.0) * 40.0);
-            let x = resample(&x, p);
-            let x = frequency_offset(&x, p * 1e-6 * CARRIER_HZ, FS, 2.0 * PI * rng.uniform());
-            let x = awgn(&x, snr_db, mean_power(&f), &mut rng);
-            let Some(a) = acquire(&x, 0, &rx) else {
-                lost.iter_mut().for_each(|l| *l += 1);
-                continue;
-            };
-            let mut y = correct(&x, a.cfo_hz, FS);
-            // With an integer receiver in the set every receiver sees the corrected stream
-            // as 12-bit samples, the frame's span at the level a gain control would leave it.
-            let z = receivers.iter().any(|r| r.fixed.is_some()).then(|| {
-                let span = &y[300.min(y.len())..(300 + f.len()).min(y.len())];
-                let k = (10f64.powf(ADC_LEVEL_DBFS / 10.0) / mean_power(span)).sqrt();
-                to_fixed(&y, ADC_FULL * k, 12)
-            });
-            if let Some(z) = &z {
-                y = z.iter().map(|v| (v.0 as f64, v.1 as f64)).collect();
-            }
-            for (k, r) in receivers.iter().enumerate() {
-                let ppm = a.cfo_hz / CARRIER_HZ * 1e6;
-                let ok = match (&r.fixed, &z) {
-                    (Some(fx), Some(z)) => {
-                        let start = if r.hint {
-                            FixedTracking::from_clock_offset(ppm, fx)
-                        } else {
-                            FixedTracking::unknown(fx)
-                        };
-                        decode_ppdu_fixed(z, a.fft_start, &r.cfg, fx, start)
-                            .is_ok_and(|d| d.psdu == psdu)
-                    }
-                    _ => {
-                        let start = if r.hint {
-                            Tracking::from_clock_offset(ppm)
-                        } else {
-                            Tracking::default()
-                        };
-                        decode_ppdu_from(&y, a.fft_start, &r.cfg, start)
-                            .is_ok_and(|d| d.psdu == psdu)
-                    }
+    let mut rng = Rng::new(mix(seed, number));
+    let psdu: Vec<u8> = (0..octets).map(|_| (rng.next_u64() & 0xff) as u8).collect();
+    let f = frame(&psdu, rate);
+    let mut x = vec![(0.0, 0.0); 300];
+    x.extend_from_slice(&f);
+    x.extend(vec![(0.0, 0.0); 200]);
+    let x = match ch {
+        Channel::Awgn => fractional_delay(&x, rng.uniform()),
+        Channel::Tgn(m) => {
+            Multipath::new(tgn_taps(m, false), Doppler::Static, 1, FS, &mut rng).apply(&x)
+        }
+    };
+    // The transmitter's oscillator fast by p ppm against ours: its symbols come p·1e-6
+    // faster and its carrier is p·1e-6·carrier above our local oscillator.
+    let p = ppm.unwrap_or_else(|| (rng.uniform() * 2.0 - 1.0) * 40.0);
+    let x = resample(&x, p);
+    let x = frequency_offset(&x, p * 1e-6 * CARRIER_HZ, FS, 2.0 * PI * rng.uniform());
+    let x = awgn(&x, snr_db, mean_power(&f), &mut rng);
+    let none = vec![false; receivers.len()];
+
+    if receivers.iter().all(|r| r.fixed.is_none()) {
+        let Some(a) = acquire(&x, 0, &rx) else {
+            return none;
+        };
+        let y = correct(&x, a.cfo_hz, FS);
+        let ppm = a.cfo_hz / CARRIER_HZ * 1e6;
+        return receivers
+            .iter()
+            .map(|r| {
+                let start = if r.hint {
+                    Tracking::from_clock_offset(ppm)
+                } else {
+                    Tracking::default()
                 };
-                lost[k] += usize::from(!ok);
+                decode_ppdu_from(&y, a.fft_start, &r.cfg, start).is_ok_and(|d| d.psdu == psdu)
+            })
+            .collect();
+    }
+
+    let span = &x[300.min(x.len())..(300 + f.len()).min(x.len())];
+    let gain =
+        f64::from(ADC_FULL_SCALE) * (10f64.powf(ADC_LEVEL_DBFS / 10.0) / mean_power(span)).sqrt();
+    let adc = to_adc(&x, gain);
+    let front = FixedRxConfig::default();
+    let Some(a) = acquire_fixed(&adc, &rx, &front) else {
+        return none;
+    };
+    let cfo_hz = a.cfo_hz(&front, FS);
+    let ppm = cfo_hz / CARRIER_HZ * 1e6;
+    // The float receivers' stream, made when the first of them asks for it.
+    let mut y: Option<Vec<C>> = None;
+    receivers
+        .iter()
+        .map(|r| match &r.fixed {
+            Some(fx) => {
+                let word = word_at(a.cfo_phase, front.nco_phase_bits, fx.front.nco_phase_bits);
+                let z = handed(&adc, a.fft_start, word, fx);
+                let start = if r.hint {
+                    FixedTracking::from_clock_offset(ppm, fx)
+                } else {
+                    FixedTracking::unknown(fx)
+                };
+                decode_ppdu_fixed(&z, a.fft_start, &r.cfg, fx, start).is_ok_and(|d| d.psdu == psdu)
+            }
+            None => {
+                let y = y.get_or_insert_with(|| {
+                    let raw: Vec<C> = adc
+                        .iter()
+                        .map(|v| (f64::from(v.0), f64::from(v.1)))
+                        .collect();
+                    let d = ltf_dc_offset(&raw, a.fft_start, cfo_hz, FS).unwrap_or((0.0, 0.0));
+                    let less: Vec<C> = raw.iter().map(|v| (v.0 - d.0, v.1 - d.1)).collect();
+                    correct(&less, cfo_hz, FS)
+                });
+                let start = if r.hint {
+                    Tracking::from_clock_offset(ppm)
+                } else {
+                    Tracking::default()
+                };
+                decode_ppdu_from(y, a.fft_start, &r.cfg, start).is_ok_and(|d| d.psdu == psdu)
+            }
+        })
+        .collect()
+}
+
+/// Frames lost by each receiver out of `frames`, every receiver on the same frames; frame
+/// `n` of the point is seeded by `seed` and `n` alone.
+fn lost(scene: Scene, receivers: &[Receiver], frames: usize, seed: u64) -> (Vec<usize>, usize) {
+    let n = threads();
+    let r = par(|t| {
+        let mut lost = vec![0usize; receivers.len()];
+        for number in (t..frames).step_by(n) {
+            for (l, ok) in lost
+                .iter_mut()
+                .zip(one(scene, receivers, seed, number as u64))
+            {
+                *l += usize::from(!ok);
             }
         }
         lost
     });
-    let total = per_thread * threads();
     let mut sum = vec![0usize; receivers.len()];
     for v in &r {
         for (s, l) in sum.iter_mut().zip(v) {
             *s += l;
         }
     }
-    (sum, total)
+    (sum, frames)
 }
 
 /// SNR at which the PER crosses 10 %, by linear interpolation of log10(PER) between the two
@@ -224,8 +307,13 @@ fn sweep(
 ) {
     let names: Vec<&str> = receivers.iter().map(|r| r.name).collect();
     println!(
-        "\n## {name}: PER of 1000-octet frames, {frames} frames per point, clock offset uniform in ±40 ppm\n# receivers: {}",
-        names.join(" / ")
+        "\n## {name}: PER of 1000-octet frames, {frames} frames per point, clock offset uniform in ±40 ppm\n# receivers: {}{}",
+        names.join(" / "),
+        if receivers.iter().any(|r| r.fixed.is_some()) {
+            format!("\n# the frame at {ADC_LEVEL_DBFS} dBFS at the 12-bit ADC; the integer acquisition for every receiver; the decoders handed ADR 0008's stream (in floating point for the float receivers)")
+        } else {
+            String::new()
+        }
     );
     let mut summary = Vec::new();
     for (ri, rate) in Rate::ALL.into_iter().enumerate() {
@@ -460,6 +548,14 @@ fn widths(frames: usize) {
         ("K12", FixedOfdmConfig { coef_frac: 12, ..d }),
         ("V4", FixedOfdmConfig { var_frac: 4, ..d }),
         (
+            "Z12 s2",
+            FixedOfdmConfig {
+                in_bits: 12,
+                in_shift: 2,
+                ..d
+            },
+        ),
+        (
             "W14 s0",
             FixedOfdmConfig {
                 fft_bits: 14,
@@ -467,10 +563,11 @@ fn widths(frames: usize) {
                 ..d
             },
         ),
-        ("W14 s2", FixedOfdmConfig { fft_bits: 14, ..d }),
-        ("W15 s2", FixedOfdmConfig { fft_bits: 15, ..d }),
+        ("W14 s1", FixedOfdmConfig { fft_bits: 14, ..d }),
+        ("W15 s1", FixedOfdmConfig { fft_bits: 15, ..d }),
         ("W16 s0", FixedOfdmConfig { in_shift: 0, ..d }),
-        ("W16 s4", FixedOfdmConfig { in_shift: 4, ..d }),
+        ("W16 s2", FixedOfdmConfig { in_shift: 2, ..d }),
+        ("W16 s3", FixedOfdmConfig { in_shift: 3, ..d }),
         (
             "W18 s4",
             FixedOfdmConfig {
@@ -569,10 +666,13 @@ fn widths(frames: usize) {
         });
     }
     println!(
-        "\n## widths of the integer data path: frames lost of {frames} (rounded up), 1000 octets, the same frames for every column,\n\
-         # 12-bit samples at {ADC_LEVEL_DBFS} dBFS, eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.\n\
-         # default = W16 s2 T12 U16 C10 F4, rotator L9 Q11 (truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says (round: half a table address added to the rotation phase);\n\
-         # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
+        "\n## widths of the integer receiver: frames lost of {frames}, 1000 octets, the same frames for every column,\n\
+         # the frame at {ADC_LEVEL_DBFS} dBFS at the 12-bit ADC, the integer acquisition for every column, the decoders handed ADR 0008's stream\n\
+         # (the ADC's samples less the offset estimated from the long training symbols, rotated; in floating point for the float column),\n\
+         # eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.\n\
+         # default = hand-off Z13 s1, W16 T12 U16 C10 F4, rotator L9 Q11 (the data path's truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says\n\
+         # (round: half a table address added to the data path's rotation phase; Z12 s2: the hand-off narrowed to 12 bits, two fractional bits; the rotator's columns change the hand-off's rotator and the offset's estimate too);\n\
+         # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, P30 L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
          # columns: {}",
         rx.iter().map(|r| r.name).collect::<Vec<_>>().join(" | ")
     );
@@ -644,7 +744,7 @@ fn timing(frames: usize) {
         receiver("from zero", false, base()),
         receiver("no tracker", false, no_loop()),
     ];
-    println!("\n## timing tracker: frames lost of {frames} (rounded up), 1000 octets");
+    println!("\n## timing tracker: frames lost of {frames}, 1000 octets");
     println!("# columns: clock offset uniform in ±40 ppm: started from the CFO / from zero / no tracker || 0 ppm, the same three");
     for (label, rate, snr, ch) in [
         ("AWGN  6 Mb/s  3.5 dB", Rate::R6, 3.5, Channel::Awgn),
@@ -702,7 +802,7 @@ fn sfo(frames: usize) {
         receiver("from zero", false, base()),
         receiver("no loop", false, no_loop()),
     ];
-    println!("\n## sample-clock offset: frames lost of {frames} (rounded up), high SNR: loop started from the CFO / from zero / no loop");
+    println!("\n## sample-clock offset: frames lost of {frames}, high SNR: loop started from the CFO / from zero / no loop");
     println!(
         "# rate, octets (duration)    ppm:   0          10          20          40         -40"
     );
@@ -735,7 +835,11 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
     let n: Option<usize> = args.next().and_then(|v| v.parse().ok());
-    println!("# rxper {cmd}: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz");
+    if matches!(cmd.as_str(), "fixed" | "fixedw") {
+        println!("# rxper {cmd}: 12-bit ADC, integer front (acquire_fixed), hand-off of ADR 0008 (handoff_fixed) + rx_ofdm_fixed::decode_ppdu_fixed against the float decoder on the same samples, carrier 5.8 GHz");
+    } else {
+        println!("# rxper {cmd}: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz");
+    }
     match cmd.as_str() {
         "awgn" => sweep(
             "AWGN, random fractional delay",
@@ -906,8 +1010,9 @@ fn main() -> ExitCode {
             // G2 of the integer data path at the decoder's soft format (eight bits, clip 3):
             // the float receiver with fine soft values (G0's reference for the whole fixed
             // receiver), the float receiver at the format, and the integer data path at the
-            // format, all on the same 12-bit samples, on the grids of `softg2`. The loss
-            // printed is against the first.
+            // format, all from the same 12-bit ADC samples and the same acquisition, each
+            // handed ADR 0008's stream, on the grids of `softg2`. The loss printed is
+            // against the first.
             let rx = [
                 receiver("float fine", true, fine()),
                 receiver("float", true, base()),

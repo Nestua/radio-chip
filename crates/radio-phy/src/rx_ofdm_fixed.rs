@@ -26,7 +26,9 @@ use crate::ofdm::{
     data_subcarriers, fft_bin, pilot_polarity, FFT_SIZE, PILOT_BASE, PILOT_SUBCARRIERS,
 };
 use crate::ppdu::{data_symbols, long_training_sequence, MAX_PSDU_LEN};
-use crate::rx_front_fixed::{cordic_table, cordic_with, nco_table, rotate_with, FixedRxConfig, IQ};
+use crate::rx_front_fixed::{
+    cordic_table, cordic_with, nco_table, rotate_with, FixedRxConfig, IQ, Y_BITS,
+};
 use crate::rx_ofdm::{
     descramble, signal_from_soft, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, SymbolLog,
     TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
@@ -36,7 +38,8 @@ use crate::viterbi::{decode, Termination};
 /// Widths of the integer data path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FixedOfdmConfig {
-    /// Bits Z of the input samples (the front's CFO-corrected stream).
+    /// Bits Z of the input samples (the front's CFO-corrected stream,
+    /// [`crate::rx_front_fixed::handoff_fixed`]).
     pub in_bits: u32,
     /// Left shift of the input into the FFT word (fractional bits kept through the stages).
     pub in_shift: u32,
@@ -73,8 +76,9 @@ impl Default for FixedOfdmConfig {
     /// The working widths (`docs/gates/rx_ofdm.md`; the G2 sweep confirms or changes them).
     fn default() -> Self {
         Self {
-            in_bits: 12,
-            in_shift: 2,
+            // ADR 0008, decision 1: the hand-off's 13 bits, one fractional bit.
+            in_bits: Y_BITS,
+            in_shift: 1,
             fft_bits: 16,
             fft_halve: 0b10_1010,
             twiddle_bits: 12,
