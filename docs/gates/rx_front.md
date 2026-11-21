@@ -1883,17 +1883,22 @@ A sample taken sooner than 8 clocks after the one before abandons that one's cor
 (no `out_valid` for it) and is itself correlated. The decision's schedule (part d, step 3)
 takes the 14 from here; ADR 0008 counted "a sample later", 8 clocks, and this is 9.
 
-**Gate.** `make -C hw ltf_corr` (Verilator 5.054; `make -C hw lint` clean), at 9a2512e. The
-testbench feeds a sample every 8th clock with one more idle clock after every 5th and two
-after every 13th, requires every output exactly 14 clocks after its sample's edge and equal
-to the model, then replays the first segment with the sample after every 97th coming after
-5 clocks (no output for the abandoned one, the model's for the early one).
-Result: 9 segments, 7618 samples, 7489 outputs, **0 mismatches**. Seen failing first: the
-unfolded RTL against the new testbench, 13 190 mismatches (its outputs come at 5 clocks:
-every one is counted as early and as missing).
+**Gate.** `make -C hw ltf_corr` (Verilator 5.054; `make -C hw lint` clean), with the
+review's additions below. The testbench feeds a sample every 8th clock with one more idle
+clock after every 5th and two after every 13th, other values on the data inputs between
+samples; it requires every output exactly 14 clocks after its sample's edge and equal to
+the model; it replays the first segment with the sample after every 97th coming after 7, 5
+and 1 clocks (no output for the abandoned one, the model's for the early one); and it
+resets the block 1 to 13 clocks after a sample with a full window and requires that
+nothing comes out. The simulation starts flip-flops without a reset at random values
+(`+verilator+rand+reset+2`).
+Result: 9 segments, 7618 samples, 9517 outputs, 13 resets in flight, **0 mismatches**. Seen
+failing first: the unfolded RTL against the first version of the new testbench, 13 190
+mismatches of 7489 outputs (its outputs come at 5 clocks: every one is counted as early and
+as missing).
 
-Mutations (each restored with `cp` + `touch`; mismatches of 7489 outputs, timing errors
-counted too):
+Mutations (each restored with `cp` + `touch`; mismatches of the 7489 outputs of the
+testbench before the review's additions, timing errors counted too):
 | Mutation | Mismatches |
 |---|---|
 | tap of the neighbouring pair | 7489 |
@@ -1911,6 +1916,25 @@ counted too):
 | the window shifts once more in a sample's 8 clocks | 7472 |
 One survives and is equivalent: the accumulator also clocked outside a sample's clocks (its
 enable is there to keep it still, not for the value: the first clock's mark reloads it).
+
+**Independent review (fresh agent, the diff and decision 4).** No defect found in the RTL:
+it derived the worst cases of every width by hand (sums within 13 and 14 bits, products
+within 2^20 of 22 bits, the accumulator within 2^26 of 28; the saturation unreachable),
+rebuilt the correlator from the tap table in a model of its own, and ran a bench of its own
+(spacings 1 to 12 at random, bursts of three samples on consecutive clocks, other data
+between samples, resets in flight, random initial state: nothing wrong in 20 runs). Found
+in the gate and corrected:
+- *the marks' reset was not tested:* the reset branch of the marks removed passed (the
+  testbench reset only an idle block, and the simulation started every flip-flop at 0). The
+  resets in flight and the random start are in the gate now: that mutant gives 1036
+  mismatches;
+- *the early sample was tried at 5 clocks only:* the last clock's mark taken from the
+  delayed phase passed and let out a sample abandoned 7 clocks after it was taken. Spacings
+  7, 5 and 1 now: 968 mismatches;
+- the data inputs held the last sample between samples: other values now (a window that
+  takes its input on another clock: 9517 of 9517).
+It also confirmed the 14 clocks stage by stage and that the surviving mutant is equivalent.
+Not checked by it: the synthesis tools, the journal's mutation counts, timing and area.
 
 **Timing and area** (probes run by hand on the build server; no gate reruns them):
 - KV260 part, out of context, 6.25 ns (`tools/syn/ooc_probe.tcl`, Vivado 2024.2; excerpt

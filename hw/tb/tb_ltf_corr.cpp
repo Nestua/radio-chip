@@ -6,10 +6,12 @@
 // two more after every 13th, so the gate also checks that the window advances only on valid
 // samples and that the arithmetic does not depend on what follows its 8 clocks. Every output
 // must come exactly kLatency clocks after the clock edge that took its sample (the decision's
-// schedule counts on it) and match the model. The first segment is then replayed with every
-// 97th sample followed by the next after 5 clocks instead of 8: the early sample abandons the
-// correlation in hand (no output for it) and its own output is the model's.
-// Exit code 0 = gate passed.
+// schedule counts on it) and match the model. Between samples the data inputs carry other
+// values. The first segment is then replayed with every 97th sample followed by the next after
+// 7, 5 and 1 clocks instead of 8: the early sample abandons the correlation in hand (no output
+// for it) and its own output is the model's. Last, a reset 1 to 13 clocks after a sample with a
+// full window must leave no output behind (run with +verilator+rand+reset+2: flip-flops
+// without a reset start at random values). Exit code 0 = gate passed.
 
 #include <cstdio>
 #include <deque>
@@ -47,6 +49,9 @@ struct Gate {
     Vltf_corr dut;
     long outputs = 0, mismatches = 0;
     long ticks = 0;
+    bool compare = true;  // outputs are checked against the model (else only counted)
+    long stray = 0;       // outputs seen while not comparing
+    long resets = 0;      // resets in flight tried
     std::deque<long> due;  // the tick at which each pending output must appear
     std::deque<std::pair<long, long>>* want = nullptr;
     const std::string* label = nullptr;
@@ -57,6 +62,10 @@ struct Gate {
         dut.clk = 1;
         dut.eval();
         ++ticks;
+        if (!compare) {
+            stray += dut.out_valid ? 1 : 0;
+            return;
+        }
         if (dut.out_valid) check();
         if (!due.empty() && due.front() <= ticks) {
             // Due at this edge (or earlier) and not consumed by check(): late or missing.
@@ -94,8 +103,51 @@ struct Gate {
         ++outputs;
     }
 
-    // `early`: the sample after every 97th comes 5 clocks after it, which abandons it.
-    void run(Segment s, bool early = false) {
+    void idle() {
+        // Not the last sample: the window must take the inputs on in_valid only.
+        dut.in_valid = 0;
+        dut.in_re = static_cast<uint32_t>(0x5a5 + 7 * ticks) & ((1u << kZBits) - 1);
+        dut.in_im = static_cast<uint32_t>(0xa5a - 3 * ticks) & ((1u << kZBits) - 1);
+    }
+
+    // `early` > 0: the sample after every 97th comes that many clocks after it, which
+    // abandons it.
+    // A reset `after` clocks after the edge that takes a sample with a full window: nothing of
+    // that sample may come out, then or later.
+    void reset_in_flight(const Segment& s, int after) {
+        compare = false;
+        due.clear();
+        dut.rst_n = 0;
+        idle();
+        tick();
+        tick();
+        dut.rst_n = 1;
+        const size_t last = 159;  // a sample with a full window
+        for (size_t n = 0; n <= last && n < s.z.size(); ++n) {
+            dut.in_valid = 1;
+            dut.in_re = static_cast<uint32_t>(s.z[n].first) & ((1u << kZBits) - 1);
+            dut.in_im = static_cast<uint32_t>(s.z[n].second) & ((1u << kZBits) - 1);
+            tick();
+            idle();
+            // The outputs of the samples before the last are let out (and not compared).
+            for (int i = 1; i < (n == last ? after : 2 * kPeriod + kLatency); ++i) tick();
+        }
+        const long before = stray;
+        dut.rst_n = 0;
+        tick();
+        tick();
+        dut.rst_n = 1;
+        for (int i = 0; i < 3 * kLatency; ++i) tick();
+        if (before == 0 || stray != before) {
+            std::fprintf(stderr, "reset %d clocks after a sample: %ld outputs before it, %ld after\n",
+                         after, before, stray - before);
+            ++mismatches;
+        }
+        ++resets;
+        compare = true;
+    }
+
+    void run(Segment s, int early = 0) {
         if (early) {
             std::deque<std::pair<long, long>> kept;
             for (size_t n = 0; n < s.z.size(); ++n) {
@@ -105,7 +157,7 @@ struct Gate {
                 s.want.pop_front();
             }
             s.want = kept;
-            s.label += "_early";
+            s.label += "_early" + std::to_string(early);
         }
         want = &s.want;
         label = &s.label;
@@ -124,9 +176,9 @@ struct Gate {
             // This tick is edge ticks + 1: the one that takes the sample.
             if (s.has[n]) due.push_back(ticks + 1 + kLatency);
             tick();
-            dut.in_valid = 0;
+            idle();
             if (early && n % 97 == 96) {
-                for (int i = 1; i < 5; ++i) tick();
+                for (int i = 1; i < early; ++i) tick();
                 continue;
             }
             for (int i = 1; i < kPeriod; ++i) tick();
@@ -136,7 +188,7 @@ struct Gate {
                 tick();
             }
         }
-        dut.in_valid = 0;
+        idle();
         for (int i = 0; i < 64; ++i) tick();  // drain the pipeline
         if (!s.want.empty() || outputs - before != static_cast<long>(expected)) {
             std::fprintf(stderr, "%s: %ld outputs, %zu expected\n", s.label.c_str(),
@@ -188,9 +240,13 @@ int main(int argc, char** argv) {
         samples += static_cast<long>(s.z.size());
         g.run(s);
     }
-    if (!segments.empty()) g.run(segments.front(), true);
-    std::printf("ltf_corr G3: %zu segments, %ld samples, %ld outputs, %ld mismatches\n",
-                segments.size(), samples, g.outputs, g.mismatches);
+    if (!segments.empty()) {
+        for (int early : {7, 5, 1}) g.run(segments.front(), early);
+        for (int after = 1; after < kLatency; ++after) g.reset_in_flight(segments.front(), after);
+    }
+    std::printf("ltf_corr G3: %zu segments, %ld samples, %ld outputs, %ld resets in flight, "
+                "%ld mismatches\n",
+                segments.size(), samples, g.outputs, g.resets, g.mismatches);
     if (g.outputs == 0) {
         std::cerr << "no outputs compared — refusing to pass an empty gate\n";
         return 1;

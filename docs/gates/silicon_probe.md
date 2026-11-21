@@ -94,8 +94,10 @@ was running a simulation on every core at the time; no gate reruns it.
 **What it says**
 - The fold halves the block, it does not take it to ADR 0008's estimate of about 0.4 mm²
   ("the window plus an eighth of today's logic plus an allowance"): 0.58 mm² routed. Of
-  the cells after synthesis 0.22 mm² are flip-flops (3072 of the window, 1435 of the
-  pipeline: the selected entries, the multiplicands, 16 products, the sums) and 0.09 mm²
+  the cells after synthesis 0.22 mm² are flip-flops (3072 of the window and 1435 others; the
+  pipeline and control declare 1386: the selected entries 384, the multiplicands and taps
+  288, 16 products 352, the sums 234, accumulator and output 96, control 32; where the
+  other 49 come from was not looked up) and 0.09 mm²
   multiplexers (3567 two-way, most of them the window's shift enable, and 573 four-way, the
   slots' selection); the rest, about 0.29 mm², is the 16 multipliers, the adders and the
   tap table. The estimate left out the pipeline's registers and the selection.

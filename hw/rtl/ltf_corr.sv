@@ -22,6 +22,8 @@
 // out_valid for it). out_valid marks the correlation of the window ending at a valid sample,
 // from the 128th sample after reset on, registered LATENCY = 14 clocks after the clock edge
 // that takes the sample. The window advances only on in_valid; the pipeline every clock.
+// out_re/out_im are undefined until the first out_valid after reset and keep the last
+// correlation between two.
 
 `default_nettype none
 
