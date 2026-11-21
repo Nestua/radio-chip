@@ -252,6 +252,35 @@ fn nco_mix_with(y: IQ, phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits)
 }
 
+/// The CFO taken out of the decoder's samples (R0-09 G2, stage B; G0 in
+/// `docs/gates/rx_ofdm.md`): z(n) = y(n)·e^(−jφ·n) for the DC blocker's [`Y_BITS`]-bit output
+/// y and the acquisition's CFO word φ ([`FixedAcquisition::cfo_phase`], 2π/2^P per sample),
+/// with the front's own rotator ([`nco_mix`]: a P-bit accumulator that wraps, the table
+/// addressed by the phase's top L bits) and its narrowing (half to even, saturating) to
+/// `out_bits`. At `out_bits` = Z this is the mixer of the receiver's step 2; one bit more
+/// keeps the ADC's last bit. Sample 0 is the stream's first: a constant phase is the channel
+/// estimate's to absorb. Nothing (an empty stream) for an invalid configuration or an
+/// `out_bits` outside 2..=30.
+///
+/// Where the hardware forms this stream and how wide it is handed on is ADR 0008's decision;
+/// this is the candidate the measurements are made with.
+pub fn correct_fixed(y: &[IQ], cfo_phase: i64, out_bits: u32, fx: &FixedRxConfig) -> Vec<IQ> {
+    if !fx.is_valid() || !(2..=30).contains(&out_bits) {
+        return Vec::new();
+    }
+    let table = nco_table(fx);
+    let p = fx.nco_phase_bits;
+    let step = cfo_phase.rem_euclid(1i64 << p);
+    let mut phase = 0i64;
+    y.iter()
+        .map(|&v| {
+            let prod = imul(v, rotate_with(phase, fx, &table));
+            phase = (phase - step).rem_euclid(1i64 << p);
+            narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, out_bits)
+        })
+        .collect()
+}
+
 pub(crate) fn rotate_with(phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     let l = fx.nco_lut_bits;
     let p = fx.nco_phase_bits;

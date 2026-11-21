@@ -1438,3 +1438,13 @@ document's text and pages. Not checked by the reviewer: the 6 Mb/s rows beyond t
   2⁻⁶ at each change (only after a hold was tried here).
 - The chip's own tracking in front of ours (R1): its transient at a gain change is what the
   per-index rows stand in for.
+
+## 2026-11-20 · note · the same through the fixed receiver
+
+Done with R0-09 G2, stage B, second part: `docs/gates/rx_ofdm.md` (2026-11-20, `rxagc`,
+`reports/rx_ofdm_agc_*.txt`). For this journal's open items: the integer chain follows the
+float one under every DC offset measured; the blocker's own pole in the decoder's path
+("8 of 2000 at 25 dB" above) is far larger with a sample-clock offset in the scene, near the
+sensitivity and through fading (54 Mb/s: 403 frames lost against 167 in AWGN at 20 dB, a
+floor of 13 % through TGn D), and a slower pole does not cure it. `restart` and `rescale`
+were not rerun in integers.

@@ -1,0 +1,82 @@
+# rxagc dc: 2000 frames per point of 1000 octets, a new PSDU per frame, clock offset
+# uniform in ±40 ppm (CFO and sample clock, carrier 5.8 GHz), channel::FastAttackAgc (power
+# over 16 samples, lock left on a large overload, 2 detector clocks per sample, lock level
+# −10 dBFS, largest gain 73 dB), the gain held from the first lock inside the packet
+# (assumed), phase jump ±30° per gain change (assumed), 12-bit ADC.
+# Chains on the ADC's samples:
+#   float     = float DC blocker (pole 2^-7), float front, rx_ofdm (8 bits, clip 3);
+#   int O/s   = dc_block_fixed (pole 2^-7), RxFrontFixed, correct_fixed to O bits,
+#               decode_ppdu_fixed with in_bits O and in_shift s, tracker started from the
+#               CFO word (its conversion to ppm is the one float between the ADC and
+#               the PSDU); the int columns of a row share one acquisition;
+#   known     = the same chain behind a gain that knows the frame (it at -12 dBFS at
+#               the ADC, no gain control, no DC offset);
+#   raw       = the decoder handed the samples before the DC blocker.
+# A frame's random stream depends on the row and the frame's number only.
+# Noise at -30 dBFS at the largest gain, AWGN. DC per gain state: channel::GainDc, levels in
+# dBFS at the ADC; 'per index' has that size at every gain with a direction per index,
+# 'before the gain' has that size at the largest gain (73 dB) and falls with the gain. The
+# gain control's detectors see the offset with the signal. Both blockers are told nothing.
+# The rows of one rate and SNR are the same frames at every offset.
+# Each cell: frames lost (not decoded to the PSDU), then +a−b: lost by this column alone and
+# by the column 'float' alone (the same frames). A lost frame is one not acquired, acquired
+# wrongly (the first acquisition of the stream is the only one tried) or not decoded.
+# level: signal and noise of the frame's span at the settled gain, before the ADC clips and
+# without the DC offset, dBFS, the mean of the powers over the frames. chg: gain changes per
+# frame up to the hold (with no lock inside the packet: all of the stream's). held: frames in
+# which the gain would have changed again before the packet's end without the hold.
+
+## 54 Mb/s
+# DC, SNR                                      frames  level   chg  held            float        float raw         int 12/2         int 13/2     int 13/2 raw
+  no DC, 25 dB                                   2000  -10.0  1.00    67               32          0 +0−32          32 +2−2          31 +1−2          0 +0−32
+  no DC, 30 dB                                   2000  -10.0  2.98    80               16          0 +0−16          16 +1−1          16 +0−0          0 +0−16
+  no DC, 40 dB                                   2000  -10.0  6.47    52               12          0 +0−12          11 +0−1          12 +1−1          0 +0−12
+  no DC, 60 dB                                   2000  -10.0 10.48    62                8           0 +0−8           6 +0−2           5 +0−3           0 +0−8
+  per index −40 dBFS, 25 dB                      2000  -10.0  1.00    67               39          1 +0−38          36 +0−3          36 +1−4          1 +0−38
+  per index −40 dBFS, 30 dB                      2000  -10.0  2.98    78               15          0 +0−15          14 +1−2          15 +1−1          0 +0−15
+  per index −40 dBFS, 40 dB                      2000  -10.0  6.47    53               10          0 +0−10          11 +1−0          11 +1−0          0 +0−10
+  per index −40 dBFS, 60 dB                      2000  -10.0 10.49    64                8           0 +0−8           9 +1−0          10 +2−0           0 +0−8
+  per index −30 dBFS, 25 dB                      2000  -10.0  1.00    83               62       507 +446−1          61 +1−2          62 +4−4       504 +443−1
+  per index −30 dBFS, 30 dB                      2000  -10.0  2.98    75               18       385 +367−0          20 +3−1          20 +2−0       385 +367−0
+  per index −30 dBFS, 40 dB                      2000  -10.0  6.51    58               19       377 +358−0          19 +0−0          19 +0−0       375 +356−0
+  per index −30 dBFS, 60 dB                      2000  -10.0 10.52    74               14       344 +330−0          15 +1−0          15 +1−0       345 +331−0
+  per index −20 dBFS, 25 dB                      2000  -10.0  1.00   173              234     1664 +1430−0         239 +9−4         238 +5−1     1666 +1432−0
+  per index −20 dBFS, 30 dB                      2000  -10.0  3.10   168               69     1625 +1556−0          72 +3−0          72 +3−0     1626 +1557−0
+  per index −20 dBFS, 40 dB                      2000  -10.0  6.72   150               99     1636 +1537−0         102 +3−0          98 +1−2     1634 +1535−0
+  per index −20 dBFS, 60 dB                      2000  -10.0 10.73   163               89     1634 +1545−0          93 +5−1          94 +6−1     1636 +1547−0
+  before the gain, −30 dBFS at the largest, 25 dB   2000  -10.0  1.00    72               38        33 +28−33          37 +2−3          37 +2−3        34 +29−33
+  before the gain, −30 dBFS at the largest, 30 dB   2000  -10.0  2.98    77               16          0 +0−16          17 +1−0          17 +1−0          0 +0−16
+  before the gain, −30 dBFS at the largest, 40 dB   2000  -10.0  6.49    52               15          0 +0−15          14 +0−1          15 +1−1          0 +0−15
+  before the gain, −30 dBFS at the largest, 60 dB   2000  -10.0 10.48    62               11          0 +0−11          11 +0−0          11 +0−0          0 +0−11
+  before the gain, −20 dBFS at the largest, 25 dB   2000  -10.0  1.00    90               68     1347 +1280−1          67 +3−4          70 +3−1     1342 +1275−1
+  before the gain, −20 dBFS at the largest, 30 dB   2000  -10.0  2.98    78               30       385 +356−1          30 +2−2          31 +2−1       385 +355−0
+  before the gain, −20 dBFS at the largest, 40 dB   2000  -10.0  6.49    49               36          0 +0−36          36 +1−1          36 +1−1          0 +0−36
+  before the gain, −20 dBFS at the largest, 60 dB   2000  -10.0 10.49    59               30          0 +0−30          29 +1−2          30 +1−1          0 +0−30
+  before the gain, −10 dBFS at the largest, 25 dB   2000  -11.0  1.97   100             1115      1933 +819−1        1115 +3−3        1119 +7−3      1933 +819−1
+  before the gain, −10 dBFS at the largest, 30 dB   2000  -10.2  3.68   139              199     1604 +1405−0         199 +2−2         199 +2−2     1610 +1411−0
+  before the gain, −10 dBFS at the largest, 40 dB   2000  -10.0  6.64    53              218      386 +207−39         218 +1−1         215 +1−4      387 +206−37
+  before the gain, −10 dBFS at the largest, 60 dB   2000  -10.0 10.54    61              209         0 +0−209         208 +2−3         207 +1−3         0 +0−209
+
+## 6 Mb/s
+# DC, SNR                                      frames  level   chg  held            float        float raw         int 12/2         int 13/2     int 13/2 raw
+  no DC, 10 dB                                   2000  -19.6  0.00     0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  no DC, 30 dB                                   2000  -10.0  2.98   561                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  no DC, 60 dB                                   2000  -10.0 10.50   547                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −40 dBFS, 10 dB                      2000  -19.6  0.00     0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −40 dBFS, 30 dB                      2000  -10.0  2.98   570                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −40 dBFS, 60 dB                      2000  -10.0 10.49   552                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −30 dBFS, 10 dB                      2000  -19.6  0.00     0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −30 dBFS, 30 dB                      2000  -10.0  2.98   590                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −30 dBFS, 60 dB                      2000  -10.0 10.52   580                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −20 dBFS, 10 dB                      2000  -19.6  0.00     0                0       179 +179−0           0 +0−0           0 +0−0       177 +177−0
+  per index −20 dBFS, 30 dB                      2000  -10.0  3.09   983                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −20 dBFS, 60 dB                      2000  -10.0 10.72   979                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  before the gain, −30 dBFS at the largest, 10 dB   2000  -19.6  0.00     0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  before the gain, −30 dBFS at the largest, 30 dB   2000  -10.0  2.98   568                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  before the gain, −30 dBFS at the largest, 60 dB   2000  -10.0 10.49   547                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  before the gain, −20 dBFS at the largest, 10 dB   2000  -19.6  0.00     0                0       182 +182−0           0 +0−0           0 +0−0       182 +182−0
+  before the gain, −20 dBFS at the largest, 30 dB   2000  -10.0  2.98   583                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  before the gain, −20 dBFS at the largest, 60 dB   2000  -10.0 10.51   545                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  before the gain, −10 dBFS at the largest, 10 dB   2000  -19.6  0.00     0                0     1808 +1808−0           0 +0−0           0 +0−0     1808 +1808−0
+  before the gain, −10 dBFS at the largest, 30 dB   2000  -10.1  3.67   847                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  before the gain, −10 dBFS at the largest, 60 dB   2000  -10.0 10.55   546                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
