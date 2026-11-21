@@ -1,50 +1,62 @@
-# rxagc loop: ADR 0008, decision 2, as a closed loop. 2000 frames of 1000 octets per row, the
-# frames of `hold` (the same scenes); noise at -30 dBFS at the largest gain unless the row says, no DC offset; clock
-# offset uniform in ±40 ppm, carrier 5.8 GHz. Gain control: the AD9361's reset values with 16
-# samples of power and the overload exit on (as every command). Receiver, all in integers:
-# acquire (RxFrontFixed), hand-off (handoff_fixed), decode_ppdu_fixed at their defaults, the
-# tracker started from the CFO word. Phase jump per gain change uniform in ±30°.
+# rxagc loop: ADR 0008, decision 2, as a closed loop a sample at a time. 2000 frames of 1000 octets per row, the
+# frames of `hold` (the same scenes); noise at -30 dBFS at the largest gain unless the row says, no DC offset unless the
+# row says; clock offset uniform in ±40 ppm, carrier 5.8 GHz. Gain control: the AD9361's reset values with 16
+# samples of power and the overload exit on (as every command), stepped with the receiver (FastAttackAgc::start).
+# Receiver, all in integers, in every column: each ADC sample through the streaming front (RxHandoffFixed: 8 beats
+# a period, the replay 20 periods after the declaration), the decoder as its reader: it sees the beats alone, gives
+# SIGNAL's verdict (decode_signal_fixed on the stream's first 208 samples, with the stream's tag) 50 periods
+# after the beat that completes them and decodes a stream (decode_ppdu_fixed, the tracker started from the CFO
+# word) when its end mark comes. The front searches all through; a frame is received if any stream decodes to it.
+# Phase jump per gain change uniform in ±30°.
 # Who keeps the gain still:
 #   from the lock    = held from the control's first lock inside the packet to the stream's end
-#                      (the tool knows where the packet is: the assumption until now);
-#   timer + front    = the control keeps every lock 512 samples; the front raises a hold where it
-#                      declares an acquisition and drops it at the end SIGNAL's length gives (the
-#                      frame is decoded from the stream with the hold dropped there), or
-#                      180 samples after SIGNAL's symbol when SIGNAL fails; it then searches again;
+#                      (the tool knows where the packet is: the assumption of the other commands' columns);
+#   timer + front    = the control keeps every lock 512 samples, and the front's own hold (RxHandoffFixed::hold:
+#                      from the declaration to the end SIGNAL's length gives, to the verdict when SIGNAL fails,
+#                      to the longest PPDU's end with no verdict) holds the control from the sample after;
 #   timer<max + front = the same, the timer keeping only a lock taken below the largest gain
 #                      (a lock on noise is left at the first overload);
-#   front alone      = the hold without any timer;  timer<max alone = that timer and no hold;
-#   nothing          = neither;
-#   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and
-#                      20 µs) late; a hold that would act after its own end is not raised.
+#   front alone      = the front's hold without any timer (decision 2 as amended);
+#   timer<max alone  = that timer and no hold;   nothing = neither;
+#   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and 20 µs) later, at
+#                      both its edges: the control stays held that long past the hold's end;
+#   front, clip release = a candidate that is in this tool only (not in the model, not in ADR 0008): front
+#                      alone, and the hold stops acting on the control once 2 of the last 4 ADC samples
+#                      under it sit on a rail, until the front declares again or its hold falls.
 # A released control returns to the largest gain and searches (an assumption).
 # Rows 'preamble +': the frame's two training fields alone (320 samples, nothing after them)
 # are sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise.
 # Rows 'frame + SIFS +': a whole frame of 100 octets at the same rate and level first, the
-# frame counted 320 samples after its end. In both the columns without the front's hold try
-# the stream's first acquisition only and lose every frame by construction; only the columns
-# with the front's hold search again.
+# frame counted 320 samples after its end.
 # Rows 'noise -5': the noise at -5 dBFS at the largest gain, above the lock level: the
 # control locks on it below the largest gain.
+# Rows 'DC per index -20': an offset of -20 dBFS at every gain, its direction per gain index; rows 'DC before
+# gain -10': an offset of -10 dBFS at the largest gain that falls with the gain, one direction (channel::GainDc).
 # Each cell: frames lost, +a−b against 'from the lock' (lost by this column alone, by that one
-# alone), then acquisitions tried / holds dropped on a failed SIGNAL / frames whose gain
-# changed after the short training field and more than 16 samples before the frame's end
-# (in the stream of the last acquisition tried).
-# point                                  frames                from the lock                timer + front            timer<max + front                  front alone              timer<max alone                      nothing            t<max + front +40           t<max + front +400
-  AWGN 54 Mb/s 25 dB                       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0           61 +61−0 2000/0/61           67 +67−0 2000/0/67              0 +0−0 2000/0/0              5 +5−0 2000/0/5
-  AWGN 54 Mb/s 30 dB                       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              1 +1−0 2000/0/1           68 +68−0 2000/0/68           70 +70−0 2000/0/70              0 +0−0 2000/0/0              7 +7−0 2000/0/7
-  AWGN 54 Mb/s 40 dB                       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              4 +4−0 2000/0/4           55 +55−0 2000/0/55           61 +61−0 2000/0/61              0 +0−0 2000/0/0              8 +8−0 2000/0/8
-  AWGN 54 Mb/s 60 dB                       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0           60 +60−0 2000/0/60           60 +60−0 2000/0/60              0 +0−0 2000/0/0           14 +14−0 2000/0/14
-  AWGN 6 Mb/s 30 dB                        2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/2            0 +0−0 2000/0/528            0 +0−0 2000/0/530              0 +0−0 2000/0/0              0 +0−0 2000/0/6
-  AWGN 6 Mb/s 60 dB                        2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/2          26 +26−0 2000/0/543          24 +24−0 2000/0/546              0 +0−0 2000/0/0              0 +0−0 2000/0/3
-  TGn D 54 Mb/s 40 dB                      2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              2 +2−0 2000/0/2           85 +85−0 2000/0/85           87 +87−0 2000/0/87              0 +0−0 2000/0/0           12 +12−0 2000/0/12
-  TGn D 54 Mb/s 60 dB                      2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              3 +3−0 2000/0/3           64 +64−0 2000/0/64           68 +68−0 2000/0/68              0 +0−0 2000/0/0              8 +8−0 2000/0/8
-  TGn D 6 Mb/s 30 dB                       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0            1 +1−0 2000/0/536            1 +1−0 2000/0/539              0 +0−0 2000/0/0              0 +0−0 2000/0/9
-  AWGN 6 Mb/s 5 dB                         2000              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0
-  preamble + AWGN 54 Mb/s 30 dB            2000           2000 +0−0 2000/0/0        1991 +0−9 3522/1512/5      478 +0−1522 3522/1512/0      479 +0−1521 3522/1512/1          2000 +0−0 2000/0/64          2000 +0−0 2000/0/70      478 +0−1522 3522/1512/0      483 +0−1517 3522/1512/5
-  preamble + AWGN 6 Mb/s 30 dB             2000           2000 +0−0 2000/0/0      503 +0−1497 3497/1491/2      503 +0−1497 3497/1491/0      503 +0−1497 3497/1491/0         2000 +0−0 2000/0/537         2000 +0−0 2000/0/540      503 +0−1497 3497/1491/0      503 +0−1497 3497/1491/4
-  frame + SIFS + AWGN 54 Mb/s 30 dB        2000           2000 +0−0 2000/0/0      2000 +0−0 4000/994/2000           0 +0−2000 4000/0/0           3 +0−1997 4000/0/3          2000 +0−0 2000/0/62          2000 +0−0 2000/0/67           0 +0−2000 4000/0/0           2 +0−1998 4000/0/2
-  frame + SIFS + AWGN 6 Mb/s 30 dB         2000           2000 +0−0 2000/0/0     2000 +0−0 4000/1999/2000           0 +0−2000 4000/0/0           0 +0−2000 4000/0/2         2000 +0−0 2000/0/556         2000 +0−0 2000/0/558           0 +0−2000 4000/0/0           0 +0−2000 4000/0/4
-  noise -5: AWGN 54 Mb/s 30 dB             2000              0 +0−0 2000/0/0            20 +20−0 2000/0/2            19 +19−0 2000/0/2              2 +2−0 2000/0/2           65 +65−0 2000/0/65           51 +51−0 2000/0/51           19 +19−0 2000/0/18           22 +22−0 2000/0/22
-  noise -5: preamble + 54 Mb/s 30 dB       2000           2000 +0−0 2000/0/0     1577 +0−423 3524/1510/10     1577 +0−423 3524/1510/10      499 +0−1501 3503/1493/2        2000 +0−0 2000/0/1643          2000 +0−0 2000/0/63    1576 +0−424 3524/1510/899   1725 +0−275 3524/1510/1249
-  noise -5: frame + SIFS + 54 Mb/s 30 dB   2000           2000 +0−0 2000/0/0     2000 +0−0 3997/1602/1997     2000 +0−0 3997/1601/1997           1 +0−1999 4000/0/1        2000 +0−0 2000/0/1979          2000 +0−0 2000/0/56     2000 +0−0 3997/1603/1997      1978 +0−22 3999/17/1977
+# alone), then acquisitions declared / streams stopped on a failed SIGNAL / streams ended by a new
+# declaration or an overrun of the history / frames whose gain changed after the short training
+# field and more than 16 samples before the frame's end.
+# point                                  frames                    from the lock                    timer + front                timer<max + front                      front alone                  timer<max alone                          nothing                t<max + front +40               t<max + front +400              front, clip release
+  AWGN 54 Mb/s 25 dB                       2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                1 +1−0 2000/0/0/1             61 +61−0 2000/0/0/61             67 +67−0 2000/0/0/67                0 +0−0 2000/0/0/0                5 +5−0 2000/0/0/5                1 +1−0 2000/0/0/1
+  AWGN 54 Mb/s 30 dB                       2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                1 +1−0 2000/0/0/1             68 +68−0 2000/0/0/68             70 +70−0 2000/0/0/70                0 +0−0 2000/0/0/0                7 +7−0 2000/0/0/7                1 +1−0 2000/0/0/1
+  AWGN 54 Mb/s 40 dB                       2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                4 +4−0 2000/0/0/4             55 +55−0 2000/0/0/55             61 +61−0 2000/0/0/61                0 +0−0 2000/0/0/0                8 +8−0 2000/0/0/8                4 +4−0 2000/0/0/4
+  AWGN 54 Mb/s 60 dB                       2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0             60 +60−0 2000/0/0/60             60 +60−0 2000/0/0/60                0 +0−0 2000/0/0/0             14 +14−0 2000/0/0/14                0 +0−0 2000/0/0/0
+  AWGN 6 Mb/s 30 dB                        2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/2              0 +0−0 2000/0/0/528              0 +0−0 2000/0/0/530                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/6                0 +0−0 2000/0/0/5
+  AWGN 6 Mb/s 60 dB                        2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/2            28 +28−0 2000/0/0/543            26 +26−0 2000/0/0/546                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/3                0 +0−0 2000/0/0/5
+  TGn D 54 Mb/s 40 dB                      2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                2 +2−0 2000/0/0/2             85 +85−0 2000/0/0/85             87 +87−0 2000/0/0/87                0 +0−0 2000/0/0/0             12 +12−0 2000/0/0/12                4 +4−0 2000/0/0/4
+  TGn D 54 Mb/s 60 dB                      2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                3 +3−0 2000/0/0/3             64 +64−0 2000/0/0/64             68 +68−0 2000/0/0/68                0 +0−0 2000/0/0/0                8 +8−0 2000/0/0/8                3 +3−0 2000/0/0/3
+  TGn D 6 Mb/s 30 dB                       2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0              1 +1−0 2000/0/0/536              1 +1−0 2000/0/0/539                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/9               0 +0−0 2000/0/0/14
+  AWGN 6 Mb/s 5 dB                         2000                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0                2 +0−0 2000/0/0/0
+  preamble + AWGN 54 Mb/s 30 dB            2000           0 +0−0 4000/1512/470/0   1525 +1525−0 4000/1512/470/442           6 +6−0 4000/1512/470/7       477 +477−0 4000/1514/470/7        64 +64−0 4000/1512/470/64        70 +70−0 4000/1512/470/70         10 +10−0 4000/1512/470/7    250 +250−0 4000/1512/470/1530           1 +1−0 4000/1512/470/1
+  preamble + AWGN 6 Mb/s 30 dB             2000           0 +0−0 4000/1505/476/0         0 +0−0 4000/1505/476/397          0 +0−0 4000/1505/476/11          3 +3−0 4000/1508/476/11         0 +0−0 4000/1505/476/537         0 +0−0 4000/1505/476/540          0 +0−0 4000/1505/476/12        0 +0−0 4000/1505/476/1524           0 +0−0 4000/1505/476/8
+  frame + SIFS + AWGN 54 Mb/s 30 dB        2000                0 +0−0 4000/0/0/0    2000 +2000−0 4000/1013/0/2000                0 +0−0 4000/0/0/0                3 +3−0 4000/0/0/3             62 +62−0 4000/0/0/62             67 +67−0 4000/0/0/67                0 +0−0 4000/0/0/0                2 +2−0 4000/0/0/2                3 +3−0 4000/0/0/3
+  frame + SIFS + AWGN 6 Mb/s 30 dB         2000                0 +0−0 4000/0/0/0    2000 +2000−0 4000/2000/0/2000                0 +0−0 4000/0/0/0                0 +0−0 4000/0/0/2              0 +0−0 4000/0/0/556              0 +0−0 4000/0/0/558                0 +0−0 4000/0/0/0                0 +0−0 4000/0/0/3                0 +0−0 4000/0/0/6
+  noise -5: AWGN 54 Mb/s 30 dB             2000                0 +0−0 2000/0/0/0              20 +20−0 2000/0/0/3              19 +19−0 2000/0/0/3                2 +2−0 2000/0/0/2             65 +65−0 2000/0/0/65             51 +51−0 2000/0/0/51             19 +19−0 2000/0/0/18             22 +22−0 2000/0/0/22                2 +2−0 2000/0/0/2
+  noise -5: preamble + 54 Mb/s 30 dB       2000           0 +0−0 4000/1482/500/0   1409 +1409−0 4000/1488/487/259   1408 +1408−0 4000/1488/487/259       508 +508−0 4000/1486/500/9  1643 +1643−0 4000/1487/487/1643        63 +63−0 4000/1482/500/63     415 +415−0 4000/1488/487/287  1727 +1727−0 4000/1501/487/1513           2 +2−0 4000/1482/500/2
+  noise -5: frame + SIFS + 54 Mb/s 30 dB   2000                0 +0−0 4000/0/0/0    2000 +2000−0 3998/1606/0/2000    2000 +2000−0 3998/1605/0/2000                1 +1−0 4000/0/0/1      1979 +1979−0 4000/17/0/1979             56 +56−0 4000/0/0/56     2000 +2000−0 4000/532/0/2000            56 +56−0 3997/35/0/50                1 +1−0 4000/0/0/1
+  DC per index -20: AWGN 54 Mb/s 30 dB     2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                1 +1−0 2000/0/0/1          155 +155−0 2000/0/0/155          160 +160−0 2000/0/0/160                0 +0−0 2000/0/0/0             19 +19−0 2000/0/0/19                1 +1−0 2000/0/0/1
+  DC per index -20: preamble + 54 Mb/s     2000         19 +0−0 4000/1503/474/17   1520 +1508−7 4000/1502/475/447       10 +10−19 4000/1502/475/10     375 +375−19 4000/1506/474/12     158 +141−2 4000/1502/475/158     163 +146−2 4000/1503/474/163       13 +13−19 4000/1502/475/11   813 +808−14 4000/1502/475/1525          5 +5−19 4000/1503/474/5
+  DC per index -20: frame + SIFS + 54      2000              14 +0−0 4002/1/1/12    2000 +1986−0 4001/1191/1/1999               1 +1−14 4001/0/1/0               6 +6−14 4001/0/1/5          152 +138−0 4002/1/1/152          161 +148−1 4002/1/1/161               1 +1−14 4001/1/0/1            13 +13−14 4002/1/1/13               6 +6−14 4001/0/1/6
+  DC before gain -10: AWGN 54 Mb/s 30 dB   2000                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                0 +0−0 2000/0/0/0                3 +3−0 2000/0/0/3          133 +133−0 2000/0/0/133          139 +139−0 2000/0/0/139                0 +0−0 2000/0/0/0             13 +13−0 2000/0/0/13                3 +3−0 2000/0/0/3
+  DC before gain -10: preamble + 54 Mb/s   2000           0 +0−0 4000/1519/462/0   1538 +1538−0 4000/1524/458/454           7 +7−0 4000/1524/458/8      472 +472−0 4000/1523/462/11     123 +123−0 4000/1523/458/124     125 +125−0 4000/1519/462/126         41 +41−0 4000/1523/458/8    324 +324−0 4000/1523/458/1542           4 +4−0 4000/1519/462/4
+  DC before gain -10: frame + SIFS + 54    2000                0 +0−0 4008/7/0/0    2000 +2000−0 4000/1235/0/2000                0 +0−0 4000/0/0/0                5 +5−0 4000/0/0/5          113 +113−0 4008/7/0/113          119 +119−0 4008/7/0/119                4 +4−0 4002/3/0/4             15 +15−0 4008/7/0/15                5 +5−0 4000/0/0/5

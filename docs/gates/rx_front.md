@@ -2078,3 +2078,129 @@ copy on 2026-11-21; `rx_ofdm.rs` already says so beside `decode_signal`). A rece
 checks it would drop frames of a future amendment that sets it. So that item is withdrawn
 as written; what else can end a hold on a phantom length (the level falling by the packet's
 height, a restart on a stronger packet) is a question for the founder, not yet asked.
+
+## 2026-11-21 · measurements · `rxagc` on the streaming hand-off: decision 2 as a loop a sample at a time
+
+Commits: 171a3f3 (the control stepped), 94bf573 and 2785e4c (the tool). The reports are
+from the binary of 2785e4c (`loop`) and of 94bf573 (the others; the commits between them
+change `loop`'s extra column, texts and a test), built and run on the build server (Linux
+x86-64, 32 threads, `rust:1-slim`), 2000 frames per row.
+
+**What changed in the tool.**
+- *The loop is the model's.* Until now `loop` formed the ADC's stream from a batch run of
+  the control, took the acquisitions of a whole-stream run, raised and dropped a hold by
+  the tool's own rules and ran everything again after each decision. Now, in every
+  column, a frame goes a sample at a time through the control
+  (`FastAttackAgc::start`, `AgcRun::push`: the same control stepped, `channel.md`), the
+  ADC, the streaming front (`RxHandoffFixed`) and the decoder as its reader, which sees
+  the beats alone: SIGNAL's verdict (`decode_signal_fixed` on the stream's first 208
+  samples, with the stream's tag) 50 periods after the beat that completes them, the
+  stream decoded when its end mark comes. The front's `hold()` after sample n − 1 holds
+  the control at sample n (40 or 400 samples later in two columns). The hold's rise, its
+  end from SIGNAL's length, its fall on a failed SIGNAL and the watchdog are
+  `RxHandoffFixed`'s, not the tool's.
+- *The front searches all through,* in every column: a frame is received if any stream
+  decodes to it. The columns without the front's hold therefore no longer lose the rows
+  with something before the frame by construction, and a SIGNAL that passes on noise no
+  longer loses the frame behind it by construction (the old tool held the front for the
+  length it claimed): a second declaration aborts that stream and opens the frame's.
+- *Rows with a DC offset* (per index −20 dBFS; before the gain, −10 dBFS at the largest),
+  on the frames of three rows: the loop had none.
+- *A column `stream`* in `per`, `level` and `dc`: the loop's "front alone" on the row's
+  frame. The integer chains of the other columns start their tracker from the CFO word
+  and the register (`FixedTracking::from_cfo_word`), as `rxper` does; no float is left
+  between the ADC and the PSDU. Those reports: the entry after this one.
+
+**Results of `loop`** (`reports/rx_front_agc_loop.txt`; frames lost of 2000):
+
+| Row | from the lock (the tool knows the packet) | timer on every lock + front | timer below the largest gain + front | **front alone** | that timer alone | nothing | front alone, clip release (tool only) |
+|---|---|---|---|---|---|---|---|
+| AWGN 54 Mb/s 25 / 30 / 40 / 60 dB | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 1 / 1 / 4 / 0 | 61 / 68 / 55 / 60 | 67 / 70 / 61 / 60 | 1 / 1 / 4 / 0 |
+| AWGN 6 Mb/s 30 / 60 dB | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 28 | 0 / 26 | 0 / 0 |
+| TGn D 54 Mb/s 40 / 60 dB | 0 / 0 | 0 / 0 | 0 / 0 | 2 / 3 | 85 / 64 | 87 / 68 | 4 / 3 |
+| TGn D 6 Mb/s 30 dB; AWGN 6 Mb/s 5 dB | 0; 2 | 0; 2 | 0; 2 | 0; 2 | 1; 2 | 1; 2 | 0; 2 |
+| preamble alone, then 54 / 6 Mb/s 30 dB | 0 / 0 | 1525 / 0 | 6 / 0 | **477 / 3** | 64 / 0 | 70 / 0 | 1 / 0 |
+| frame, SIFS, then 54 / 6 Mb/s | 0 / 0 | 2000 / 2000 | 0 / 0 | 3 / 0 | 62 / 0 | 67 / 0 | 3 / 0 |
+| noise −5 dBFS: 54 Mb/s; after a preamble; after a SIFS | 0; 0; 0 | 20; 1409; 2000 | 19; 1408; 2000 | 2; **508**; 1 | 65; 1643; 1979 | 51; 63; 56 | 2; 2; 1 |
+| DC per index −20 dBFS: 54 Mb/s; after a preamble; after a SIFS | 0; 19; 14 | 0; 1520; 2000 | 0; 10; 1 | 1; **375**; 6 | 155; 158; 152 | 160; 163; 161 | 1; 5; 6 |
+| DC before the gain −10 dBFS: the same three | 0; 0; 0 | 0; 1538; 2000 | 0; 7; 0 | 3; **472**; 5 | 133; 123; 113 | 139; 125; 119 | 3; 4; 5 |
+
+(The two columns with the hold 40 and 400 samples late are in the report. They are on the
+timer below the largest gain and share its loud-noise rows; elsewhere 40 late loses 0 to
+41 and 400 late 0 to 813. The delay now moves both edges of the hold.)
+
+1. **The ordinary rows, the SIFS rows and the loud-noise rows are the old report's,** to
+   the frame in the columns with the front's hold: "front alone" 1, 1, 4, 0 at AWGN
+   54 Mb/s, 2 and 3 through TGn D, 3 and 0 after a SIFS, 1 after a SIFS in loud noise. What
+   the tool modelled by hand and what `RxHandoffFixed` does agree where both were right.
+   The amendment of decision 2 stands on the same numbers: a timer on every lock loses
+   every frame after a SIFS; the timer below the largest gain loses every one in loud
+   noise.
+2. **A SIGNAL read from noise does not by itself lose the frame behind it.** After a
+   preamble alone the front declares twice per frame (4000 declarations); about 1510 of
+   the first streams are stopped on a failed SIGNAL and about 470 are ended by the frame's
+   own declaration: those are the SIGNALs that passed on noise (2000/4 by parity and the
+   valid rates). With the gain right (from the lock; the timer below the largest gain
+   that happens to keep the preamble's lock) the frame is then received: 0 and 6 lost of
+   2000, where the old tool lost 478 in every column because its front did not search
+   under a hold. The old finding 4 ("a quarter are lost in every column") was the tool's.
+3. **What does lose them is the gain the hold freezes.** With the front's hold alone the
+   preamble has ended (sample 320) before the front declares it; the control has left its
+   lock on the lost power and is back at the largest gain when the hold is raised. When
+   SIGNAL then passes on noise the hold stays, and the frame arrives at the largest gain:
+   **477 of 2000 at 54 Mb/s (24 %), 508 in loud noise, 375 and 472 with an offset;** 3 at
+   6 Mb/s, which survives the clipping. This is the open question of the entry before last
+   (what ends a hold on a phantom SIGNAL) with its mechanism measured: a hold whose packet
+   is not there, at a gain that was not taken for the packet that comes.
+4. **A candidate, in the tool only (not in the model, not in ADR 0008): the hold stops
+   acting on the control when 2 of the last 4 ADC samples under it sit on a rail,** until
+   the front declares again or its hold falls. It takes the four cells of finding 3 to 1,
+   2, 5 and 4 of 2000, and leaves every other cell as "front alone" but TGn D 54 Mb/s
+   40 dB (4 against 2); frames whose gain moved inside the data rise at 6 Mb/s (5, 5 and
+   14 of 2000 against 2, 2 and 0), none of them lost. Other settings were tried at 200
+   frames only and were worse in the preamble rows (8 of 16: 30 and 21 lost of 200 at 54
+   and 6 Mb/s; 4 of 8: 10 and 6; 2 of 2: 21 and 8; 2 of 4: 0 and 0): the release has to
+   come as fast as the control's own overload detector or the gain settles too late in the
+   short training field. One setting, one scene: an input for the founder's question, not
+   a design.
+5. **With an offset the tool's own assumption is not the best column:** "from the lock"
+   loses 19 after a preamble and 14 after a SIFS at −20 dBFS per index (it holds from the
+   control's first lock inside the packet, which the offset moves); the front's hold loses
+   6 after the SIFS.
+6. **Without the front's hold** the rows are as before (55 to 87 of 2000 at 54 Mb/s), and
+   with an offset twice that (113 to 163): the offset is one more thing the detectors see.
+
+**Independent review (fresh agent, the diff and ADR 0008, not the conclusions).** No
+defect found in the stepped control or in the loop: a randomized differential test of
+`run_held` against the old function (300 000 cases: holds from sample 0, overlapping,
+reversed, to the stream's end and beyond, NaN and infinite samples, offsets) differed in
+none with finite parameters; with a largest gain that is not a number the list of changes
+gets entries on held samples (gains, locks and unlocks the same; not changed). It traced
+the hold's line, the verdict's period, the sample a phase jump is drawn at, the offset per
+gain, and that the reader uses the beats, the stream's word and its tag only. Found and
+corrected:
+- *the stepped control's new test could not fail:* both of its sides ran on the stepper
+  (five mutants passed it; the older hand-worked tests caught them). It now carries the
+  first case worked by hand through two holds (locks at 45, 150 and 255, releases reported
+  at 105 and 210, the gains around them); four of those five mutants fail it and the
+  fifth (a held sample still decides: nothing to decide at a quiet lock) fails
+  `a_hold_freezes_the_gain…` as before;
+- the header of `loop` described both kinds of offset as "per index"; the header of
+  `per`/`level`/`dc` said every column tries the first acquisition only and did not say
+  that `level`, `chg` and `held` describe the assumed hold, not the `stream` column;
+- the delay columns' text did not say that both edges move.
+It also read finding 3 off a 40-frame run before the journal said it.
+Not checked by it: `RxHandoffFixed` beyond `push`/`signal`/`open`, `from_cfo_word`'s
+numerics, `per` and `level`, any 2000-frame number.
+
+**What this is not.** One seed per row, one run. The release's behaviour (to the largest
+gain, the search from scratch) is an assumption about a radio. Frames of 1000 octets; one
+gap after a preamble (280 to 330 samples) and one level; the first frame of a "frame,
+SIFS" row is not counted. The reader always has room. The verdict's latency is one number
+(50 periods). The float chain is not in the loop.
+
+**Open**
+- What ends a hold on a phantom SIGNAL: for the founder, with findings 3 and 4.
+- The clip release, if chosen, belongs in `RxHandoffFixed` with its own gate, and needs
+  the scenes it has not seen (a stronger packet inside a true one; an interferer).
+
