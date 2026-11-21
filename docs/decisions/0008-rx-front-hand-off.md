@@ -1,8 +1,28 @@
 # ADR 0008 — Receiver front, amended: hand-off of samples, DC removal for the decoder, the gain's hold, latency, folding, area and power
 
-Status: **proposed** · 2026-11-21 · PHY architecture (risk point). Amends ADR 0006; announced
-by ADR 0007 (decision 2) and asked for by ADR 0009 (the count for one to eight chains, the
-sample interface). The founder decides each item; the text is the proposal put to them.
+Status: **accepted** · proposed 2026-11-21, accepted by the founder 2026-11-21 · PHY
+architecture (risk point). Amends ADR 0006; announced by ADR 0007 (decision 2) and asked for
+by ADR 0009 (the count for one to eight chains, the sample interface).
+
+## Decided (the founder, 2026-11-21, each item asked on its own; the recommendation taken in each)
+
+1. **The decoder is handed** the ADC's samples less one DC offset per packet, estimated from
+   the two long training symbols, replayed from a second history, turned by the CFO word,
+   13 bits wide (`in_shift` 1).
+2. **The gain:** the control keeps a lock for 512 samples after taking it, and the front
+   holds the gain from its declaration to the packet's end.
+3. **Latency:** the budget below; everything behind the hand-off takes one sample per clock.
+4. **Folding: option C** — the search correlator folded over R, the decision's over 4, the
+   detector's arithmetic serial; ADR 0006's R = 6 fallback given up; the folded search
+   correlator through the flow and the cycle-exact schedule first.
+5. **Area:** ≤ 2.5 mm² at 130 nm as the working target for one chain's front, tightened
+   after that probe; no power target until a folded block's switching has been simulated.
+   The earlier starting point (≤ 1 mm², ≤ 150 mW) is withdrawn.
+6. **Interface:** a chain is one stream of 12-bit I and Q with a valid; the pool's size
+   (R0-17) and the pins (R1) are not decided here.
+7. **The tracker's prior** is the CFO word times a per-channel fs/fc register.
+
+The text below is the proposal as it was put to the founder.
 An independent review of the first draft (fresh agent, 2026-11-21) changed decisions 2 to 6;
 what it found is at the end.
 Sources: `docs/gates/rx_front.md` (2026-11-21, G0 and results), `docs/gates/rx_ofdm.md`
