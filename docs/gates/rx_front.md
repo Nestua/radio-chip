@@ -2204,3 +2204,158 @@ SIFS" row is not counted. The reader always has room. The verdict's latency is o
 - The clip release, if chosen, belongs in `RxHandoffFixed` with its own gate, and needs
   the scenes it has not seen (a stronger packet inside a true one; an interferer).
 
+## 2026-11-21 · measurements · `rxagc`'s other reports on the word start, with the `stream` column
+
+Commit: 94bf573 (the binary; the build and the run as in the entry before this one, 2000
+frames per row). Commands: `rxagc per`, `level`, `dc`, `cand`, `hold`, `cfo`, `pole`,
+`edge`, each to its report (`reports/rx_ofdm_agc_{per,level,dc,pole}.txt`,
+`reports/rx_front_dc_{cand,hold,cfo,edge}.txt`). Two things changed against the committed
+reports: the integer chains start their tracker from the CFO word and the register
+(`FixedTracking::from_cfo_word`), and `per`, `level` and `dc` carry the column `stream`
+(the loop's "front alone" on the row's frame).
+
+**The old columns, cell by cell against the reports they replace** (a script over the data
+rows, the new column left out):
+
+| Report | cells | changed | largest change of a count |
+|---|---|---|---|
+| `per` | 1407 | 10 | 1 frame |
+| `level` | 350 | 7 | 1 |
+| `cand` | 965 | 8 | 2 |
+| `edge` | 352 | 1 | 1 |
+| `dc` | 476 | 0 | |
+| `hold`, `cfo`, `pole` | 138, 204, 182 | 0 | |
+
+Every changed cell is in an integer column; no float cell moved. The start from the word
+in place of the float conversion costs or gains a frame in 26 cells of 3674, and `per`'s
+lines of the SNR at 10 % PER are the old report's to the printed digit in every old column.
+
+**The `stream` column.** It is the first place the receiver of ADR 0008 as a whole (the
+streaming front, its own hold, the offset of the two long training symbols removed, no DC
+blocker before the decoder, 13 bits) stands next to the chains with the blocker on the
+same frames.
+
+1. **`per`, around 10 % PER: the same as "float known" up to 24 Mb/s, better above it.**
+   SNR at 10 % PER against "float known" (a gain that knows the frame, no gain control):
+
+   | | 6 | 9 | 12 | 18 | 24 | 36 | 48 | 54 Mb/s |
+   |---|---|---|---|---|---|---|---|---|
+   | AWGN | +0.00 | +0.01 | +0.00 | −0.01 | +0.03 | −0.10 | −0.39 | −0.84 dB |
+   | TGn D, static | +0.05 | +0.00 | −0.01 | +0.01 | −0.10 | −0.84 | −2.12 | (26.79 dB; no other column reaches 10 %) |
+
+   The gain at the high rates is not the stream's merit over an ideal chain: every other
+   column, "known" included, has the 2⁻⁷ blocker in the decoder's path, and `rx_ofdm.md`
+   (2026-11-20, finding 3) measured that it more than doubles the frames lost at 54 Mb/s.
+   The stream is what that entry's "raw" column was, now with the offset handled.
+2. **`per`, above the noise's reach** (30 to 60 dB; frames lost of 10 000 per rate): at
+   54 Mb/s the stream loses 12 in AWGN and 49 through TGn D where float loses 70 and
+   1437; at 6 Mb/s 0 and 1 (float 0 and 0). **At 24 Mb/s in AWGN it loses 12 of 10 000
+   (1, 2, 4, 4, 1 over the five SNRs) where every other column loses none**: a small
+   floor of the stream's own, not looked into (the frames whose gain moves under the
+   front's later hold are the first suspect: `chg` is 3 to 10 per frame there).
+3. **`level`** (the noise from −24 to −60 dBFS at the largest gain, at the SNR of about
+   10 % PER): at 6 Mb/s the stream follows the 13-bit integer columns down the level
+   (487 lost at −60 dBFS; int 13/1 470, float 302); at 54 Mb/s it loses about half of
+   every other column at every level (185 to 374 against 387 to 736 for int 13/1), again
+   the blocker's absence.
+4. **`dc`** (54 Mb/s; frames lost of 2000): 1 to 4 in every row but one, where the chains
+   with the blocker lose 5 to 239 and the decoder handed the raw samples up to 1666. The
+   one row: an offset before the gain of −10 dBFS at the largest gain, at 25 dB: 850
+   (float 1115, raw 1933); 3, 2 and 1 at 30, 40 and 60 dB. At 6 Mb/s the stream loses
+   none in any row.
+
+**What this is not.** One seed per row, one run. The `stream` column's phase jumps are its
+own draws, so a frame's gain history differs from the other columns': the pairs +a−b
+against "float" are wider than between the other columns (for example 6 Mb/s 2.5 dB:
++39−32 around 1024 against 1017) with the totals equal. `level`, `chg` and `held` describe
+the assumed hold, not the stream's. No independent review of these numbers beyond the
+review of the tool recorded in the entry before this one.
+
+**Open**
+- The stream's 12 of 10 000 at 24 Mb/s in AWGN above 30 dB.
+- The row of `dc` at −10 dBFS before the gain and 25 dB (850 of 2000): whether it is the
+  offset estimate or the ADC's range.
+
+## 2026-11-21 · G3 · the search correlator folded over 8 clocks (ADR 0008, decision 4)
+
+**What changed.** `hw/rtl/ltf_corr.sv` makes the same sums (the two exact folds of part 3a:
+T1 + T2, then the Hermitian pairs) with 16 multipliers of 14 × 8 bits over the 8 clocks of
+a sample, in place of 128 constant multiplications in one. A slot is one pair k = 1 … 31
+(four products) or the two real taps t(0), t(32) together; clock p of a sample takes slots
+4p … 4p + 3, their window entries through 8-to-1 multiplexers and their taps from the
+generated table. The window of 128 samples stays a shift register. The model is untouched
+and so are the vectors (`hw/vectors/ltf_corr.txt`): the sums are the same integers.
+
+**Interface (G0).** One sample per `in_valid`, at most one in 8 clocks; no `ready`. The
+output is registered **14 clocks** after the clock edge that takes the sample (was 5): 1
+select, 1 fold, 1 product, 2 of sums, the accumulator after the 8th clock, 1 of narrowing.
+A sample taken sooner than 8 clocks after the one before abandons that one's correlation
+(no `out_valid` for it) and is itself correlated. The decision's schedule (part d, step 3)
+takes the 14 from here; ADR 0008 counted "a sample later", 8 clocks, and this is 9.
+
+**Gate.** `make -C hw ltf_corr` (Verilator 5.054; `make -C hw lint` clean), with the
+review's additions below. The testbench feeds a sample every 8th clock with one more idle
+clock after every 5th and two after every 13th, other values on the data inputs between
+samples; it requires every output exactly 14 clocks after its sample's edge and equal to
+the model; it replays the first segment with the sample after every 97th coming after 7, 5
+and 1 clocks (no output for the abandoned one, the model's for the early one); and it
+resets the block 1 to 13 clocks after a sample with a full window and requires that
+nothing comes out. The simulation starts flip-flops without a reset at random values
+(`+verilator+rand+reset+2`).
+Result: 9 segments, 7618 samples, 9517 outputs, 13 resets in flight, **0 mismatches**. Seen
+failing first: the unfolded RTL against the first version of the new testbench, 13 190
+mismatches of 7489 outputs (its outputs come at 5 clocks: every one is counted as early and
+as missing).
+
+Mutations (each restored with `cp` + `touch`; mismatches of the 7489 outputs of the
+testbench before the review's additions, timing errors counted too):
+| Mutation | Mismatches |
+|---|---|
+| tap of the neighbouring pair | 7489 |
+| the real tap table for the b products | 7472 |
+| sign of the b term of the real part / of the imaginary part | 7398 / 7383 |
+| sign of a product in the imaginary sum | 7480 |
+| the accumulator never restarts | 7485 |
+| t(0) and t(32) swapped / slot 0 treated as a pair / its second entry off by one | 7485 / 7483 / 7292 |
+| the T2 half of the window off by one | 7472 |
+| slots of a clock in the other order | 7472 |
+| the last clock's mark a clock early | 22 465 |
+| the first clock's mark a clock late | 7489 |
+| an output before the window is full | 7491 |
+| an early sample does not restart the clocks | 7507 (4043 outputs) |
+| the window shifts once more in a sample's 8 clocks | 7472 |
+One survives and is equivalent: the accumulator also clocked outside a sample's clocks (its
+enable is there to keep it still, not for the value: the first clock's mark reloads it).
+
+**Independent review (fresh agent, the diff and decision 4).** No defect found in the RTL:
+it derived the worst cases of every width by hand (sums within 13 and 14 bits, products
+within 2^20 of 22 bits, the accumulator within 2^26 of 28; the saturation unreachable),
+rebuilt the correlator from the tap table in a model of its own, and ran a bench of its own
+(spacings 1 to 12 at random, bursts of three samples on consecutive clocks, other data
+between samples, resets in flight, random initial state: nothing wrong in 20 runs). Found
+in the gate and corrected:
+- *the marks' reset was not tested:* the reset branch of the marks removed passed (the
+  testbench reset only an idle block, and the simulation started every flip-flop at 0). The
+  resets in flight and the random start are in the gate now: that mutant gives 1036
+  mismatches;
+- *the early sample was tried at 5 clocks only:* the last clock's mark taken from the
+  delayed phase passed and let out a sample abandoned 7 clocks after it was taken. Spacings
+  7, 5 and 1 now: 968 mismatches;
+- the data inputs held the last sample between samples: other values now (a window that
+  takes its input on another clock: 9517 of 9517).
+It also confirmed the 14 clocks stage by stage and that the surviving mutant is equivalent.
+Not checked by it: the synthesis tools, the journal's mutation counts, timing and area.
+
+**Timing and area** (probes run by hand on the build server; no gate reruns them):
+- KV260 part, out of context, 6.25 ns (`tools/syn/ooc_probe.tcl`, Vivado 2024.2; excerpt
+  appended to `reports/rx_front_timing_ooc.txt`): **+1.80 ns** (was −1.89 ns, 729 failing
+  endpoints), 1370 LUTs (1932), 3611 registers (3320), **20 DSP blocks (124)**. The worst
+  path is the sum of a clock's four slots, which Vivado put into DSP blocks.
+- IHP SG13G2, 6.25 ns: `docs/gates/silicon_probe.md` (2026-11-21).
+
+**What this is not.** No enable from the search control yet (ADR 0008: the correlators'
+arithmetic runs only while a search is open): it comes with the top level. Nothing checks
+the block beyond its vectors (G4 is not started); the early-sample rule is exercised at one
+spacing (5 clocks). The decision's own correlator (a window of 64 folded over 4) is a
+separate block of part d.
+
