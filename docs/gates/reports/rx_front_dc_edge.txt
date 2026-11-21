@@ -2,13 +2,19 @@
 # uniform in ±40 ppm (CFO and sample clock, carrier 5.8 GHz), channel::FastAttackAgc (power
 # over 16 samples, lock left on a large overload, 2 detector clocks per sample, lock level
 # −10 dBFS, largest gain 73 dB), the gain held from the first lock inside the packet
-# (assumed), phase jump ±30° per gain change (assumed), 12-bit ADC.
+# (assumed; `hold` has rows that hold it later), phase jump ±30° per gain change (assumed), 12-bit ADC.
 # Chains on the ADC's samples:
 #   float     = float DC blocker (pole 2^-7), float front, rx_ofdm (8 bits, clip 3);
 #   int O/s   = dc_block_fixed (pole 2^-7), RxFrontFixed, correct_fixed to O bits,
 #               decode_ppdu_fixed with in_bits O and in_shift s, tracker started from the
-#               CFO word (its conversion to ppm is the one float between the ADC and
-#               the PSDU); the int columns of a row share one acquisition;
+#               CFO word and the register fs/fc (FixedTracking::from_cfo_word): no float
+#               between the ADC and the PSDU; the int columns of a row share one acquisition;
+#   stream    = where a command has it: the receiver of ADR 0008 in a closed loop with the
+#               gain control, a sample at a time (the column `front alone` of `loop`): the
+#               streaming front (RxHandoffFixed), its own hold in place of the assumed one,
+#               the offset of the two long training symbols removed, 13 bits, the decoder
+#               at its defaults reading the beats; the front searches all through and the
+#               frame is received if any stream decodes to it; its phase jumps are its own draws;
 #   known     = the same chain behind a gain that knows the frame (it at -12 dBFS at
 #               the ADC, no gain control, no DC offset);
 #   raw       = the decoder handed the samples before the DC blocker.
@@ -62,7 +68,7 @@
 # point, DC offset                             frames  level   chg  held        float raw       float 2^-7        float ltf     int 13/1 ltf        float acq          int acq
   AWGN 54 Mb/s 20 dB, noise −48 dBFS, no DC      2000  -28.0  0.00     0        179 +7−14      402 +232−16              186       196 +27−17         0 +0−186         0 +0−186
   AWGN 54 Mb/s 20 dB, noise −48 dBFS, per index −50 dBFS   2000  -28.0  0.00     0      968 +793−11      396 +231−21              186       195 +25−16         0 +0−186         0 +0−186
-  AWGN 54 Mb/s 20 dB, noise −54 dBFS, no DC      2000  -34.0  0.00     0       200 +11−10      406 +222−15              199       227 +57−29         0 +0−199         0 +0−199
+  AWGN 54 Mb/s 20 dB, noise −54 dBFS, no DC      2000  -34.0  0.00     0       200 +11−10      406 +222−15              199       226 +56−29         0 +0−199         0 +0−199
   AWGN 54 Mb/s 20 dB, noise −54 dBFS, per index −50 dBFS   2000  -34.0  0.00     0     1626 +1430−7      432 +244−15              203       242 +65−26         0 +0−203         0 +0−203
   AWGN 6 Mb/s 3.5 dB, noise −48 dBFS, no DC      2000  -42.9  0.00     0        212 +8−10        219 +14−9              214       221 +28−21         0 +0−214         0 +0−214
   AWGN 6 Mb/s 3.5 dB, noise −48 dBFS, per index −50 dBFS   2000  -42.9  0.00     0      784 +574−14        219 +7−12              224       231 +23−16         0 +0−224         0 +0−224

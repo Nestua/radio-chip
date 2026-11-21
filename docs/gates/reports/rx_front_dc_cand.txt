@@ -2,13 +2,19 @@
 # uniform in ±40 ppm (CFO and sample clock, carrier 5.8 GHz), channel::FastAttackAgc (power
 # over 16 samples, lock left on a large overload, 2 detector clocks per sample, lock level
 # −10 dBFS, largest gain 73 dB), the gain held from the first lock inside the packet
-# (assumed), phase jump ±30° per gain change (assumed), 12-bit ADC.
+# (assumed; `hold` has rows that hold it later), phase jump ±30° per gain change (assumed), 12-bit ADC.
 # Chains on the ADC's samples:
 #   float     = float DC blocker (pole 2^-7), float front, rx_ofdm (8 bits, clip 3);
 #   int O/s   = dc_block_fixed (pole 2^-7), RxFrontFixed, correct_fixed to O bits,
 #               decode_ppdu_fixed with in_bits O and in_shift s, tracker started from the
-#               CFO word (its conversion to ppm is the one float between the ADC and
-#               the PSDU); the int columns of a row share one acquisition;
+#               CFO word and the register fs/fc (FixedTracking::from_cfo_word): no float
+#               between the ADC and the PSDU; the int columns of a row share one acquisition;
+#   stream    = where a command has it: the receiver of ADR 0008 in a closed loop with the
+#               gain control, a sample at a time (the column `front alone` of `loop`): the
+#               streaming front (RxHandoffFixed), its own hold in place of the assumed one,
+#               the offset of the two long training symbols removed, 13 bits, the decoder
+#               at its defaults reading the beats; the front searches all through and the
+#               frame is received if any stream decodes to it; its phase jumps are its own draws;
 #   known     = the same chain behind a gain that knows the frame (it at -12 dBFS at
 #               the ADC, no gain control, no DC offset);
 #   raw       = the decoder handed the samples before the DC blocker.
@@ -85,7 +91,7 @@
   per index −30 dBFS                             2000  -10.0  0.01     9     1207 +1051−6      407 +256−11              162      403 +256−15        172 +17−7        170 +16−8
   per index −20 dBFS                             2000  -10.4  0.39    40     1844 +1391−0      801 +360−12              453      808 +368−13       460 +17−10       458 +18−13
   before the gain −30 dBFS                       2000  -10.0  0.00    11    1225 +1073−12      412 +259−11              164      404 +253−13       171 +18−11       171 +17−10
-  before the gain −20 dBFS                       2000  -10.4  0.40    44     1834 +1418−1       626 +216−7              417      636 +231−12       427 +23−13        434 +23−6
+  before the gain −20 dBFS                       2000  -10.4  0.40    44     1834 +1418−1       626 +216−7              417      636 +231−12       427 +23−13        433 +23−7
   before the gain −10 dBFS                       2000  -12.1  0.92    63      1989 +246−0       1778 +38−3             1743       1778 +40−5        1741 +2−4        1741 +2−4
 
 ## AWGN 6 Mb/s 3.5 dB
@@ -93,7 +99,7 @@
   no DC                                          2000  -24.9  0.00     0        213 +9−18        209 +7−20              222        210 +6−18         220 +6−8         217 +1−6
   per index −40 dBFS                             2000  -24.9  0.00     0       256 +56−19        209 +6−16              219       217 +11−13         223 +8−4         222 +5−2
   per index −30 dBFS                             2000  -24.9  0.00     0      1001 +789−9        209 +6−18              221        215 +9−15        214 +3−10         220 +3−4
-  per index −20 dBFS                             2000  -24.9  0.00     0     1801 +1586−4        211 +9−17              219       215 +10−14        224 +10−5         223 +5−1
+  per index −20 dBFS                             2000  -24.9  0.00     0     1801 +1586−4        211 +9−17              219       215 +10−14         223 +9−5         223 +5−1
   before the gain −30 dBFS                       2000  -24.9  0.00     0     1029 +820−10        213 +6−12              219       215 +10−14         219 +5−5         222 +4−1
   before the gain −20 dBFS                       2000  -24.9  0.00     0     1810 +1593−2        208 +8−19              219       216 +12−15         216 +4−7         220 +4−3
   before the gain −10 dBFS                       2000  -24.9  0.00     0     1927 +1707−0        209 +6−17              220        212 +8−16         220 +6−6         220 +4−4
@@ -111,7 +117,7 @@
 ## TGn D 54 Mb/s 26.5 dB
 # DC offset                                    frames  level   chg  held        float raw       float 2^-7        float ltf    int 13/2 2^-7     int 12/2 ltf     int 13/2 ltf
   no DC                                          2000  -10.0  1.84    72        226 +6−12       511 +288−9              232       517 +294−9         231 +8−9        230 +9−11
-  per index −40 dBFS                             2000  -10.0  1.84    76      334 +117−13      512 +292−10              230      515 +295−10        228 +9−11       231 +11−10
+  per index −40 dBFS                             2000  -10.0  1.84    76      334 +117−13      512 +292−10              230      514 +294−10        229 +9−10       231 +11−10
   per index −30 dBFS                             2000  -10.0  1.86    83     1231 +1004−2      525 +307−11              229      535 +318−12         231 +8−6        228 +9−10
   per index −20 dBFS                             2000  -10.2  1.96   124     1838 +1604−1       761 +531−5              235       771 +540−4         235 +8−8        241 +10−4
   before the gain −30 dBFS                       2000  -10.0  1.86    81       611 +383−2      513 +293−10              230      507 +289−12        224 +9−15         229 +8−9
@@ -121,7 +127,7 @@
 ## TGn D 54 Mb/s 40 dB
 # DC offset                                    frames  level   chg  held        float raw       float 2^-7        float ltf    int 13/2 2^-7     int 12/2 ltf     int 13/2 ltf
   no DC                                          2000  -10.0  6.74    80           0 +0−0       251 +251−0                0       251 +251−0           0 +0−0           0 +0−0
-  per index −40 dBFS                             2000  -10.0  6.73    83         42 +42−0       248 +248−0                0       250 +250−0           0 +0−0           0 +0−0
+  per index −40 dBFS                             2000  -10.0  6.73    83         42 +42−0       248 +248−0                0       251 +251−0           0 +0−0           0 +0−0
   per index −30 dBFS                             2000  -10.0  6.75    92       978 +978−0       267 +267−0                0       264 +264−0           0 +0−0           0 +0−0
   per index −20 dBFS                             2000  -10.2  6.84   129     1744 +1744−0       412 +412−0                0       418 +418−0           0 +0−0           0 +0−0
   before the gain −30 dBFS                       2000  -10.0  6.74    81           2 +2−0       251 +251−0                0       246 +246−0           0 +0−0           0 +0−0
@@ -143,15 +149,15 @@
   -42 dBFS, no DC                                2000  -36.9  0.00     0        211 +7−12        210 +8−14              216       219 +21−18       222 +22−16        211 +6−11
   -42 dBFS, per index −50 dBFS                   2000  -36.9  0.00     0       282 +86−22       214 +11−15              218       213 +20−25       220 +17−15        213 +9−14
   -48 dBFS, no DC                                2000  -42.9  0.00     0        212 +8−10        219 +14−9              214       223 +31−22       240 +52−26       214 +21−21
-  -48 dBFS, per index −50 dBFS                   2000  -42.9  0.00     0      784 +574−14        219 +7−12              224       230 +23−17       234 +42−32       231 +24−17
-  -54 dBFS, no DC                                2000  -48.9  0.00     0        233 +6−11        230 +5−13              238       260 +46−24      336 +132−34       254 +49−33
+  -48 dBFS, per index −50 dBFS                   2000  -42.9  0.00     0      784 +574−14        219 +7−12              224       230 +23−17       236 +44−32       231 +24−17
+  -54 dBFS, no DC                                2000  -48.9  0.00     0        233 +6−11        230 +5−13              238       259 +46−25      336 +132−34       254 +49−33
   -54 dBFS, per index −50 dBFS                   2000  -48.9  0.00     0     1571 +1342−5        225 +9−18              234       272 +70−32      356 +155−33       264 +58−28
 
 ## AWGN 54 Mb/s 20 dB: the noise at the largest gain lower
 # noise at the largest gain, DC offset         frames  level   chg  held        float raw       float 2^-7        float ltf    int 13/2 2^-7     int 12/2 ltf     int 13/2 ltf
   -42 dBFS, no DC                                2000  -22.0  0.00     0        176 +6−20      397 +225−18              190      412 +241−19       194 +18−14         190 +9−9
   -42 dBFS, per index −50 dBFS                   2000  -22.0  0.00     0      331 +164−20      402 +231−16              187      409 +240−18       205 +28−10       194 +17−10
-  -48 dBFS, no DC                                2000  -28.0  0.00     0        179 +7−14      402 +232−16              186      422 +252−16       211 +47−22       196 +23−13
+  -48 dBFS, no DC                                2000  -28.0  0.00     0        179 +7−14      402 +232−16              186      422 +252−16       212 +48−22       196 +23−13
   -48 dBFS, per index −50 dBFS                   2000  -28.0  0.00     0      968 +793−11      396 +231−21              186      413 +247−20       215 +49−20       200 +25−11
   -54 dBFS, no DC                                2000  -34.0  0.00     0       200 +11−10      406 +222−15              199      458 +289−30      272 +105−32       224 +54−29
   -54 dBFS, per index −50 dBFS                   2000  -34.0  0.00     0     1626 +1430−7      432 +244−15              203      468 +290−25      295 +122−30       227 +49−25
