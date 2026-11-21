@@ -90,6 +90,14 @@ packet, turned by the acquisition's CFO word, 13 bits wide.
    columns `acq`), so no control is proposed; it loses frames only where the gain control
    is blinded (508 of 2000, the offset before the gain at −10 dBFS, 25 dB).
 
+**In the model since 2026-11-21** (`RxHandoffFixed`; `docs/gates/rx_front.md`, the entry
+of that date on the streaming hand-off). What item 3 left to it is fixed there: the first
+sample of T1's window is rotated by the phase zero; the stream runs 8 samples past the
+hold's end, for the decoder's timing tracker; a packet ends in an end or abort mark, a beat
+of its own (the journal has the cases where a mark is not sent); the first beat carries a
+tag that the decoder gives back with SIGNAL's verdict, so that a late verdict cannot hit
+the next packet; a reader that falls a history behind loses the hold with the stream.
+
 **Why not the blocker's output** (which every measurement before 2026-11-20 assumed;
 54 Mb/s, frames lost of 2000, `rx_front_dc_cand.txt` unless said):
 
