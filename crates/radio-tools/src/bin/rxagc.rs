@@ -112,9 +112,20 @@ struct Point {
     /// The gain is held from this many samples after the packet's first sample instead of
     /// from the first lock inside the packet (never before that lock).
     hold_after: Option<usize>,
-    /// The frame's first 320 samples (its two training fields and nothing after them) are
-    /// also sent at the stream's start, 280 to 330 samples before the frame itself.
-    burst: bool,
+    /// What is sent before the frame.
+    burst: Burst,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Burst {
+    None,
+    /// The frame's first 320 samples (its two training fields and nothing after them) at
+    /// the stream's start, 280 to 330 samples before the frame itself.
+    Preamble,
+    /// A whole frame of 100 octets of zeros at the same rate and level, 650 samples into
+    /// the stream (after the timer of the control's first lock on noise has run out), and
+    /// the frame itself a SIFS (320 samples) after its last sample.
+    Frame,
 }
 
 /// A receiver chain on the ADC's samples.
@@ -215,13 +226,20 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
     let mut rng = Rng::new(mix(pt.scene, number));
     let psdu: Vec<u8> = (0..OCTETS).map(|_| (rng.next_u64() & 0xff) as u8).collect();
     let f = frame(&psdu, pt.rate);
-    let lead = 600 + (rng.uniform() * 50.0) as usize;
+    let mut lead = 600 + (rng.uniform() * 50.0) as usize;
     let mut x = vec![(0.0, 0.0); lead];
+    match pt.burst {
+        Burst::None => {}
+        Burst::Preamble => x[..320].copy_from_slice(&f[..320]),
+        Burst::Frame => {
+            x.truncate(650);
+            x.extend(frame(&[0u8; 100], pt.rate));
+            x.extend(vec![(0.0, 0.0); 320]);
+            lead = x.len();
+        }
+    }
     x.extend_from_slice(&f);
     x.extend(vec![(0.0, 0.0); 200]);
-    if pt.burst {
-        x[..320].copy_from_slice(&f[..320]);
-    }
     let x = match pt.ch {
         Channel::Awgn => fractional_delay(&x, rng.uniform()),
         Channel::Tgn(m) => {
@@ -449,47 +467,37 @@ struct Kept {
     tried: usize,
     /// Holds dropped because SIGNAL did not decode.
     dropped: usize,
-    /// The gain changed after the packet's short training field (160 samples) and before
-    /// its end, in the stream the last acquisition tried saw.
+    /// The gain changed after the packet's short training field (160 samples) and more than
+    /// 16 samples before its end, in the stream the last acquisition tried saw.
     moved: bool,
 }
 
-/// The ADC's samples for a trace of the gain control. As [`AgcTrace::gain_states_dc`], but
-/// the phase jump of a change is drawn from `seed` and the change's own sample, so that a
-/// stream with a later change added is the same stream up to that change (the loop below
-/// runs the control again after every decision of the front).
+/// The ADC's samples for a trace of the gain control: every stretch at its own gain and
+/// offset, the carrier phase turned at each change by an angle uniform in ±[`JUMP_DEG`]
+/// drawn from `seed` and the change's own sample. Gains and phases are absolute (the phase
+/// counted from the stream's first stretch), so a trace with a later change or hold added
+/// gives the same samples up to that change: the loop below runs the control again after
+/// every decision of the front.
 fn adc_of(xs: &[C], t: &AgcTrace, dc: &GainDc, seed: u64) -> Vec<(i16, i16)> {
-    let settled = t.changes.last().map_or(0.0, |c| c.1);
     let mut phase = 0.0;
-    let mut phases = vec![0.0];
-    for c in t.changes.iter().skip(1) {
-        let u = Rng::new(mix(seed, c.0 as u64)).uniform();
-        phase += (2.0 * u - 1.0) * JUMP_DEG.to_radians();
-        phases.push(phase);
-    }
-    let mut states: Vec<GainState> = t
+    let states: Vec<GainState> = t
         .changes
-        .windows(2)
-        .zip(&phases)
-        .map(|(w, ph)| GainState {
-            until: w[1].0,
-            gain_db: w[0].1 - settled,
-            phase: ph - phase,
-            dc: dc.at(w[0].1),
+        .iter()
+        .enumerate()
+        .map(|(k, c)| {
+            if k > 0 {
+                let u = Rng::new(mix(seed, c.0 as u64)).uniform();
+                phase += (2.0 * u - 1.0) * JUMP_DEG.to_radians();
+            }
+            GainState {
+                until: t.changes.get(k + 1).map_or(usize::MAX, |next| next.0),
+                gain_db: c.1,
+                phase,
+                dc: dc.at(c.1),
+            }
         })
         .collect();
-    states.push(GainState {
-        until: usize::MAX,
-        gain_db: 0.0,
-        phase: 0.0,
-        dc: dc.at(settled),
-    });
-    let g = 10f64.powf(settled / 20.0);
-    let at_settled: Vec<C> = xs.iter().map(|s| (s.0 * g, s.1 * g)).collect();
-    to_adc(
-        &agc_transient(&at_settled, &states),
-        f64::from(ADC_FULL_SCALE),
-    )
+    to_adc(&agc_transient(xs, &states), f64::from(ADC_FULL_SCALE))
 }
 
 /// Samples from the FFT window of T1 to the end of SIGNAL's symbol, and the decoder's
@@ -497,6 +505,9 @@ fn adc_of(xs: &[C], t: &AgcTrace, dc: &GainDc, seed: u64) -> Vec<(i16, i16)> {
 /// decision 3: SIGNAL is known 9 µs after its last sample at the latest).
 const SIGNAL_END: usize = 128 + 80;
 const SIGNAL_LATENCY: usize = 180;
+/// Samples the front's FFT window starts before the first path (`RxConfig::backoff_ns` of
+/// 200 ns): the frame's last sample is that much after its last window's end.
+const BACKOFF: usize = 4;
 
 /// One frame through the closed loop of one keeper: the gain control (with its timer), the
 /// ADC, the integer front, ADR 0008's hand-off and the integer decoder; the front's hold
@@ -521,7 +532,7 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
     let moved = |t: &AgcTrace| {
         t.changes
             .iter()
-            .any(|c| c.0 > st.lead + 160 && c.0 < st.end)
+            .any(|c| c.0 > st.lead + 160 && c.0 + 16 < st.end)
     };
 
     let Hold::Front { delay } = k.hold else {
@@ -563,12 +574,24 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
         out.moved = moved(&t);
         let dropped = match decode(&adc, a.fft_start, a.cfo_phase) {
             Ok(d) => {
+                // A SIGNAL that decoded: held for the length it gives.
+                let end = a.fft_start
+                    + SIGNAL_END
+                    + 80 * data_symbols(d.signal.rate, d.signal.length)
+                    + BACKOFF;
                 if d.psdu == st.psdu {
-                    out.ok = true;
+                    // The frame as it is with the hold dropped there.
+                    if let Some(h) = holds.last_mut() {
+                        h.1 = end.max(raised + 1);
+                    }
+                    let t = agc.run_held(&st.xs, Some(&st.dc), &holds);
+                    let adc = adc_of(&st.xs, &t, &st.dc, jumps);
+                    out.moved = moved(&t);
+                    out.ok =
+                        decode(&adc, a.fft_start, a.cfo_phase).is_ok_and(|d| d.psdu == st.psdu);
                     break;
                 }
-                // A SIGNAL that decoded: held for the length it gives.
-                a.fft_start + SIGNAL_END + 80 * data_symbols(d.signal.rate, d.signal.length)
+                end
             }
             Err(
                 RxOfdmError::SignalParity | RxOfdmError::SignalRate(_) | RxOfdmError::SignalLength,
@@ -672,9 +695,10 @@ fn hold_loop(frames: usize) {
         keeper("t<max + front +400", 512, false, Hold::Front { delay: 400 }),
     ];
     const IDLE: f64 = -30.0;
+    const LOUD: f64 = -5.0;
     println!(
         "# rxagc loop: ADR 0008, decision 2, as a closed loop. {frames} frames of {OCTETS} octets per row, the\n\
-         # frames of `hold` (the same scenes); noise at {IDLE} dBFS at the largest gain, no DC offset; clock\n\
+         # frames of `hold` (the same scenes); noise at {IDLE} dBFS at the largest gain unless the row says, no DC offset; clock\n\
          # offset uniform in ±40 ppm, carrier 5.8 GHz. Gain control: the AD9361's reset values with 16\n\
          # samples of power and the overload exit on (as every command). Receiver, all in integers:\n\
          # acquire (RxFrontFixed), hand-off (handoff_fixed), decode_ppdu_fixed at their defaults, the\n\
@@ -683,7 +707,8 @@ fn hold_loop(frames: usize) {
          #   from the lock    = held from the control's first lock inside the packet to the stream's end\n\
          #                      (the tool knows where the packet is: the assumption until now);\n\
          #   timer + front    = the control keeps every lock 512 samples; the front raises a hold where it\n\
-         #                      declares an acquisition and drops it at the end SIGNAL's length gives, or\n\
+         #                      declares an acquisition and drops it at the end SIGNAL's length gives (the\n\
+         #                      frame is decoded from the stream with the hold dropped there), or\n\
          #                      {SIGNAL_LATENCY} samples after SIGNAL's symbol when SIGNAL fails; it then searches again;\n\
          #   timer<max + front = the same, the timer keeping only a lock taken below the largest gain\n\
          #                      (a lock on noise is left at the first overload);\n\
@@ -692,16 +717,21 @@ fn hold_loop(frames: usize) {
          #   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and\n\
          #                      20 µs) late; a hold that would act after its own end is not raised.\n\
          # A released control returns to the largest gain and searches (an assumption).\n\
-         # Rows 'burst': the frame's two training fields alone (320 samples, nothing after them) are\n\
-         # sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise. The\n\
-         # columns without the front's hold try the stream's first acquisition only and lose every\n\
-         # such frame by construction; only the columns with the front's hold search again.\n\
+         # Rows 'preamble +': the frame's two training fields alone (320 samples, nothing after them)\n\
+         # are sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise.\n\
+         # Rows 'frame + SIFS +': a whole frame of 100 octets at the same rate and level first, the\n\
+         # frame counted 320 samples after its end. In both the columns without the front's hold try\n\
+         # the stream's first acquisition only and lose every frame by construction; only the columns\n\
+         # with the front's hold search again.\n\
+         # Rows 'noise {LOUD}': the noise at {LOUD} dBFS at the largest gain, above the lock level: the\n\
+         # control locks on it below the largest gain.\n\
          # Each cell: frames lost, +a−b against 'from the lock' (lost by this column alone, by that one\n\
          # alone), then acquisitions tried / holds dropped on a failed SIGNAL / frames whose gain\n\
-         # changed after the short training field (in the stream of the last acquisition tried)."
+         # changed after the short training field and more than 16 samples before the frame's end\n\
+         # (in the stream of the last acquisition tried)."
     );
     println!(
-        "# {:<22} {:>6} {}",
+        "# {:<38} {:>6} {}",
         "point",
         "frames",
         keepers
@@ -711,36 +741,64 @@ fn hold_loop(frames: usize) {
             .join(" ")
     );
     let d = Channel::Tgn(TgnModel::D);
-    let points: [(&str, Channel, Rate, f64); 12] = [
-        ("AWGN 54 Mb/s 25 dB", Channel::Awgn, Rate::R54, 25.0),
-        ("AWGN 54 Mb/s 30 dB", Channel::Awgn, Rate::R54, 30.0),
-        ("AWGN 54 Mb/s 40 dB", Channel::Awgn, Rate::R54, 40.0),
-        ("AWGN 54 Mb/s 60 dB", Channel::Awgn, Rate::R54, 60.0),
-        ("AWGN 6 Mb/s 30 dB", Channel::Awgn, Rate::R6, 30.0),
-        ("AWGN 6 Mb/s 60 dB", Channel::Awgn, Rate::R6, 60.0),
-        ("TGn D 54 Mb/s 40 dB", d, Rate::R54, 40.0),
-        ("TGn D 54 Mb/s 60 dB", d, Rate::R54, 60.0),
-        ("TGn D 6 Mb/s 30 dB", d, Rate::R6, 30.0),
-        ("AWGN 6 Mb/s 5 dB", Channel::Awgn, Rate::R6, 5.0),
-        ("burst, AWGN 54 Mb/s 30 dB", Channel::Awgn, Rate::R54, 30.0),
-        ("burst, AWGN 6 Mb/s 30 dB", Channel::Awgn, Rate::R6, 30.0),
+    let (n, p, f) = (Burst::None, Burst::Preamble, Burst::Frame);
+    let (awgn, r54, r6) = (Channel::Awgn, Rate::R54, Rate::R6);
+    let points: [(&str, Channel, Rate, f64, Burst, f64); 17] = [
+        ("AWGN 54 Mb/s 25 dB", awgn, r54, 25.0, n, IDLE),
+        ("AWGN 54 Mb/s 30 dB", awgn, r54, 30.0, n, IDLE),
+        ("AWGN 54 Mb/s 40 dB", awgn, r54, 40.0, n, IDLE),
+        ("AWGN 54 Mb/s 60 dB", awgn, r54, 60.0, n, IDLE),
+        ("AWGN 6 Mb/s 30 dB", awgn, r6, 30.0, n, IDLE),
+        ("AWGN 6 Mb/s 60 dB", awgn, r6, 60.0, n, IDLE),
+        ("TGn D 54 Mb/s 40 dB", d, r54, 40.0, n, IDLE),
+        ("TGn D 54 Mb/s 60 dB", d, r54, 60.0, n, IDLE),
+        ("TGn D 6 Mb/s 30 dB", d, r6, 30.0, n, IDLE),
+        ("AWGN 6 Mb/s 5 dB", awgn, r6, 5.0, n, IDLE),
+        ("preamble + AWGN 54 Mb/s 30 dB", awgn, r54, 30.0, p, IDLE),
+        ("preamble + AWGN 6 Mb/s 30 dB", awgn, r6, 30.0, p, IDLE),
+        (
+            "frame + SIFS + AWGN 54 Mb/s 30 dB",
+            awgn,
+            r54,
+            30.0,
+            f,
+            IDLE,
+        ),
+        ("frame + SIFS + AWGN 6 Mb/s 30 dB", awgn, r6, 30.0, f, IDLE),
+        ("noise -5: AWGN 54 Mb/s 30 dB", awgn, r54, 30.0, n, LOUD),
+        (
+            "noise -5: preamble + 54 Mb/s 30 dB",
+            awgn,
+            r54,
+            30.0,
+            p,
+            LOUD,
+        ),
+        (
+            "noise -5: frame + SIFS + 54 Mb/s 30 dB",
+            awgn,
+            r54,
+            30.0,
+            f,
+            LOUD,
+        ),
     ];
-    for (pi, (name, ch, rate, snr)) in points.into_iter().enumerate() {
+    for (pi, (name, ch, rate, snr, burst, idle)) in points.into_iter().enumerate() {
         let pt = Point {
             scene: 8000 + pi as u64,
             rate,
             snr_db: snr,
             ch,
-            idle_dbfs: IDLE,
+            idle_dbfs: idle,
             per_index_dbfs: f64::NEG_INFINITY,
             before_dbfs: f64::NEG_INFINITY,
             ppm_band: None,
             hold_after: None,
-            burst: name.starts_with("burst"),
+            burst,
         };
         let t = run_loop(&pt, &keepers, frames);
         println!(
-            "  {name:<22} {:>6} {}",
+            "  {name:<38} {:>6} {}",
             t.frames,
             (0..keepers.len())
                 .map(|c| format!(
@@ -957,7 +1015,7 @@ fn per(frames: usize) {
                     before_dbfs: none(),
                     ppm_band: None,
                     hold_after: None,
-                    burst: false,
+                    burst: Burst::None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 for (c, curve) in curves.iter_mut().enumerate() {
@@ -1013,7 +1071,7 @@ fn per(frames: usize) {
                     before_dbfs: none(),
                     ppm_band: None,
                     hold_after: None,
-                    burst: false,
+                    burst: Burst::None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!(
@@ -1079,7 +1137,7 @@ fn level(frames: usize) {
                 before_dbfs: none(),
                 ppm_band: None,
                 hold_after: None,
-                burst: false,
+                burst: Burst::None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(&format!("{idle:>5.0} dBFS"), &t, reference));
@@ -1142,7 +1200,7 @@ fn dc(frames: usize) {
                     before_dbfs: before,
                     ppm_band: None,
                     hold_after: None,
-                    burst: false,
+                    burst: Burst::None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!("{}", row_line(&format!("{name}, {snr} dB"), &t, reference));
@@ -1195,7 +1253,7 @@ fn pole(frames: usize) {
             before_dbfs: none(),
             ppm_band: None,
             hold_after: None,
-            burst: false,
+            burst: Burst::None,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(&format!("{snr} dB"), &t, reference));
@@ -1228,7 +1286,7 @@ fn pole(frames: usize) {
             before_dbfs: none(),
             ppm_band: None,
             hold_after: None,
-            burst: false,
+            burst: Burst::None,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(name, &t, reference));
@@ -1292,7 +1350,7 @@ fn cfo(frames: usize) {
                 before_dbfs: none(),
                 ppm_band: Some((lo, hi)),
                 hold_after: None,
-                burst: false,
+                burst: Burst::None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!(
@@ -1371,7 +1429,7 @@ fn cand(frames: usize) {
                 before_dbfs: before,
                 ppm_band: None,
                 hold_after: None,
-                burst: false,
+                burst: Burst::None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(case, &t, reference));
@@ -1400,7 +1458,7 @@ fn cand(frames: usize) {
                     before_dbfs: none(),
                     ppm_band: None,
                     hold_after: None,
-                    burst: false,
+                    burst: Burst::None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!(
@@ -1470,7 +1528,7 @@ fn hold(frames: usize) {
                 before_dbfs: none(),
                 ppm_band: None,
                 hold_after,
-                burst: false,
+                burst: Burst::None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(&format!("{name}, {what}"), &t, reference));
@@ -1643,7 +1701,7 @@ fn edge(frames: usize) {
                     before_dbfs: before,
                     ppm_band: band,
                     hold_after: None,
-                    burst: false,
+                    burst: Burst::None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!("{}", row_line(&format!("{name}, {case}"), &t, reference));

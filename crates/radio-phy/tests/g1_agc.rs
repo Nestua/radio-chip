@@ -741,3 +741,57 @@ fn a_lock_at_the_largest_gain_may_be_left_unkept() {
     assert_eq!(agc().run(&x).unlocks, [40, 100]);
     assert_eq!(below.run(&x).locks, [26, 86]);
 }
+
+#[test]
+fn the_timer_and_the_hold_at_their_edges() {
+    // A lock kept without end: no overflow, never left.
+    let mut x = level(-50.0, 300);
+    x[100] = (0.012, 0.0);
+    x.extend(vec![(0.0, 0.0); 300]);
+    let t = FastAttackAgc {
+        lock_hold: usize::MAX,
+        ..agc()
+    }
+    .run(&x);
+    assert_eq!((t.locks.clone(), t.unlocks.clone()), (vec![45], vec![]));
+    // A lock at the largest gain that is not kept is left by an overload on its own first
+    // sample: silence locks from 26, the packet starts at 26.
+    let mut x = level(-120.0, 26);
+    x.extend(level(-50.0, 100));
+    let below = FastAttackAgc {
+        lock_hold: 100,
+        lock_hold_at_max: false,
+        ..agc()
+    };
+    assert_eq!(below.run(&x).unlocks, [26]);
+    // A hold that ends with the stream leaves the lock at the last sample; one sample
+    // earlier, at the one before.
+    let x = level(-50.0, 300);
+    assert_eq!(agc().run_held(&x, None, &[(100, 300)]).unlocks, [299]);
+    assert_eq!(agc().run_held(&x, None, &[(100, 299)]).unlocks, [298]);
+    assert_eq!(agc().run_held(&x, None, &[(100, 301)]).unlocks, []);
+    // The search after a release starts at the window's end whatever the signal: silence
+    // held over 0 … 29 is measured over 40 … 55 and locked at 56 (26 after the release),
+    // not at 26.
+    let t = agc().run_held(&level(-120.0, 100), None, &[(0, 30)]);
+    assert_eq!(t.locks, [56]);
+    // The offset of the gain a release returns to is the one the detectors then see: an
+    // offset before the gain that is quiet at 40 dB and a both-detector overload at 70
+    // (10^(−60/20)·10^(70/20) = 3.16) steps the gain down from the release's own sample.
+    let dc = radio_phy::channel::GainDc {
+        per_index: 0.0,
+        seed: 1,
+        before_gain: (0.001, 0.0),
+    };
+    let quiet = vec![(0.0, 0.0); 200];
+    let t = agc().run_held(&quiet, Some(&dc), &[(60, 100)]);
+    let free = agc().run_dc(&quiet, Some(&dc));
+    assert_eq!(
+        t.changes[..free.changes.len().min(3)],
+        free.changes[..free.changes.len().min(3)]
+    );
+    let held_gain = t.gain_db[99];
+    assert!(held_gain < 70.0, "{held_gain}");
+    assert_eq!(t.gain_db[100], 70.0);
+    assert_eq!(t.gain_db[101], 65.0);
+}

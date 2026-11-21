@@ -574,6 +574,15 @@ impl FastAttackAgc {
                 t.changes.push((n + 1, gain));
             }
         }
+        // A hold that ends with the stream leaves its lock at the last sample, as a free
+        // control's unlock there is recorded.
+        if !x.is_empty()
+            && held_at(x.len() - 1)
+            && !held_at(x.len())
+            && matches!(state, State::Locked { .. })
+        {
+            t.unlocks.push(x.len() - 1);
+        }
         // A change decided at the last sample has no sample to act on.
         t.changes.retain(|c| c.0 < x.len().max(1));
         t.locks.retain(|l| *l < x.len());
