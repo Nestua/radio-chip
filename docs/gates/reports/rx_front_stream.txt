@@ -1,0 +1,18 @@
+# rxper stream: 12-bit ADC, integer front (acquire_fixed), hand-off of ADR 0008 (handoff_fixed) + rx_ofdm_fixed::decode_ppdu_fixed against the float decoder on the same samples, carrier 5.8 GHz
+
+## the streaming hand-off (RxHandoffFixed, ADR 0008 decisions 1 to 3) against the whole-buffer one: frames lost of 2000, 1000 octets,
+# the points, frames and receiver of `fixedw` (its column `word start` is `whole` here): the frame at -12 dBFS at the 12-bit ADC, clock offset uniform in ±40 ppm.
+# whole: acquire_fixed, handoff_fixed of the buffer rotated from its first sample, decode_ppdu_fixed;
+# slice: the same with the rotation started at T1's window, the replay's phase;
+# stream: every sample through RxHandoffFixed (8 beats a period, replay 20 periods after the declaration), the decoder as its reader: it gives SIGNAL's verdict
+#   (decode_signal_fixed on the stream) 180 periods after SIGNAL's window and decodes when the end mark comes; no part of it knows where the frame is.
+# only: frames lost by the stream alone / by the slice alone. again: frames in which the front declared more than once. aborted, stopped, overrun: frames with a stream
+#   ended by a new declaration, by a failed SIGNAL, by the reader falling a history behind.
+# columns: whole | slice | stream | only | again | aborted | stopped | overrun
+AWGN  6 Mb/s  3.5 dB   |  220  219  219 |  0 / 0  |    0    0    0    0  of 2000
+AWGN 54 Mb/s 20.0 dB   |  191  189  189 |  0 / 0  |    0    0    0    0  of 2000
+AWGN 54 Mb/s 35.0 dB   |    0    0    0 |  0 / 0  |    0    0    0    0  of 2000
+TGn D 18 Mb/s 15.5 dB  |  181  179  179 |  0 / 0  |    0    0    0    0  of 2000
+TGn D 54 Mb/s 26.5 dB  |  221  217  217 |  0 / 0  |    0    0    0    0  of 2000
+TGn E 54 Mb/s 26.5 dB  |  143  145  145 |  0 / 0  |    0    0    0    0  of 2000
+TGn E 54 Mb/s 45.0 dB  |    0    0    0 |  0 / 0  |    0    0    0    0  of 2000
