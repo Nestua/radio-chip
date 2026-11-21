@@ -20,12 +20,13 @@ use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front_fixed::{FixedRxConfig, IQ, Y_BITS};
 use radio_phy::rx_ofdm::{
-    decode_ppdu, decode_ppdu_from, equalise, estimate_channel, soft_bits, RxOfdmConfig, Tracking,
+    decode_ppdu, decode_ppdu_from, equalise, estimate_channel, soft_bits, RxOfdmConfig,
+    RxOfdmError, Tracking,
 };
 use radio_phy::rx_ofdm_fixed::{
-    clock_ratio, decode_ppdu_fixed, estimate_channel_fixed, fft64_fixed, scale_constant,
-    symbol_soft_fixed, threshold_constant, to_fixed, tracker_constants, FixedOfdmConfig,
-    FixedTracking, TrackerConstants,
+    clock_ratio, decode_ppdu_fixed, decode_signal_fixed, estimate_channel_fixed, fft64_fixed,
+    scale_constant, symbol_soft_fixed, threshold_constant, to_fixed, tracker_constants,
+    FixedOfdmConfig, FixedTracking, TrackerConstants,
 };
 
 /// The integer tracker with nothing known about the clock.
@@ -283,6 +284,86 @@ fn every_rate_comes_back_with_the_default_words() {
                 assert_eq!(decode_ppdu(&y, 192 - 6, &cfg).unwrap().psdu, data);
             }
         }
+    }
+}
+
+#[test]
+fn signal_alone_is_the_frames_signal_from_its_first_208_samples() {
+    // What the front's hold is told (ADR 0008, decision 2): SIGNAL decoded from the two
+    // long symbols and its own window, before any data symbol is there. The reference is
+    // the transmitted field; the whole-frame decoder must report the same.
+    let fx = FixedOfdmConfig::default();
+    let cfg = RxOfdmConfig::default();
+    let mut rng = Rng::new(0x0f1b);
+    for rate in Rate::ALL {
+        let len = 1 + (rng.next_u64() % 4095) as usize;
+        let data = psdu(len, &mut rng);
+        let x = frame(&data, rate);
+        let x = at_level(&awgn(&x, 30.0, mean_power(&x), &mut rng), -12.0);
+        let z = to_fixed(&x, 2048.0, 12);
+        let t1 = 192 - 6;
+        // The window of SIGNAL ends 128 + 16 + 64 samples after T1's begins.
+        let s = decode_signal_fixed(&z[..t1 + 208], t1, &cfg, &fx, unknown(&fx)).unwrap();
+        assert_eq!((s.rate, s.length), (rate, len), "{rate:?}");
+        let d = decode_ppdu_fixed(&z, t1, &cfg, &fx, unknown(&fx)).unwrap();
+        assert_eq!(d.signal, s);
+        // One sample short there is no SIGNAL yet.
+        assert!(matches!(
+            decode_signal_fixed(&z[..t1 + 207], t1, &cfg, &fx, unknown(&fx)),
+            Err(RxOfdmError::Truncated { .. })
+        ));
+    }
+    // The errors are the whole decoder's: noise in place of the frame, a stream without
+    // the long symbols, unusable widths.
+    let noise = to_fixed(
+        &awgn(&vec![(0.0, 0.0); 600], 0.0, 0.01, &mut rng),
+        2048.0,
+        12,
+    );
+    let mut failed = 0;
+    for t1 in 0..300 {
+        let a = decode_signal_fixed(&noise, t1, &cfg, &fx, unknown(&fx));
+        let b = decode_ppdu_fixed(&noise, t1, &cfg, &fx, unknown(&fx));
+        match (a, b) {
+            (Err(a), Err(b)) => {
+                assert_eq!(a, b, "{t1}");
+                failed += 1;
+            }
+            // A SIGNAL of noise that passes its checks: the whole decoder then fails
+            // further on (the stream is too short for the length, or the data do not
+            // descramble).
+            (Ok(_), Err(b)) => assert!(!matches!(
+                b,
+                RxOfdmError::SignalParity | RxOfdmError::SignalRate(_) | RxOfdmError::SignalLength
+            )),
+            (a, b) => panic!("{t1}: {a:?} {b:?}"),
+        }
+    }
+    assert!(failed > 150 && failed < 300, "{failed}");
+    assert!(decode_signal_fixed(&noise[..100], 0, &cfg, &fx, unknown(&fx)).is_err());
+    let bad = FixedOfdmConfig { in_bits: 0, ..fx };
+    assert!(decode_signal_fixed(&noise, 0, &cfg, &bad, unknown(&fx)).is_err());
+}
+
+#[test]
+fn the_timing_log_starts_at_signal() {
+    // A tracker that applies a known clock offset and learns nothing reports the drift it
+    // took out of each symbol: ε·(112 + 80·i) samples for symbol i, SIGNAL being symbol 0
+    // (its window's middle is 112 samples after the long symbols' middle, each further one
+    // 80 on).
+    let fx = FixedOfdmConfig::default();
+    let cfg = RxOfdmConfig::default();
+    let mut rng = Rng::new(0x0f1c);
+    let data = psdu(60, &mut rng);
+    let z = to_fixed(&at_level(&frame(&data, Rate::R12), -12.0), 2048.0, 12);
+    let d = decode_ppdu_fixed(&z, 190, &cfg, &fx, FixedTracking::fixed(40.0, &fx)).unwrap();
+    assert_eq!(d.psdu, data);
+    for (i, t) in d.timing.iter().enumerate().take(4) {
+        let by_hand = 40e-6 * (112 + 80 * i) as f64;
+        assert!(
+            (t - by_hand).abs() < 2e-5,
+            "symbol {i}: {t} against {by_hand}"
+        );
     }
 }
 

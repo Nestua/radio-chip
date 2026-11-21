@@ -14,6 +14,9 @@
 //!   (`handoff_fixed`, `rx_ofdm_fixed`): the loss against the float receiver from the same
 //!   12-bit ADC samples and the same (integer) acquisition over the grids of `softg2`, and the
 //!   frames lost near 10 % PER with one width changed at a time.
+//! - `stream`: the streaming hand-off (`RxHandoffFixed`: second history, replay, hold) with the
+//!   integer decoder as its reader, against the whole-buffer hand-off on `fixedw`'s frames
+//!   (`docs/gates/rx_front.md`).
 //! - `softg2`: the G2 sweep of the soft-value format (R0-09): the candidates on the same
 //!   frames, fine grids around the 10 % crossings, AWGN and TGn B, D and E.
 //!
@@ -30,14 +33,17 @@ use radio_phy::channel::{
     Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
-use radio_phy::ppdu::{build_ppdu, Rate};
+use radio_phy::ppdu::{build_ppdu, data_symbols, Rate};
 use radio_phy::rx_front::{acquire, correct, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
     acquire_fixed, correct_fixed, handoff_fixed, ltf_dc_offset_fixed, remove_dc_fixed, to_adc,
-    FixedRxConfig, ADC_FULL_SCALE, IQ, Y_BITS,
+    FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxHandoffFixed, ADC_FULL_SCALE, IQ,
+    Y_BITS,
 };
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
+use radio_phy::rx_ofdm_fixed::{
+    clock_ratio, decode_ppdu_fixed, decode_signal_fixed, FixedOfdmConfig, FixedTracking,
+};
 
 type C = (f64, f64);
 
@@ -162,17 +168,13 @@ fn handed(adc: &[(i16, i16)], fft_start: usize, word: i64, fx: &FixedOfdmConfig)
     correct_fixed(&remove_dc_fixed(adc, dc), word, fx.in_bits, &fx.front)
 }
 
-/// Whether each receiver returned the PSDU of frame `number` of the point.
-///
-/// Without an integer receiver in the set: the float front on the channel's samples
-/// (`acquire`, `correct`) and the float decoder. With one, every receiver starts from the
-/// same 12-bit ADC samples (the frame at [`ADC_LEVEL_DBFS`]) and the same acquisition, the
-/// integer front's (`acquire_fixed`, its DC blocker in its own path only); the decoders are
-/// handed the ADC's samples less the offset estimated from the two long training symbols
-/// with the CFO taken out (ADR 0008, decision 1): in integers ([`handed`]) for the integer
-/// receivers, in floating point (`ltf_dc_offset`, `correct` at the CFO word's frequency) for
-/// the float ones.
-fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool> {
+/// Samples of noise in front of the frame in every stream.
+const LEAD: usize = 300;
+
+/// Frame `number` of a point as the antenna gives it: [`LEAD`] samples of noise, the frame
+/// through the channel with its clock and carrier offset, 200 samples of noise. Returns the
+/// samples, the PSDU and the frame's length in samples.
+fn received(scene: Scene, seed: u64, number: u64) -> (Vec<C>, Vec<u8>, usize) {
     let Scene {
         rate,
         octets,
@@ -180,11 +182,10 @@ fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool
         ch,
         ppm,
     } = scene;
-    let rx = RxConfig::new(FS);
     let mut rng = Rng::new(mix(seed, number));
     let psdu: Vec<u8> = (0..octets).map(|_| (rng.next_u64() & 0xff) as u8).collect();
     let f = frame(&psdu, rate);
-    let mut x = vec![(0.0, 0.0); 300];
+    let mut x = vec![(0.0, 0.0); LEAD];
     x.extend_from_slice(&f);
     x.extend(vec![(0.0, 0.0); 200]);
     let x = match ch {
@@ -199,6 +200,30 @@ fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool
     let x = resample(&x, p);
     let x = frequency_offset(&x, p * 1e-6 * CARRIER_HZ, FS, 2.0 * PI * rng.uniform());
     let x = awgn(&x, snr_db, mean_power(&f), &mut rng);
+    (x, psdu, f.len())
+}
+
+/// The 12-bit ADC's samples of [`received`]'s stream, the frame at [`ADC_LEVEL_DBFS`].
+fn at_adc(x: &[C], frame_len: usize) -> Vec<(i16, i16)> {
+    let span = &x[LEAD.min(x.len())..(LEAD + frame_len).min(x.len())];
+    let gain =
+        f64::from(ADC_FULL_SCALE) * (10f64.powf(ADC_LEVEL_DBFS / 10.0) / mean_power(span)).sqrt();
+    to_adc(x, gain)
+}
+
+/// Whether each receiver returned the PSDU of frame `number` of the point.
+///
+/// Without an integer receiver in the set: the float front on the channel's samples
+/// (`acquire`, `correct`) and the float decoder. With one, every receiver starts from the
+/// same 12-bit ADC samples (the frame at [`ADC_LEVEL_DBFS`]) and the same acquisition, the
+/// integer front's (`acquire_fixed`, its DC blocker in its own path only); the decoders are
+/// handed the ADC's samples less the offset estimated from the two long training symbols
+/// with the CFO taken out (ADR 0008, decision 1): in integers ([`handed`]) for the integer
+/// receivers, in floating point (`ltf_dc_offset`, `correct` at the CFO word's frequency) for
+/// the float ones.
+fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool> {
+    let rx = RxConfig::new(FS);
+    let (x, psdu, frame_len) = received(scene, seed, number);
     let none = vec![false; receivers.len()];
 
     if receivers.iter().all(|r| r.fixed.is_none()) {
@@ -220,10 +245,7 @@ fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool
             .collect();
     }
 
-    let span = &x[300.min(x.len())..(300 + f.len()).min(x.len())];
-    let gain =
-        f64::from(ADC_FULL_SCALE) * (10f64.powf(ADC_LEVEL_DBFS / 10.0) / mean_power(span)).sqrt();
-    let adc = to_adc(&x, gain);
+    let adc = at_adc(&x, frame_len);
     let front = FixedRxConfig::default();
     let Some(a) = acquire_fixed(&adc, &rx, &front) else {
         return none;
@@ -702,7 +724,33 @@ fn widths(frames: usize) {
          # columns: {}",
         rx.iter().map(|r| r.name).collect::<Vec<_>>().join(" | ")
     );
-    for (label, rate, snr, ch) in [
+    for (label, rate, snr, ch) in width_points() {
+        let (l, total) = lost(
+            Scene {
+                rate,
+                octets: 1000,
+                snr_db: snr,
+                ch,
+                ppm: None,
+            },
+            &rx,
+            frames,
+            9000 + rate.mbps() as u64 + snr as u64,
+        );
+        println!(
+            "{label:<22} | {}  of {total}",
+            l.iter()
+                .map(|x| format!("{x:>4}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+}
+
+/// The points of the width sweep and of `stream`: near a tenth of the frames lost, and
+/// clean ones.
+fn width_points() -> [(&'static str, Rate, f64, Channel); 7] {
+    [
         ("AWGN  6 Mb/s  3.5 dB", Rate::R6, 3.5, Channel::Awgn),
         ("AWGN 54 Mb/s 20.0 dB", Rate::R54, 20.0, Channel::Awgn),
         ("AWGN 54 Mb/s 35.0 dB", Rate::R54, 35.0, Channel::Awgn),
@@ -730,25 +778,157 @@ fn widths(frames: usize) {
             45.0,
             Channel::Tgn(TgnModel::E),
         ),
-    ] {
-        let (l, total) = lost(
-            Scene {
-                rate,
-                octets: 1000,
-                snr_db: snr,
-                ch,
-                ppm: None,
-            },
-            &rx,
-            frames,
-            9000 + rate.mbps() as u64 + snr as u64,
-        );
+    ]
+}
+
+/// Samples from the FFT window of T1 to the end of SIGNAL's window, and the periods after
+/// it at which the decoder gives the front its verdict (ADR 0008, decision 3: SIGNAL is
+/// known 9 µs after its last sample at the latest; as `rxagc loop`).
+const SIGNAL_END: usize = 128 + 80;
+const VERDICT_LATENCY: usize = 180;
+
+/// What `stream` counts of one frame.
+#[derive(Clone, Copy, Default)]
+struct Streamed {
+    /// Decoded from [`handoff_fixed`] of the whole buffer (the column `word start` of
+    /// `fixedw`), from the same of the buffer from T1's window on (the replay's phase), and
+    /// from the streaming front's beats.
+    whole: bool,
+    slice: bool,
+    stream: bool,
+    /// Acquisitions the streaming front declared.
+    declared: usize,
+    /// A stream was aborted by a new declaration; one was stopped on a failed SIGNAL; one
+    /// was lost to the reader.
+    aborted: bool,
+    stopped: bool,
+    overrun: bool,
+}
+
+/// One frame through the streaming front ([`RxHandoffFixed`]) and the integer decoder as
+/// its reader: the decoder takes every beat at once, tells the front SIGNAL's verdict
+/// [`VERDICT_LATENCY`] periods after SIGNAL's window and decodes the stream when its end
+/// mark comes. Nothing here knows where the frame is.
+fn streamed(scene: Scene, seed: u64, number: u64) -> Streamed {
+    let rx = RxConfig::new(FS);
+    let front = FixedRxConfig::default();
+    let fo = FixedOfdmConfig::default();
+    let ofdm = base();
+    let (x, psdu, frame_len) = received(scene, seed, number);
+    let adc = at_adc(&x, frame_len);
+    let start = |word: i64| match clock_ratio(FS, CARRIER_HZ) {
+        Some(ratio) => FixedTracking::from_cfo_word(word, ratio, &fo),
+        None => FixedTracking::unknown(&fo),
+    };
+    let decode = |z: &[IQ], t1: usize, word: i64| {
+        decode_ppdu_fixed(z, t1, &ofdm, &fo, start(word)).is_ok_and(|d| d.psdu == psdu)
+    };
+    let mut out = Streamed::default();
+    if let Some(a) = acquire_fixed(&adc, &rx, &front) {
+        out.whole = handoff_fixed(&adc, a.fft_start, a.cfo_phase, &front)
+            .is_some_and(|z| decode(&z, a.fft_start, a.cfo_phase));
+        out.slice = adc
+            .get(a.fft_start..)
+            .and_then(|t| handoff_fixed(t, 0, a.cfo_phase, &front))
+            .is_some_and(|z| decode(&z, 0, a.cfo_phase));
+    }
+
+    let mut hand = RxHandoffFixed::new(rx, front, HandoffConfig::default());
+    let mut z: Vec<IQ> = Vec::new();
+    let mut word = 0i64;
+    let mut due = None;
+    for (n, &s) in adc.iter().enumerate() {
+        let step = hand.push(s, usize::MAX);
+        if let Some(a) = step.acquired {
+            out.declared += 1;
+            due = Some(a.fft_start + SIGNAL_END + VERDICT_LATENCY);
+        }
+        for beat in step.beats {
+            match beat {
+                HandoffBeat::Sample { z: v, first } => {
+                    if let Some(w) = first {
+                        z.clear();
+                        word = w;
+                    }
+                    z.push(v);
+                }
+                HandoffBeat::End(end) => {
+                    match end {
+                        HandoffEnd::Packet => out.stream |= decode(&z, 0, word),
+                        HandoffEnd::Stopped => out.stopped = true,
+                        HandoffEnd::Acquisition => out.aborted = true,
+                        HandoffEnd::Overrun => out.overrun = true,
+                    }
+                    z.clear();
+                }
+            }
+        }
+        if due == Some(n) {
+            due = None;
+            let verdict = decode_signal_fixed(&z, 0, &ofdm, &fo, start(word))
+                .ok()
+                .map(|s| data_symbols(s.rate, s.length));
+            hand.signal(verdict);
+        }
+    }
+    out
+}
+
+/// `stream`: the streaming front against the whole-buffer hand-off on the same frames.
+fn streams(frames: usize) {
+    println!(
+        "\n## the streaming hand-off (RxHandoffFixed, ADR 0008 decisions 1 to 3) against the whole-buffer one: frames lost of {frames}, 1000 octets,\n\
+         # the points, frames and receiver of `fixedw` (its column `word start` is `whole` here): the frame at {ADC_LEVEL_DBFS} dBFS at the 12-bit ADC, clock offset uniform in ±40 ppm.\n\
+         # whole: acquire_fixed, handoff_fixed of the buffer rotated from its first sample, decode_ppdu_fixed;\n\
+         # slice: the same with the rotation started at T1's window, the replay's phase;\n\
+         # stream: every sample through RxHandoffFixed (8 beats a period, replay 20 periods after the declaration), the decoder as its reader: it gives SIGNAL's verdict\n\
+         #   (decode_signal_fixed on the stream) {VERDICT_LATENCY} periods after SIGNAL's window and decodes when the end mark comes; no part of it knows where the frame is.\n\
+         # only: frames lost by the stream alone / by the slice alone. again: frames in which the front declared more than once. aborted, stopped, overrun: frames with a stream\n\
+         #   ended by a new declaration, by a failed SIGNAL, by the reader falling a history behind.\n\
+         # columns: whole | slice | stream | only | again | aborted | stopped | overrun"
+    );
+    for (label, rate, snr, ch) in width_points() {
+        let scene = Scene {
+            rate,
+            octets: 1000,
+            snr_db: snr,
+            ch,
+            ppm: None,
+        };
+        let seed = 9000 + rate.mbps() as u64 + snr as u64;
+        let n = threads();
+        let parts = par(|t| {
+            let mut c = [0usize; 9];
+            for number in (t..frames).step_by(n) {
+                let s = streamed(scene, seed, number as u64);
+                for (k, hit) in [
+                    !s.whole,
+                    !s.slice,
+                    !s.stream,
+                    !s.stream && s.slice,
+                    s.stream && !s.slice,
+                    s.declared > 1,
+                    s.aborted,
+                    s.stopped,
+                    s.overrun,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    c[k] += usize::from(hit);
+                }
+            }
+            c
+        });
+        let mut c = [0usize; 9];
+        for p in &parts {
+            for (s, v) in c.iter_mut().zip(p) {
+                *s += v;
+            }
+        }
         println!(
-            "{label:<22} | {}  of {total}",
-            l.iter()
-                .map(|x| format!("{x:>4}"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            "{label:<22} | {:>4} {:>4} {:>4} | {:>2} / {:<2} | {:>4} {:>4} {:>4} {:>4}  of {frames}",
+            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]
         );
     }
 }
@@ -861,7 +1041,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
     let n: Option<usize> = args.next().and_then(|v| v.parse().ok());
-    if matches!(cmd.as_str(), "fixed" | "fixedw") {
+    if matches!(cmd.as_str(), "fixed" | "fixedw" | "stream") {
         println!("# rxper {cmd}: 12-bit ADC, integer front (acquire_fixed), hand-off of ADR 0008 (handoff_fixed) + rx_ofdm_fixed::decode_ppdu_fixed against the float decoder on the same samples, carrier 5.8 GHz");
     } else {
         println!("# rxper {cmd}: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz");
@@ -1081,11 +1261,12 @@ fn main() -> ExitCode {
             }
         }
         "fixedw" => widths(n.unwrap_or(2000)),
+        "stream" => streams(n.unwrap_or(2000)),
         "sfo" => sfo(n.unwrap_or(40)),
         "timing" => timing(n.unwrap_or(300)),
         _ => {
             eprintln!(
-                "usage: rxper awgn|tgn|sfo|timing|soft|soft2|softg2|softg3|softg4|fixed|fixedw [frames]"
+                "usage: rxper awgn|tgn|sfo|timing|soft|soft2|softg2|softg3|softg4|fixed|fixedw|stream [frames]"
             );
             return ExitCode::from(2);
         }

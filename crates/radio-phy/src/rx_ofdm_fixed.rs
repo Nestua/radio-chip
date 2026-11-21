@@ -30,8 +30,8 @@ use crate::rx_front_fixed::{
     cordic_table, cordic_with, nco_table, rotate_with, FixedRxConfig, IQ, Y_BITS,
 };
 use crate::rx_ofdm::{
-    descramble, signal_from_soft, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, SymbolLog,
-    TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
+    descramble, signal_from_soft, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, Signal,
+    SymbolLog, TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
 };
 use crate::viterbi::{decode, Termination};
 
@@ -865,6 +865,52 @@ fn window_of<'a>(
         })
 }
 
+/// The head of the decoder: the channel from the two long symbols at `fft_start` and SIGNAL
+/// from the symbol after them (its common phase returned with it), the tracker stepped over
+/// that symbol.
+fn signal_with(
+    z: &[IQ],
+    fft_start: usize,
+    cfg: &RxOfdmConfig,
+    fx: &FixedOfdmConfig,
+    tracking: &mut FixedTracking,
+    t: &Tables,
+) -> Result<(FixedChannel, Signal, i64), RxOfdmError> {
+    let needed = fft_start.saturating_add(2 * FFT_SIZE);
+    let short = RxOfdmError::Truncated {
+        needed,
+        have: z.len(),
+    };
+    let ch = z
+        .get(fft_start..needed)
+        .and_then(|ltf| channel_with(ltf, fx, t))
+        .ok_or(short)?;
+    let w = window_of(z, fft_start, 0, tracking)?;
+    let (soft, phi) =
+        symbol_with(w, &ch, 0, Modulation::Bpsk, cfg, fx, tracking, t).ok_or(short)?;
+    let signal = signal_from_soft(&soft)?;
+    if !(1..=MAX_PSDU_LEN).contains(&signal.length) {
+        return Err(RxOfdmError::SignalLength);
+    }
+    Ok((ch, signal, phi))
+}
+
+/// SIGNAL alone, from the two long training symbols at `fft_start` and the symbol after
+/// them: what [`decode_ppdu_fixed`] reports as the frame's, from the first 208 samples of
+/// the hand-off's stream and with the same errors. The front's hold is told the frame's
+/// length from it ([`crate::rx_front_fixed::RxHandoffFixed::signal`]; ADR 0008, decision 2).
+pub fn decode_signal_fixed(
+    z: &[IQ],
+    fft_start: usize,
+    cfg: &RxOfdmConfig,
+    fx: &FixedOfdmConfig,
+    mut tracking: FixedTracking,
+) -> Result<Signal, RxOfdmError> {
+    let unusable = RxOfdmError::Truncated { needed: 0, have: 0 };
+    let t = tables(fx).ok_or(unusable)?;
+    signal_with(z, fft_start, cfg, fx, &mut tracking, &t).map(|(_, signal, _)| signal)
+}
+
 /// Decodes the PPDU whose first long training symbol's FFT window starts at `fft_start`, from
 /// `in_bits`-wide samples, with the timing tracker started from `tracking`: the integer
 /// counterpart of [`crate::rx_ofdm::decode_ppdu_from`]. Unusable widths are reported as a
@@ -878,29 +924,20 @@ pub fn decode_ppdu_fixed(
 ) -> Result<Decoded, RxOfdmError> {
     let unusable = RxOfdmError::Truncated { needed: 0, have: 0 };
     let t = tables(fx).ok_or(unusable)?;
-    let needed = fft_start.saturating_add(2 * FFT_SIZE);
+    let (ch, signal, phi) = signal_with(z, fft_start, cfg, fx, &mut tracking, &t)?;
     let short = RxOfdmError::Truncated {
-        needed,
+        needed: fft_start.saturating_add(2 * FFT_SIZE),
         have: z.len(),
     };
-    let ch = z
-        .get(fft_start..needed)
-        .and_then(|ltf| channel_with(ltf, fx, &t))
-        .ok_or(short)?;
     let phase = |phi: i64| phi as f64 * 2.0 * PI / (1u64 << fx.front.nco_phase_bits) as f64;
     let symbol = |i: usize, m: Modulation, tr: &mut FixedTracking| {
         let w = window_of(z, fft_start, i, tr)?;
         symbol_with(w, &ch, i, m, cfg, fx, tr, &t).ok_or(short)
     };
-    let (soft, phi) = symbol(0, Modulation::Bpsk, &mut tracking)?;
-    let signal = signal_from_soft(&soft)?;
     let mut log = SymbolLog {
         common_phase: vec![phase(phi)],
         timing: vec![tracking.timing(fx)],
     };
-    if !(1..=MAX_PSDU_LEN).contains(&signal.length) {
-        return Err(RxOfdmError::SignalLength);
-    }
     let symbols = data_symbols(signal.rate, signal.length);
     let end = symbol_start(fft_start, symbols).saturating_add(FFT_SIZE);
     if z.len() < end {

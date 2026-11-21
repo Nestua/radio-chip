@@ -162,7 +162,11 @@ fn bit_len(v: i64) -> u32 {
 }
 
 /// The CORDIC arctangent table: round(atan(2^−i)·2^A/(2π)), i < N. A constant ROM in the RTL.
+/// Empty for an invalid configuration.
 pub fn cordic_table(fx: &FixedRxConfig) -> Vec<i64> {
+    if !fx.is_valid() {
+        return Vec::new();
+    }
     let scale = f64::from(1u32 << fx.angle_bits.min(30)) / (2.0 * PI);
     (0..fx.cordic_iters)
         .map(|i| (2f64.powi(-(i as i32)).atan() * scale).round() as i64)
@@ -171,8 +175,12 @@ pub fn cordic_table(fx: &FixedRxConfig) -> Vec<i64> {
 
 /// ∠(re + j·im) in units of 2π/2^A, in [−2^(A−1), 2^(A−1)), by CORDIC vectoring: block
 /// normalisation to W_c bits (a leading-zero count and a shift), a half-turn when re < 0, then N
-/// shift-and-add micro-rotations driving im to zero. 0 for a zero input.
+/// shift-and-add micro-rotations driving im to zero. 0 for a zero input and for an invalid
+/// configuration.
 pub fn cordic_angle(re: i64, im: i64, fx: &FixedRxConfig) -> i64 {
+    if !fx.is_valid() {
+        return 0;
+    }
     cordic_with(re, im, fx, &cordic_table(fx))
 }
 
@@ -221,11 +229,18 @@ pub(crate) fn cordic_with(re: i64, im: i64, fx: &FixedRxConfig, table: &[i64]) -
 /// round((2^(Q−1) − 1)·cos/sin(2π·r/2^L)), r < 2^(L−2), folded by quadrant (exact negations
 /// and swaps).
 pub fn nco_rotator(phase: i64, fx: &FixedRxConfig) -> IQ {
+    if !fx.is_valid() {
+        return (0, 0);
+    }
     rotate_with(phase, fx, &nco_table(fx))
 }
 
 /// The NCO's quarter-wave table: (cos, sin) for r < 2^(L−2). A constant ROM in the RTL.
+/// Empty for an invalid configuration.
 pub fn nco_table(fx: &FixedRxConfig) -> Vec<IQ> {
+    if !fx.is_valid() {
+        return Vec::new();
+    }
     let l = fx.nco_lut_bits;
     let amp = f64::from((1u32 << (fx.nco_amp_bits - 1)) - 1);
     (0..1u64 << (l - 2))
@@ -269,16 +284,26 @@ pub fn correct_fixed(y: &[IQ], cfo_phase: i64, out_bits: u32, fx: &FixedRxConfig
         return Vec::new();
     }
     let table = nco_table(fx);
-    let p = fx.nco_phase_bits;
-    let step = cfo_phase.rem_euclid(1i64 << p);
     let mut phase = 0i64;
     y.iter()
-        .map(|&v| {
-            let prod = imul(v, rotate_with(phase, fx, &table));
-            phase = (phase - step).rem_euclid(1i64 << p);
-            narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, out_bits)
-        })
+        .map(|&v| turn(v, &mut phase, cfo_phase, out_bits, fx, &table))
         .collect()
+}
+
+/// One sample of [`correct_fixed`]: `v` turned by `phase`, which then steps back by the CFO
+/// word.
+fn turn(
+    v: IQ,
+    phase: &mut i64,
+    cfo_phase: i64,
+    out_bits: u32,
+    fx: &FixedRxConfig,
+    table: &[IQ],
+) -> IQ {
+    let p = fx.nco_phase_bits;
+    let prod = imul(v, rotate_with(*phase, fx, table));
+    *phase = (*phase - cfo_phase.rem_euclid(1i64 << p)).rem_euclid(1i64 << p);
+    narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, out_bits)
 }
 
 /// n / d for d > 0, rounded half to even.
@@ -353,15 +378,16 @@ pub fn ltf_dc_offset_fixed(
 /// rotator's input: what [`correct_fixed`] is handed when the offset comes from
 /// [`ltf_dc_offset_fixed`] instead of the DC blocker. Two 12-bit values never exceed the limit.
 pub fn remove_dc_fixed(x: &[(i16, i16)], dc: IQ) -> Vec<IQ> {
+    x.iter().map(|&v| remove_dc(v, dc)).collect()
+}
+
+/// One sample of [`remove_dc_fixed`].
+fn remove_dc(x: (i16, i16), dc: IQ) -> IQ {
     let (lo, hi) = (-(1i64 << (Y_BITS - 1)), (1i64 << (Y_BITS - 1)) - 1);
-    x.iter()
-        .map(|&(a, b)| {
-            (
-                (i64::from(a) - dc.0).clamp(lo, hi),
-                (i64::from(b) - dc.1).clamp(lo, hi),
-            )
-        })
-        .collect()
+    (
+        (i64::from(x.0) - dc.0).clamp(lo, hi),
+        (i64::from(x.1) - dc.1).clamp(lo, hi),
+    )
 }
 
 /// The stream the decoder is handed (ADR 0008, decision 1): the ADC's samples `x` less the
@@ -405,7 +431,11 @@ pub(crate) fn rotate_with(phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
 }
 
 /// The LTF symbol's taps in T bits, scaled to its largest component (T = 1: signs, ±1 ± j).
+/// Zeros for an invalid configuration.
 pub fn ltf_taps(fx: &FixedRxConfig) -> [IQ; LTF_SYMBOL_LEN] {
+    if !fx.is_valid() {
+        return [(0, 0); LTF_SYMBOL_LEN];
+    }
     let ltf = long_training_symbol();
     let peak = ltf
         .iter()
@@ -963,6 +993,274 @@ pub fn acquisitions_fixed(
 ) -> Vec<FixedAcquisition> {
     let mut rx = RxFrontFixed::new(cfg.clone(), *fx);
     x.iter().filter_map(|&s| rx.push(s)).collect()
+}
+
+/// Depth of the second history, of the ADC's own samples (ADR 0008, decision 1): as deep as
+/// the history the decision reads ([`HISTORY`]). A declaration comes at most
+/// 223 + [`MAX_DECISION_LATENCY`] + the back-off samples after its T1's window began, so the
+/// two long symbols and everything after them are still in it.
+pub const ADC_HISTORY: usize = HISTORY;
+/// Samples the stream runs on after the hold's end, the frame's nominal last sample: the
+/// decoder's timing tracker moves its windows with the transmitter's clock, four samples
+/// late at the end of the longest PPDU from a clock 40 ppm slow (the frame is 4.4 samples
+/// longer). The default back-off of four samples just holds that window; a smaller one does
+/// not.
+pub const HANDOFF_TAIL: usize = 8;
+/// Data symbols of the longest PPDU, 4095 octets at 6 Mb/s (IEEE 802.11-2020 §17.3.5.4,
+/// Table 17-4: 16 + 8·4095 + 6 bits in symbols of 24): the watchdog of the hold and of the
+/// stream, 5.47 ms after T1.
+pub const MAX_DATA_SYMBOLS: usize = 1366;
+/// Samples from the FFT window of T1 to the end of SIGNAL's window.
+const SIGNAL_END: usize = PAIR_LEN + GI_LEN + LTF_SYMBOL_LEN;
+/// Samples of one data symbol.
+const SYMBOL: usize = GI_LEN + LTF_SYMBOL_LEN;
+
+/// The pace of the replay (ADR 0008, decision 3). Neither number changes a sample of the
+/// stream; they decide when a slow reader loses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandoffConfig {
+    /// Beats the stream can hand on in one sample period: the clocks per sample (8 at
+    /// 160 MHz and 20 MS/s).
+    pub rate: usize,
+    /// Sample periods from the declaration to the first beat: the DC estimate's 128 reads,
+    /// multiplication and division (≈ 160 clocks, 20 periods).
+    pub start_delay: usize,
+}
+
+impl Default for HandoffConfig {
+    fn default() -> Self {
+        Self {
+            rate: 8,
+            start_delay: 20,
+        }
+    }
+}
+
+/// How a stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffEnd {
+    /// The end mark: the packet's last sample (by the decoder's verdict, or the watchdog's
+    /// longest PPDU) has been handed on.
+    Packet,
+    /// The end mark after the decoder said SIGNAL did not decode.
+    Stopped,
+    /// The abort mark: the front declared a new acquisition; that packet's stream follows.
+    Acquisition,
+    /// The abort mark: the reader fell a whole history behind and the next sample is gone.
+    Overrun,
+}
+
+/// One beat of the hand-off's stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffBeat {
+    /// A sample of [`handoff_fixed`]'s stream, [`Y_BITS`] wide; `first` carries the CFO word
+    /// on the first sample of T1's FFT window, which is rotated by the phase zero.
+    Sample {
+        /// The sample.
+        z: IQ,
+        /// The acquisition's CFO word, on a stream's first sample only.
+        first: Option<i64>,
+    },
+    /// The end or abort mark; a beat of its own.
+    End(HandoffEnd),
+}
+
+/// What one sample period of [`RxHandoffFixed`] gave.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HandoffStep {
+    /// The acquisition declared at this sample, as [`RxFrontFixed::push`] returns it.
+    pub acquired: Option<FixedAcquisition>,
+    /// The hold on the gain control after this sample.
+    pub hold: bool,
+    /// The beats handed on in this period, in order.
+    pub beats: Vec<HandoffBeat>,
+}
+
+/// A declared packet whose samples are being handed on.
+#[derive(Debug, Clone, Copy)]
+struct Replay {
+    fft_start: usize,
+    cfo_phase: i64,
+    dc: IQ,
+    /// The period of the first beat.
+    open_at: usize,
+    /// The next sample to hand on, and the phase it is rotated by.
+    read: usize,
+    phase: i64,
+    /// The sample at which the hold is down, and one past the stream's last.
+    hold_end: usize,
+    last: usize,
+    /// Whether the decoder has given its verdict.
+    verdict: bool,
+}
+
+/// The integer front with ADR 0008's hand-off: [`RxFrontFixed`], the second history of the
+/// ADC's samples, the replay and the hold on the gain control (decisions 1 to 3).
+///
+/// An acquisition raises the hold and opens a stream: the offset of
+/// [`ltf_dc_offset_fixed`] is taken from the two long symbols in the history, and from
+/// `start_delay` periods on the samples from T1's FFT window are read back, the offset
+/// subtracted and the CFO word turned out, at up to `rate` beats a period until the reader is
+/// at the antenna and one a period from then on. The samples are [`handoff_fixed`] of the
+/// ADC's stream from T1's window, whatever the pace.
+///
+/// The hold lasts to the frame's last sample: [`RxHandoffFixed::signal`] tells it the
+/// length; without it the watchdog ends it at the longest PPDU. The stream runs
+/// [`HANDOFF_TAIL`] samples further and closes with an end mark. A new acquisition while a
+/// packet is open ends it with an abort mark and opens its own (the hold stays up); a reader
+/// that falls [`ADC_HISTORY`] samples behind loses the stream and the hold. Every packet
+/// opened ends in one mark, also one whose first sample was never taken; a mark that finds
+/// the one before it still waiting for the reader is not sent.
+///
+/// The front searches on while a packet is read; what it should search for then is not
+/// decided (ADR 0008, decision 1). The clock-exact schedule is the RTL's.
+#[derive(Debug, Clone)]
+pub struct RxHandoffFixed {
+    front: RxFrontFixed,
+    pace: HandoffConfig,
+    x: Ring<(i16, i16)>,
+    replay: Option<Replay>,
+    hold: bool,
+    mark: Option<HandoffEnd>,
+}
+
+impl RxHandoffFixed {
+    /// A receiver in the idle state.
+    pub fn new(cfg: RxConfig, fx: FixedRxConfig, pace: HandoffConfig) -> Self {
+        Self {
+            front: RxFrontFixed::new(cfg, fx),
+            pace,
+            x: Ring::new(ADC_HISTORY, (0, 0)),
+            replay: None,
+            hold: false,
+            mark: None,
+        }
+    }
+
+    /// The hold on the gain control as it stands.
+    pub fn hold(&self) -> bool {
+        self.hold
+    }
+
+    /// The decoder's verdict on the open packet's SIGNAL: its number of data symbols, or
+    /// `None` when it did not decode. The first verdict for a packet counts; one with no
+    /// packet open is ignored. The hold ends at the back-off after the last symbol's window,
+    /// at once if that is past or SIGNAL failed.
+    pub fn signal(&mut self, data_symbols: Option<usize>) {
+        let Some(r) = self.replay.as_mut().filter(|r| !r.verdict) else {
+            return;
+        };
+        match data_symbols {
+            Some(symbols) => {
+                r.verdict = true;
+                r.hold_end = packet_end(r.fft_start, symbols, self.front.b);
+                r.last = r.hold_end.saturating_add(HANDOFF_TAIL);
+                if self.front.n >= r.hold_end {
+                    self.hold = false;
+                }
+            }
+            None => self.close(HandoffEnd::Stopped),
+        }
+    }
+
+    /// Ends the open packet with `mark` and drops the hold.
+    fn close(&mut self, mark: HandoffEnd) {
+        self.replay = None;
+        self.hold = false;
+        self.mark.get_or_insert(mark);
+    }
+
+    /// Processes the next ADC sample; the reader takes at most `room` beats in its period.
+    pub fn push(&mut self, x: (i16, i16), room: usize) -> HandoffStep {
+        let fx = self.front.fx;
+        if !fx.is_valid() {
+            return HandoffStep::default();
+        }
+        let n = self.front.n;
+        self.x.put(n, x);
+        let acquired = self.front.push(x);
+        if self.replay.is_some_and(|r| n >= r.hold_end) {
+            self.hold = false;
+        }
+        if let Some(a) = acquired {
+            self.open(&a, n);
+        }
+        // The oldest sample the history still holds is n + 1 − ADC_HISTORY.
+        if self
+            .replay
+            .is_some_and(|r| r.read < r.last && r.read + ADC_HISTORY <= n)
+        {
+            self.close(HandoffEnd::Overrun);
+        }
+
+        let mut beats = Vec::new();
+        let mut budget = room.min(self.pace.rate);
+        if budget > 0 {
+            if let Some(m) = self.mark.take() {
+                beats.push(HandoffBeat::End(m));
+                budget -= 1;
+            }
+        }
+        while budget > 0 {
+            let Some(r) = self.replay.as_mut().filter(|r| n >= r.open_at) else {
+                break;
+            };
+            if r.read >= r.last {
+                // The hold went down HANDOFF_TAIL samples before the stream's last.
+                beats.push(HandoffBeat::End(HandoffEnd::Packet));
+                self.replay = None;
+                break;
+            }
+            if r.read > n {
+                break;
+            }
+            let first = (r.read == r.fft_start).then_some(r.cfo_phase);
+            let v = remove_dc(self.x.get(r.read), r.dc);
+            let z = turn(v, &mut r.phase, r.cfo_phase, Y_BITS, &fx, &self.front.nco);
+            r.read += 1;
+            budget -= 1;
+            beats.push(HandoffBeat::Sample { z, first });
+        }
+        HandoffStep {
+            acquired,
+            hold: self.hold,
+            beats,
+        }
+    }
+
+    /// Opens the packet of an acquisition declared at sample `n`.
+    fn open(&mut self, a: &FixedAcquisition, n: usize) {
+        if self.replay.is_some() {
+            self.close(HandoffEnd::Acquisition);
+        }
+        // Both long symbols are in the history: a declaration follows them and comes within
+        // the history's depth of T1 (see [`ADC_HISTORY`]). The estimate is there for every
+        // field of 128 samples and a valid configuration.
+        let field: Vec<(i16, i16)> = (0..PAIR_LEN).map(|k| self.x.get(a.fft_start + k)).collect();
+        let dc = ltf_dc_offset_fixed(&field, 0, a.cfo_phase, &self.front.fx).unwrap_or_default();
+        let hold_end = packet_end(a.fft_start, MAX_DATA_SYMBOLS, self.front.b);
+        self.replay = Some(Replay {
+            fft_start: a.fft_start,
+            cfo_phase: a.cfo_phase,
+            dc,
+            open_at: n.saturating_add(self.pace.start_delay),
+            read: a.fft_start,
+            phase: 0,
+            hold_end,
+            last: hold_end.saturating_add(HANDOFF_TAIL),
+            verdict: false,
+        });
+        self.hold = true;
+    }
+}
+
+/// The frame's last sample and one: the back-off after the window of the last of `symbols`
+/// data symbols (at most [`MAX_DATA_SYMBOLS`]) of the packet whose T1 window starts at
+/// `fft_start`.
+fn packet_end(fft_start: usize, symbols: usize, backoff: usize) -> usize {
+    fft_start
+        .saturating_add(SIGNAL_END + SYMBOL * symbols.min(MAX_DATA_SYMBOLS))
+        .saturating_add(backoff)
 }
 
 #[cfg(test)]
