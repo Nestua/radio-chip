@@ -150,12 +150,15 @@ fn word_at(word: i64, from_bits: u32, to_bits: u32) -> i64 {
 /// The stream an integer receiver with the widths `fx` is handed from the ADC's samples:
 /// ADR 0008's hand-off ([`handoff_fixed`]) at the default width, and the same three steps
 /// narrowed to `fx.in_bits` for the columns of the width sweep. The rotator and the offset's
-/// estimate are the receiver's own front's.
+/// estimate are the receiver's own front's. Nothing (a lost frame) where the stream does
+/// not hold the two symbols.
 fn handed(adc: &[(i16, i16)], fft_start: usize, word: i64, fx: &FixedOfdmConfig) -> Vec<IQ> {
     if fx.in_bits == Y_BITS {
         return handoff_fixed(adc, fft_start, word, &fx.front).unwrap_or_default();
     }
-    let dc = ltf_dc_offset_fixed(adc, fft_start, word, &fx.front).unwrap_or((0, 0));
+    let Some(dc) = ltf_dc_offset_fixed(adc, fft_start, word, &fx.front) else {
+        return Vec::new();
+    };
     correct_fixed(&remove_dc_fixed(adc, dc), word, fx.in_bits, &fx.front)
 }
 
@@ -252,7 +255,10 @@ fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool
                         .iter()
                         .map(|v| (f64::from(v.0), f64::from(v.1)))
                         .collect();
-                    let d = ltf_dc_offset(&raw, a.fft_start, cfo_hz, FS).unwrap_or((0.0, 0.0));
+                    // No two symbols in the stream: nothing to decode, as in integers.
+                    let Some(d) = ltf_dc_offset(&raw, a.fft_start, cfo_hz, FS) else {
+                        return Vec::new();
+                    };
                     let less: Vec<C> = raw.iter().map(|v| (v.0 - d.0, v.1 - d.1)).collect();
                     correct(&less, cfo_hz, FS)
                 });
@@ -691,8 +697,8 @@ fn widths(frames: usize) {
          # eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.\n\
          # default = hand-off Z13 s1, W16 T12 U16 C10 F4, rotator L9 Q11 (the data path's truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says\n\
          # (round: half a table address added to the data path's rotation phase; Z12 s2: the hand-off narrowed to 12 bits, two fractional bits; the rotator's columns change the hand-off's rotator and the offset's estimate too);\n\
-         # ppm start / word start: the model's defaults (rotation phase rounded) with the tracker started through the float conversion of the CFO to ppm, and from the CFO word times the register fs/fc (every other integer column starts from the word);\n\
-         # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, P30 L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
+         # ppm start / word start: the model's defaults (rotation phase rounded) with the tracker started through the float conversion of the CFO to ppm, and from the CFO word times the register fs/fc (every other integer column starts from the word; word start and round are one configuration);\n\
+         # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, P30 L16 Q20, CORDIC N24 A24) behind the acquisition, which is the default front's for every column (its CFO word shifted to P30): what is left is not one of those widths'.\n\
          # columns: {}",
         rx.iter().map(|r| r.name).collect::<Vec<_>>().join(" | ")
     );

@@ -1192,6 +1192,14 @@ fn handoff_fixed_worked_by_hand() {
         ..fx
     };
     assert_eq!(handoff_fixed(&adc, 39, word, &bad), None);
+    // The width is the rotator's input, whatever the front's own mixer narrows to.
+    let z20 = FixedRxConfig { z_bits: 20, ..fx };
+    let mut adc = vec![(0i16, 0i16); 200];
+    adc[150] = (2047, -2048);
+    assert_eq!(
+        handoff_fixed(&adc, 40, 0, &z20).unwrap()[150],
+        (2045, -2046)
+    );
 }
 
 #[test]

@@ -462,9 +462,9 @@ const S2_BITS: u32 = 35;
 pub const CLOCK_RATIO_FRAC: u32 = 20;
 
 /// The channel's fs/fc as the 16-bit register of ADR 0008's decision 7:
-/// round(`sample_rate_hz`/`carrier_hz`·2^20). 3616 for 20 MHz at 5.8 GHz; ratios up to
-/// 1/16 fit (160 MHz at 2.6 GHz). `None` when the ratio is not a number, rounds to 0 or
-/// does not fit. A float helper for the MAC's side: the receiver sees the register only.
+/// round(`sample_rate_hz`/`carrier_hz`·2^20). 3616 for 20 MHz at 5.8 GHz; ratios below
+/// 1/16 fit (160 MHz at 2.6 GHz is 64 528). `None` when the ratio is not a number, rounds
+/// to 0 or does not fit. A float helper for the MAC's side: the receiver sees the register only.
 pub fn clock_ratio(sample_rate_hz: f64, carrier_hz: f64) -> Option<u16> {
     let v = (sample_rate_hz / carrier_hz * f64::from(1u32 << CLOCK_RATIO_FRAC)).round();
     (v >= 1.0 && v <= f64::from(u16::MAX)).then_some(v as u16)
@@ -576,16 +576,17 @@ impl FixedTracking {
     /// the MAC writes when it tunes. Both ends derive carrier and sample clock from one
     /// oscillator (IEEE 802.11-2020 §17.3.9.5–6), so the clock offset is
     /// ε = word·(fs/fc)/2^P, the drift in a fifth of a symbol 16·ε samples of 2^(P−6) slope
-    /// units each: rate0 = word·`ratio`/2^(22−R), half to even, saturated to the rate's
-    /// register — one multiplication per packet, where the hand-off's stream starts. The
+    /// units each: rate0 = word·`ratio`/2^(22−R), half to even, in a signed register of
+    /// P − 6 + R bits — one multiplication per packet, where the hand-off's stream starts.
+    /// A P-bit word and a 16-bit ratio stay below 2^(P+R−7) and always fit; a word no
+    /// accumulator holds saturates at the register's ends. The
     /// prior's weight is the constant of [`Self::from_clock_offset`]
     /// ([`crate::rx_ofdm::TIMING_HINT_PPM`]).
     pub fn from_cfo_word(cfo_word: i64, ratio: u16, fx: &FixedOfdmConfig) -> Self {
         let r = fx.rate_frac.min(20);
         let p = fx.front.nco_phase_bits.clamp(8, 40);
-        let limit = 1i128 << (p - 6 + r);
         let product = i128::from(cfo_word) * i128::from(ratio);
-        let rate0 = rsh_even(product, CLOCK_RATIO_FRAC + 2 - r).clamp(-limit, limit) as i64;
+        let rate0 = sat(rsh_even(product, CLOCK_RATIO_FRAC + 2 - r), p - 6 + r);
         Self {
             rate0,
             ..Self::from_clock_offset(0.0, fx)

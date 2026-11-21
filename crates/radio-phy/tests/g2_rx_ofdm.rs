@@ -956,7 +956,8 @@ fn the_tracker_in_the_receiver_is_the_float_one() {
     // on ±π (a pilot the noise has all but cancelled) reads +π in one receiver and −π in the
     // other when their predictions differ in the last digits. The measurement then differs by
     // a turn times the pair's coefficient. Such a symbol ends the frame's comparison and is
-    // counted; this run has one (6 Mb/s, 6 dB, −40 ppm, symbol 38).
+    // counted. With two fractional bits in the FFT word this run had one (6 Mb/s, 6 dB,
+    // −40 ppm, symbol 38); with ADR 0008's one it has none, and that branch is not taken.
     use radio_phy::channel::resample;
     let fx = FixedOfdmConfig::default();
     let cfg = RxOfdmConfig::default();
@@ -1013,8 +1014,8 @@ fn the_tracker_in_the_receiver_is_the_float_one() {
                 }
                 let drift = (ti.timing(&fx) - tf.timing()).abs();
                 // One fractional bit in the FFT word (ADR 0008's hand-off): the largest
-                // difference is 4.0e-4, in one symbol of a 6 Mb/s frame at 6 dB, and
-                // 1.5e-4 in every other (9.6e-5 with two fractional bits).
+                // difference is 4.0e-4, in one symbol of a 6 Mb/s frame at 6 dB, and at
+                // most 1.6e-4 in every other (9.6e-5 with two fractional bits).
                 assert!(
                     slope < 5e-4,
                     "{rate:?} {ppm} ppm symbol {i}: measured {} against {}",
@@ -1039,6 +1040,7 @@ fn the_tracker_in_the_receiver_is_the_float_one() {
         }
     }
     assert!(wraps <= 1, "{wraps} frames ended by a pair at ±π");
+    assert!(worst_slope > 5e-5, "{worst_slope}");
     assert!(compared > 2000, "{compared}");
     println!(
         "{compared} symbols, {wraps} ended by a pair at ±π; largest difference: measured slope \
@@ -1286,6 +1288,10 @@ fn the_tracker_starts_from_the_cfo_word_by_hand() {
     assert_eq!(clock_ratio(65_535.0, 1_048_576.0), Some(65_535));
     assert_eq!(clock_ratio(65_535.5, 1_048_576.0), None);
     assert_eq!(clock_ratio(0.4, 1_048_576.0), None);
+    assert_eq!(clock_ratio(0.5, 1_048_576.0), Some(1));
+    assert_eq!(clock_ratio(1.0, 1_048_576.0), Some(1));
+    assert_eq!(clock_ratio(160e6, 2.6e9), Some(64_528));
+    assert_eq!(clock_ratio(160e6, 2.56e9), None);
     assert_eq!(clock_ratio(20e6, 0.0), None);
     assert_eq!(clock_ratio(-20e6, 5.8e9), None);
     assert_eq!(clock_ratio(f64::NAN, 5.8e9), None);
@@ -1319,13 +1325,16 @@ fn the_tracker_starts_from_the_cfo_word_by_hand() {
     assert_eq!(at(0, 579), 0);
     assert_eq!(at(0, 580), 1);
     // A word of the accumulator's whole range and the largest ratio stay inside the rate's
-    // register (2^(P−6+R) = 2^26); a word no accumulator holds saturates there.
+    // signed register of P − 6 + R = 26 bits (below 2^25); a word no accumulator holds
+    // saturates at its ends, whether or not its product fits 64 bits.
     assert_eq!(rate((1 << 21) - 1, u16::MAX), 33_553_904);
     assert_eq!(rate(-(1 << 21), u16::MAX), -33_553_920);
-    assert_eq!(rate(i64::MAX, u16::MAX), 1 << 26);
-    assert_eq!(rate(i64::MIN, u16::MAX), -(1 << 26));
-    // The register is P − 6 + R bits and a sign: at P = 30 a word of 30 bits passes whole,
-    // (2^29 − 1)·65535/4096 = 8 589 803 504.0002, and the limit is 2^34.
+    assert_eq!(rate(i64::MAX, u16::MAX), (1 << 25) - 1);
+    assert_eq!(rate(i64::MIN, u16::MAX), -(1 << 25));
+    assert_eq!(rate(1 << 50, u16::MAX), (1 << 25) - 1);
+    assert_eq!(rate(-(1 << 50), u16::MAX), -(1 << 25));
+    // At P = 30 the register is 34 bits and a word of 30 bits passes whole:
+    // (2^29 − 1)·65535/4096 = 8 589 803 504.0002.
     let p30 = FixedOfdmConfig {
         front: FixedRxConfig {
             nco_phase_bits: 30,
@@ -1336,8 +1345,24 @@ fn the_tracker_starts_from_the_cfo_word_by_hand() {
     assert!(p30.is_valid());
     let rate30 = |word: i64| FixedTracking::from_cfo_word(word, u16::MAX, &p30).rate0;
     assert_eq!(rate30((1 << 29) - 1), 8_589_803_504);
-    assert_eq!(rate30(i64::MAX), 1 << 34);
-    assert_eq!(rate30(i64::MIN), -(1 << 34));
+    assert_eq!(rate30(i64::MAX), (1 << 33) - 1);
+    assert_eq!(rate30(i64::MIN), -(1 << 33));
+    // Widths `is_valid` refuses are not a panic: R is taken as at most 20 and P as 8 to 40.
+    let odd = |r: u32, p: u32| {
+        let fx = FixedOfdmConfig {
+            rate_frac: r,
+            front: FixedRxConfig {
+                nco_phase_bits: p,
+                ..fx.front
+            },
+            ..fx
+        };
+        FixedTracking::from_cfo_word(3, 3616, &fx).rate0
+    };
+    assert_eq!(odd(30, 22), 2712);
+    assert_eq!(odd(u32::MAX, 22), 2712);
+    assert_eq!(odd(20, 3), 2712);
+    assert_eq!(odd(20, 60), 2712);
 
     // Everything else is the start from a clock offset known to 2 ppm: at a word of 0 the
     // two are one tracker, and the weight is that start's constant:

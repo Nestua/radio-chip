@@ -1086,3 +1086,96 @@ removal (it would allocate a 2²⁸-entry table), the `pole` command (written af
 - The hand-off's width: 12 bits with a requirement on the radio's noise level, or 13.
 - `restart` / `rescale` in the fixed blocker if ADR 0008 keeps a control.
 - `rxper` still seeds per thread; `rxagc`'s per-frame seed is the pattern to move it to.
+
+## 2026-11-21 · G0 + G2 · behind ADR 0008's hand-off: the default input, the tracker's start from the CFO word, the G2 rerun
+
+Commit: the one carrying this entry, on 613d358 (ADR 0008 accepted). Commands:
+`cargo test -p radio-phy --test g2_rx_ofdm` (25 pass) and `--test g2_rx_front` (23 pass);
+`rxper fixed 2000` → `reports/rx_ofdm_fixed.txt`; `rxper fixedw 2000` →
+`reports/rx_ofdm_fixedw.txt` (both on the build server, 32 threads; they replace the reports
+of 2026-11-20). The first two of the model follow-ups ADR 0008 names; the hand-off as a
+function is in `rx_front.md` under the same date.
+
+**G0 — what changed in the definitions.**
+
+- *The decoder's input* (decision 1): `FixedOfdmConfig::default()` takes 13 bits
+  (`in_bits` = `Y_BITS`) with one fractional bit (`in_shift` 1) in the 16-bit FFT word,
+  instead of 12 and two. The sample's LSB is the ADC's; the word holds twice the ADC's full
+  scale.
+- *The tracker's start* (decision 7): `clock_ratio(fs, fc)` = round(fs/fc·2²⁰) as a 16-bit
+  register (3616 for 20 MHz at 5.8 GHz; ratios below 1/16 fit), written by the MAC with
+  the channel. `FixedTracking::from_cfo_word(word, ratio, fx)`: a clock offset
+  ε = word·(fs/fc)/2^P (both ends derive carrier and sample clock from one oscillator,
+  IEEE 802.11-2020 §17.3.9.5–6) drifts 16·ε samples in a fifth of a symbol, each 2^(P−6)
+  units of slope, so with R fractional bits rate0 = word·ratio/2^(22−R), half to even, in
+  a signed register of P − 6 + R bits (26 at the defaults): one 22 × 16-bit product per
+  packet. A P-bit word and a 16-bit ratio stay below 2^(P+R−7), so the register never
+  saturates in hardware; the model saturates a word no accumulator holds. The weight is the constant
+  of the start from an offset known to 2 ppm (25 938 223). `from_clock_offset` (ppm as a
+  float) stays for the tests and the float comparison. The model still computes the two
+  weights' constants in floating point from `TIMING_HINT_PPM` and `TIMING_PRIOR_PPM`; in
+  hardware they are two ROM words.
+
+**Tests, written before the code** (each seen failing: the default's constants; the missing
+functions):
+- `the_default_input_is_the_hand_off_of_adr_0008`: the constants; and a 54 Mb/s frame
+  whose mean power is the 12-bit full scale squared, handed at 13 bits, decodes with the
+  default input and not with a 12-bit one.
+- `the_tracker_starts_from_the_cfo_word_by_hand`: the register for three channels and its
+  limits (0, 65535, 65535.5, not a number); the rate at R = 10 (ties to even on both sides
+  of zero), R = 0 and R = 20; 48 654 (232 kHz, 40 ppm at 5.8 GHz) → 42 952 against 42 950
+  from 40 ppm itself; the largest word and ratio inside the register, words no accumulator
+  holds saturating at its ends (2²⁵ − 1 and −2²⁵; 2³³ − 1 and −2³³ at P = 30), a word
+  whose product does not fit 64 bits among them; widths `is_valid` refuses (no panic); the
+  weight.
+- `the_start_from_the_cfo_word_is_the_start_from_the_offset`: against the float conversion
+  the tools used (word → Hz → ppm → `from_clock_offset`) over five channels, R of 6, 10
+  and 20, P of 22 and 30, offsets to ±60 ppm: the rates differ by at most
+  1 + |word|·2^(R−23) (two roundings and the register's half LSB); the largest difference
+  is 0.98 of that bound.
+- The chain from the ADC with this start, and its sign held to the clock:
+  `the_default_receiver_decodes_the_hand_off` (`rx_front.md`).
+
+**Tests changed by the default.** Four of the older tests fed 12-bit samples to the default
+words and now run with one fractional bit fewer:
+- `the_default_words_bit_for_bit`: the five pins are new (they were 797987032209841876,
+  2722506916840601925, 2803077607927797426, 16026798777574690161,
+  12466612513770086848).
+- `samples_outside_the_input_width_saturate`: overdrives 13 bits now.
+- `the_tracker_in_the_receiver_is_the_float_one`: the bound on the measured slope's
+  difference is 5·10⁻⁴ rad per subcarrier instead of 2·10⁻⁴. The largest difference was
+  9.6·10⁻⁵ with two fractional bits and is 4.0·10⁻⁴ in one symbol (6 Mb/s, 6 dB, +40 ppm,
+  symbol 184) and at most 1.6·10⁻⁴ in every other of 2316; the drift differs by at most
+  0.00019 of a sample (was 0.00015). The measurement's own deviation at that SNR is two
+  orders above.
+- The other tests pass unchanged, the standard's own waveform among them
+  (`g1_annex_i1`).
+
+**Mutations** (clean build each, restored by `cp` + `touch`). The default: `in_bits` 12,
+`in_shift` 2, `in_shift` 0 — all fail. `from_cfo_word` and `clock_ratio`, thirteen: the
+shift one less and one more, floor instead of half to even, the limit halved, the sign,
+the word cut to 32 bits, the unknown start's weight, the register floored, 0 accepted,
+65536 accepted, 19 fractional bits, R fixed at 10, P fixed at 22. Twelve failed at once;
+the last survived (no test left P = 22 with a saturating word) and fails since the P = 30
+cases were added. After the review (below) seven more, all failing: R and P taken unclamped,
+a 64-bit wrapping product, a register value of 1 refused, the register one bit wider and
+one narrower, `handoff_fixed`'s width taken from the front's `z_bits`.
+
+**`rxper` after ADR 0008.** With an integer receiver in the set (`fixed`, `fixedw`) every
+receiver now starts from the same 12-bit ADC samples (the frame at −12 dBFS by a gain that
+knows it, no DC offset in the scene) and the same acquisition, the integer front's
+(`acquire_fixed`, its DC blocker in its own path). The integer receiver is handed
+`handoff_fixed`'s stream and starts its tracker from the CFO word and the register; the
+float receivers are handed the same samples less the float estimate (`ltf_dc_offset`),
+rotated by `correct` at the word's frequency. Until now the float front acquired and
+corrected the channel's samples and only then were they quantised to 12 bits: the rotator,
+the offset's estimate and the 13 / 1 hand-off were outside `rxper`'s comparison (they were
+measured in `rxagc`). Frames are seeded by the point and the frame's number (`rxagc`'s
+pattern), so a report no longer depends on the thread count and the count of frames is
+exact; the frames are therefore not those of the earlier reports. The float-only commands
+(`awgn`, `tgn`, `soft*`, `timing`, `sfo`) keep the float front and get the new seeding
+too: their committed reports were not rerun and are at their own commits.
+`rxagc` still starts its integer chains through the float conversion; it moves to the word
+with the gain control's timer and hold, when its reports are rerun.
+
+@@RESULTS@@

@@ -1716,7 +1716,11 @@ sample's phase) belongs to the streaming model and is not fixed here.
   `decode_ppdu_fixed` at their defaults on 54, 36 and 6 Mb/s frames (300 octets, 30 dB,
   +33, −12.5 and −38 ppm, a DC offset of −20 dBFS at the ADC). This one passed as soon as
   the function existed, at the old default input too (a 12-bit input clips nothing at
-  −12 dBFS): it shows the chain whole, not the width.
+  −12 dBFS): it shows the chain whole, not the width. With decision 7's start
+  (`rx_ofdm.md`, same date) the tracker is started from the acquisition's CFO word and
+  nothing between the ADC and the PSDU is in floating point; the test then also holds the
+  sign to the clock: the last symbol's tracked timing is ε·(112 + 80·i) samples within
+  0.03 (−0.31 at the end of the 6 Mb/s frame), and with the word negated it is not.
 
 **Mutations** (each built clean, the file restored by `cp` and `touch`; all six fail):
 no offset removed (the three tests); 12 bits out (by hand, steps); the rotation the other
@@ -1726,5 +1730,4 @@ word negated (steps, the chain); a short stream not refused (by hand).
 **Open**
 - The second history and the replay inside `RxFrontFixed`, with the phase of the replay's
   first sample; then the hand-off's vectors.
-- The gain control's timer and hold input (`FastAttackAgc`), the tracker's start from the
-  CFO word in integers.
+- The gain control's timer and hold input (`FastAttackAgc`).
