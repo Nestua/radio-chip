@@ -1,0 +1,39 @@
+# rxagc loop: ADR 0008, decision 2, as a closed loop. 2000 frames of 1000 octets per row, the
+# frames of `hold` (the same scenes); noise at -30 dBFS at the largest gain, no DC offset; clock
+# offset uniform in ±40 ppm, carrier 5.8 GHz. Gain control: the AD9361's reset values with 16
+# samples of power and the overload exit on (as every command). Receiver, all in integers:
+# acquire (RxFrontFixed), hand-off (handoff_fixed), decode_ppdu_fixed at their defaults, the
+# tracker started from the CFO word. Phase jump per gain change uniform in ±30°.
+# Who keeps the gain still:
+#   from the lock    = held from the control's first lock inside the packet to the stream's end
+#                      (the tool knows where the packet is: the assumption until now);
+#   timer + front    = the control keeps every lock 512 samples; the front raises a hold where it
+#                      declares an acquisition and drops it at the end SIGNAL's length gives, or
+#                      180 samples after SIGNAL's symbol when SIGNAL fails; it then searches again;
+#   timer<max + front = the same, the timer keeping only a lock taken below the largest gain
+#                      (a lock on noise is left at the first overload);
+#   front alone      = the hold without any timer;  timer<max alone = that timer and no hold;
+#   nothing          = neither;
+#   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and
+#                      20 µs) late; a hold that would act after its own end is not raised.
+# A released control returns to the largest gain and searches (an assumption).
+# Rows 'burst': the frame's two training fields alone (320 samples, nothing after them) are
+# sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise. The
+# columns without the front's hold try the stream's first acquisition only and lose every
+# such frame by construction; only the columns with the front's hold search again.
+# Each cell: frames lost, +a−b against 'from the lock' (lost by this column alone, by that one
+# alone), then acquisitions tried / holds dropped on a failed SIGNAL / frames whose gain
+# changed after the short training field (in the stream of the last acquisition tried).
+# point                  frames                from the lock                timer + front            timer<max + front                  front alone              timer<max alone                      nothing            t<max + front +40           t<max + front +400
+  AWGN 54 Mb/s 25 dB       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0           61 +61−0 2000/0/61           67 +67−0 2000/0/67              0 +0−0 2000/0/0              5 +5−0 2000/0/5
+  AWGN 54 Mb/s 30 dB       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              1 +1−0 2000/0/1           68 +68−0 2000/0/68           70 +70−0 2000/0/70              0 +0−0 2000/0/0              7 +7−0 2000/0/7
+  AWGN 54 Mb/s 40 dB       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              4 +4−0 2000/0/4           55 +55−0 2000/0/55           61 +61−0 2000/0/61              0 +0−0 2000/0/0              8 +8−0 2000/0/8
+  AWGN 54 Mb/s 60 dB       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0           60 +60−0 2000/0/60           60 +60−0 2000/0/60              0 +0−0 2000/0/0           14 +14−0 2000/0/14
+  AWGN 6 Mb/s 30 dB        2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/2            0 +0−0 2000/0/528            0 +0−0 2000/0/530              0 +0−0 2000/0/0              0 +0−0 2000/0/6
+  AWGN 6 Mb/s 60 dB        2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/2          31 +31−0 2000/0/543          30 +30−0 2000/0/546              0 +0−0 2000/0/0              0 +0−0 2000/0/3
+  TGn D 54 Mb/s 40 dB      2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              2 +2−0 2000/0/2           85 +85−0 2000/0/85           87 +87−0 2000/0/87              0 +0−0 2000/0/0           12 +12−0 2000/0/12
+  TGn D 54 Mb/s 60 dB      2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              3 +3−0 2000/0/3           64 +64−0 2000/0/64           68 +68−0 2000/0/68              0 +0−0 2000/0/0              8 +8−0 2000/0/8
+  TGn D 6 Mb/s 30 dB       2000              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0              0 +0−0 2000/0/0            1 +1−0 2000/0/536            1 +1−0 2000/0/539              0 +0−0 2000/0/0              0 +0−0 2000/0/9
+  AWGN 6 Mb/s 5 dB         2000              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0              2 +0−0 2000/0/0
+  burst, AWGN 54 Mb/s 30 dB   2000           2000 +0−0 2000/0/0        1991 +0−9 3541/1534/4      477 +0−1523 3523/1517/0      473 +0−1527 3528/1519/1          2000 +0−0 2000/0/64          2000 +0−0 2000/0/70      477 +0−1523 3523/1517/0      474 +0−1526 3533/1527/7
+  burst, AWGN 6 Mb/s 30 dB   2000           2000 +0−0 2000/0/0      490 +0−1510 3510/1501/4      477 +0−1523 3523/1517/0      500 +0−1500 3500/1493/0         2000 +0−0 2000/0/537         2000 +0−0 2000/0/540      477 +0−1523 3523/1517/0      495 +0−1505 3505/1501/3

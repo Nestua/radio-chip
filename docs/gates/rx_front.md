@@ -1731,3 +1731,96 @@ word negated (steps, the chain); a short stream not refused (by hand).
 - The second history and the replay inside `RxFrontFixed`, with the phase of the replay's
   first sample; then the hand-off's vectors.
 - The gain control's timer and hold input (`FastAttackAgc`).
+
+## 2026-11-21 · measurements · decision 2 as a closed loop: the control's timer and the front's hold
+
+Commit: e40a946 for the report, this entry on top. Command: `rxagc loop 2000` →
+`reports/rx_front_agc_loop.txt` (locally, 10 threads, about 10 minutes). The model's side
+(`lock_hold`, `lock_hold_at_max`, `run_held`) is in `channel.md` under the same date.
+
+**What the loop is.** Per frame and per column: the gain control runs on the stream; the
+ADC's samples are formed from its trace; the integer front (`RxFrontFixed`) declares an
+acquisition; a hold is raised at that sample (or 40 or 400 samples later) and the control
+is run again with it; the decoder (`handoff_fixed`, `decode_ppdu_fixed`, tracker from the
+CFO word) reads SIGNAL. A SIGNAL that decodes holds the gain to the end its length gives;
+one that fails drops the hold 180 samples after SIGNAL's symbol (decision 3's 9 µs) and
+the front searches again from there. A hold that would act only after its own end is not
+raised. A released control returns to the largest gain and searches. The phase jump of a
+gain change is drawn from the change's own sample, so that the stream before a decision
+does not depend on what is decided after it. The frames are those of `hold` (same scenes);
+two rows are new: 6 Mb/s at 5 dB, and "burst" rows in which the frame's two training
+fields alone (320 samples, nothing behind them) are sent 280 to 330 samples before the
+frame.
+
+**Results** (frames lost of 2000; in brackets the frames whose gain changed after the
+short training field):
+
+| Row | from the lock (the old assumption) | timer on every lock + front | timer below the largest gain + front | front alone | that timer alone | nothing | timer + front, hold 40 late | 400 late |
+|---|---|---|---|---|---|---|---|---|
+| AWGN 54 Mb/s 25 dB | 0 | 0 | 0 | 0 | 61 (61) | 67 (67) | 0 | 5 (5) |
+| AWGN 54 Mb/s 30 dB | 0 | 0 | 0 | 1 (1) | 68 (68) | 70 (70) | 0 | 7 (7) |
+| AWGN 54 Mb/s 40 dB | 0 | 0 | 0 | 4 (4) | 55 (55) | 61 (61) | 0 | 8 (8) |
+| AWGN 54 Mb/s 60 dB | 0 | 0 | 0 | 0 | 60 (60) | 60 (60) | 0 | 14 (14) |
+| AWGN 6 Mb/s 30 dB | 0 | 0 | 0 | 0 (2) | 0 (528) | 0 (530) | 0 | 0 (6) |
+| AWGN 6 Mb/s 60 dB | 0 | 0 | 0 | 0 (2) | 31 (543) | 30 (546) | 0 | 0 (3) |
+| TGn D 54 Mb/s 40 dB | 0 | 0 | 0 | 2 (2) | 85 (85) | 87 (87) | 0 | 12 (12) |
+| TGn D 54 Mb/s 60 dB | 0 | 0 | 0 | 3 (3) | 64 (64) | 68 (68) | 0 | 8 (8) |
+| TGn D 6 Mb/s 30 dB | 0 | 0 | 0 | 0 | 1 (536) | 1 (539) | 0 | 0 (9) |
+| AWGN 6 Mb/s 5 dB | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 |
+| burst, 54 Mb/s 30 dB | — | **1991** | 477 | 473 | — | — | 477 | 474 |
+| burst, 6 Mb/s 30 dB | — | 490 | 477 | 500 | — | — | 477 | 495 |
+
+("—": these columns try the stream's first acquisition only and lose every burst frame by
+construction.)
+
+1. **The timer and the front's hold together are the assumption every earlier run made.**
+   In the ten rows without a burst both timer columns lose exactly the frames "from the
+   lock" loses (none, and the same 2 at 5 dB), with no gain change after the short
+   training field in any frame. The front's declaration, the release from SIGNAL and the
+   search after it are now in the loop; the earlier `hold` knew the packet's end.
+2. **The timer as ADR 0008 first worded it must not keep a lock on noise.** Burst row,
+   54 Mb/s: 1991 of 2000 lost. The hold on the burst is dropped (its SIGNAL is noise), the
+   control returns to the largest gain and locks on noise 26 samples later, the frame
+   arrives 14 to 16.5 µs after the burst's end, inside the 512 samples, and its overload is
+   not answered: training fields and SIGNAL are clipped. 6 Mb/s survives the clipping
+   (490, the level of the other columns). A SIFS is 16 µs: the case is every ACK and every
+   next frame of a burst. With the timer keeping only a lock taken below the largest gain
+   the row loses 477, as with no timer (473). **The founder amended decision 2 on this
+   (2026-11-21); the ADR carries the amendment.**
+3. **What is left in the burst rows is a SIGNAL of noise that passes.** Of the 2000
+   acquisitions on a preamble with nothing behind it about 1520 are dropped at SIGNAL
+   (parity, rate or length) and 477 to 500 pass and hold the gain and the front for the
+   length they claim; the frame behind is lost in every column alike. A quarter is what
+   one parity bit and eight valid rates of sixteen give. This is a property of the
+   802.11a SIGNAL field, named in ADR 0008; nothing here reduces it (a receiver that
+   restarts on a stronger packet would; not designed).
+4. **Without the front's hold the timer alone is nothing:** 55 to 85 of 2000 lost at
+   54 Mb/s, the frames whose gain changed inside the data — each one lost. At 6 Mb/s a
+   quarter of the frames (528 to 546) have such a change and almost all survive it (0 to
+   31 lost): a change costs some tens of samples and a phase jump, which BPSK at rate 1/2
+   and 30 dB carries.
+5. **The front's hold alone** (no timer) loses 0 to 4 at 54 Mb/s, each a frame whose gain
+   changed between the lock and the declaration: `hold`'s finding with the front's own
+   declaration (it was 0 to 5 with a fixed sample).
+6. **How late the hold may act:** 40 samples (2 µs) late costs nothing in any row; 400
+   (20 µs) late loses 5 to 14 of 2000 at 54 Mb/s — the timer has run out (a lock some 50
+   to 100 samples into the packet, kept 512; the hold at about 880) and the gain has
+   moved. A hold on a pin is inside this; one by SPI is to be measured against it at R1.
+
+**What this is not.** One seed per row, one run. The release's behaviour (to the largest
+gain, search from scratch) and the timer are assumptions about a radio, not the AD9361's
+documented behaviour. The watchdog at the longest PPDU never acts: a length SIGNAL can
+carry ends before it. The front between a drop and the next search is the streaming
+model's whole-stream run filtered by the detection's sample, not a front restarted at the
+drop. No DC offset, one noise level (−30 dBFS at the largest gain), frames of 1000 octets,
+TGn B and E not run; the burst is one gap and one level (the frame's own). The float chain
+is not in the loop. `rxagc`'s other commands still hold from the lock and start the
+tracker through the float conversion; their reports were not rerun.
+
+**Open**
+- The second history and the replay inside `RxFrontFixed`; the hold's raise and drop as
+  outputs of the streaming front (they are the tool's here).
+- At R1: whether the radio has, or can be given, a timer on locks below the largest gain;
+  how its hold pin acts and how fast.
+- A restart of the receiver on a stronger packet while it holds on a false SIGNAL: not
+  designed; 24 % of preambles with nothing behind them hold the gain for a phantom length.

@@ -10,7 +10,11 @@ by ADR 0009 (the count for one to eight chains, the sample interface).
    the two long training symbols, replayed from a second history, turned by the CFO word,
    13 bits wide (`in_shift` 1).
 2. **The gain:** the control keeps a lock for 512 samples after taking it, and the front
-   holds the gain from its declaration to the packet's end.
+   holds the gain from its declaration to the packet's end. **Amended 2026-11-21 (the
+   founder, after the closed-loop measurement, `rx_front.md` of that date):** the timer
+   keeps only a lock taken below the largest gain. A lock at the largest gain (on noise)
+   is left at the first overload: kept for 512 samples it lost 1991 of 2000 frames at
+   54 Mb/s that arrived some 15 µs after a hold was dropped.
 3. **Latency:** the budget below; everything behind the hand-off takes one sample per clock.
 4. **Folding: option C** — the search correlator folded over R, the decision's over 4, the
    detector's arithmetic serial; ADR 0006's R = 6 fallback given up; the folded search
@@ -188,6 +192,20 @@ estimate is whole ADC LSB.
   whether its fast-attack machine has step 1's timer are to be read from its documentation
   and tried at R1. A hold by SPI is slower; how slow a hold may be was not measured (a
   delayed-hold row in `rxagc hold` would say).
+
+**Amendment, 2026-11-21 (measured as a closed loop, `rxagc loop`,
+`reports/rx_front_agc_loop.txt`; journal `rx_front.md`).** Step 1 as worded above keeps a
+lock on noise too, and the control locks on noise 26 samples after every release. A packet
+arriving inside the next 512 samples — an ACK or the next frame of a burst comes after a
+SIFS of 320 — overloads the ADC at the largest gain and the control may not answer:
+1991 of 2000 frames lost at 54 Mb/s, 30 dB, 14 to 16.5 µs after a dropped hold. **Step 1
+now reads: the control does not leave a lock taken below the largest gain for 512 samples
+after taking it.** With that and step 2 no frame of 2000 is lost in any of the nine rows
+where the earlier assumption (held from the lock, the packet's place known) loses none,
+and the row above loses 477, all of them to a SIGNAL of noise that passed its checks (the
+last-but-one bullet above, now with a number: about a quarter of the acquisitions on a
+preamble with nothing behind it hold the gain, and the front, for the length they claim).
+The requirement on the radio changes with it.
 
 ## Decision 3 — the latency budget
 
