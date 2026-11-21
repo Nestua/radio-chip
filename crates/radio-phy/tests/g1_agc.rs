@@ -33,6 +33,7 @@ fn agc() -> FastAttackAgc {
         lost_db: 10.0,
         unlock_on_overload: true,
         unlock_to_max: true,
+        lock_hold: 0,
     }
 }
 
@@ -582,4 +583,125 @@ fn the_gain_control_sees_the_dc_offset() {
     assert!(t.locks.is_empty());
     assert_eq!(agc().run_dc(&silence, None), agc().run(&silence));
     assert_eq!(agc().run(&silence).changes[..1], [(0, 70.0)]);
+}
+
+#[test]
+fn a_lock_is_kept_for_its_first_samples() {
+    // ADR 0008, decision 2, step 1. The first case: locked from 45 at a gain of 40. One
+    // sample of 0.012 is a peak of 1.2 there, a large overload, which unlocks at once.
+    let spike = |at: usize| {
+        let mut x = level(-50.0, 300);
+        x[at] = (0.012, 0.0);
+        x
+    };
+    let free = agc().run(&spike(100));
+    assert_eq!(free.unlocks, [100]);
+    assert_eq!(changes(&free)[8..10], [(45, 40.0), (101, 70.0)]);
+    // With the lock kept for 100 samples, 45 … 144, the overload at 100 is not acted on
+    // and not remembered: the trace is the one without the spike (whose window 45 … 108
+    // has a mean power of (63·0.1 + 1.44)/64 = 0.12 against 0.1: no power exit either).
+    let kept = FastAttackAgc {
+        lock_hold: 100,
+        ..agc()
+    };
+    let t = kept.run(&spike(100));
+    let plain = agc().run(&level(-50.0, 300));
+    assert_eq!(
+        (&t.changes, &t.locks, &t.unlocks),
+        (&plain.changes, &plain.locks, &plain.unlocks)
+    );
+    assert_eq!(t.unlocks, []);
+    // The last kept sample is 144; at 145 the control is its own again.
+    assert_eq!(kept.run(&spike(144)).unlocks, []);
+    let t = kept.run(&spike(145));
+    assert_eq!(t.unlocks, [145]);
+    assert_eq!(changes(&t)[9], (146, 70.0));
+
+    // The power exit is counted while the lock is kept and taken when it may be: the
+    // packet of `the_end_of_a_packet_unlocks_the_gain` ends at 150, the comparison "lost"
+    // stands from 236 and would unlock at 243. Kept 512 samples from 45, the lock is left
+    // at 557, the maximum gain from 558; then silence, measured over 568 … 583, locked at
+    // 584 on nothing.
+    let mut x = level(-50.0, 150);
+    x.extend(vec![(0.0, 0.0); 450]);
+    let t = FastAttackAgc {
+        lock_hold: 512,
+        ..agc()
+    }
+    .run(&x);
+    assert_eq!(
+        (t.locks.clone(), t.unlocks.clone()),
+        (vec![45, 584], vec![557])
+    );
+    assert_eq!(changes(&t)[9..], [(558, 70.0)]);
+    // 198 samples end at 242 and change nothing; 199 delay the exit by one sample.
+    let at = |lock_hold: usize| FastAttackAgc { lock_hold, ..agc() }.run(&x).unlocks;
+    assert_eq!(at(198), [243]);
+    assert_eq!(at(199), [244]);
+}
+
+#[test]
+fn a_hold_freezes_the_gain_and_its_release_starts_the_search_again() {
+    // ADR 0008, decision 2, step 2: a window (a, b) holds samples a … b − 1 at the gain of
+    // sample a; the control is left at the end of sample b − 1 as by an unlock.
+    // The first case steps 70, 65, 60, 55, 53, 51, 49 and reaches 47 at sample 19. Held
+    // over 20 … 59 it stays there (−3 dBFS); released, it is at the maximum from 60 and
+    // the first case runs again from there: 61, 64, … 79, locked at 105 at a gain of 40.
+    let x = level(-50.0, 300);
+    let free = agc().run(&x);
+    let t = agc().run_held(&x, None, &[(20, 60)]);
+    assert_eq!(t.changes[..8], free.changes[..8]);
+    assert_eq!(t.changes[7], (19, 47.0));
+    assert!(t.gain_db[19..60].iter().all(|g| *g == 47.0));
+    let again: Vec<(usize, f64)> = free.changes.iter().map(|c| (c.0 + 60, c.1)).collect();
+    assert_eq!(t.changes[8..], again[..]);
+    assert_eq!((t.locks.clone(), t.unlocks.clone()), (vec![105], vec![]));
+    // A control that stays where it is when it unlocks searches from 47: quiet at 60 …,
+    // the settling delay 60 … 69, power over 70 … 85 at −3 dBFS, −7: 40 from 86.
+    let stay = FastAttackAgc {
+        unlock_to_max: false,
+        ..agc()
+    };
+    let t = stay.run_held(&x, None, &[(20, 60)]);
+    assert_eq!(t.changes[7..], [(19, 47.0), (86, 40.0)]);
+    assert_eq!(t.locks, [86]);
+
+    // A hold on a locked gain keeps the lock through the packet's end (the power exit at
+    // 243 does not happen) and its release is the unlock: at 199, the maximum from 200,
+    // then silence measured over 210 … 225 and a lock on nothing at 226.
+    let mut x = level(-50.0, 150);
+    x.extend(vec![(0.0, 0.0); 450]);
+    let t = agc().run_held(&x, None, &[(100, 200)]);
+    assert_eq!(
+        (t.locks.clone(), t.unlocks.clone()),
+        (vec![45, 226], vec![199])
+    );
+    assert_eq!(t.changes[8..], [(45, 40.0), (200, 70.0)]);
+    // A comparison that stood before the hold is forgotten by it: held over 240 … 299,
+    // the exit due at 243 does not happen then or at the release's own sample.
+    let t = agc().run_held(&x, None, &[(240, 300)]);
+    assert_eq!(t.unlocks, [299]);
+    assert_eq!(t.changes[8..], [(45, 40.0), (300, 70.0)]);
+    // A hold to the stream's end and beyond: nothing after its first sample.
+    let t = agc().run_held(&x, None, &[(100, usize::MAX)]);
+    assert_eq!((t.locks.clone(), t.unlocks.clone()), (vec![45], vec![]));
+    assert_eq!(t.changes.last(), Some(&(45, 40.0)));
+    assert_eq!(t.gain_db.len(), 600);
+    // From the first sample: the maximum gain all through, the search from 30.
+    let t = agc().run_held(&level(-50.0, 300), None, &[(0, 30)]);
+    assert!(t.gain_db[..30].iter().all(|g| *g == 70.0));
+    assert_eq!(t.changes[..3], [(0, 70.0), (31, 65.0), (34, 60.0)]);
+    // Two windows, in any order; an empty window and one outside the stream do nothing.
+    let x = level(-50.0, 300);
+    let two = agc().run_held(&x, None, &[(150, 160), (20, 60), (70, 70), (400, 500)]);
+    let one = agc().run_held(&x, None, &[(20, 60)]);
+    let n = one.changes.len();
+    assert_eq!(two.changes[..n], one.changes[..]);
+    assert_eq!(two.changes[n..n + 2], [(160, 70.0), (161, 65.0)]);
+    assert_eq!(two.unlocks, [159]);
+    // No window: `run`.
+    let mut x = level(-50.0, 150);
+    x.extend(level(-80.0, 200));
+    x.extend(level(-30.0, 200));
+    assert_eq!(agc().run_held(&x, None, &[]), agc().run(&x));
 }
