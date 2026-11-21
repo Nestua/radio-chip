@@ -1448,3 +1448,239 @@ float one under every DC offset measured; the blocker's own pole in the decoder'
 sensitivity and through fading (54 Mb/s: 403 frames lost against 167 in AWGN at 20 dB, a
 floor of 13 % through TGn D), and a slower pole does not cure it. `restart` and `rescale`
 were not rerun in integers.
+
+## 2026-11-21 · G0 · R0-08d (2): what the decoder is handed (for ADR 0008)
+
+**Question.** `rx_ofdm.md` (2026-11-20) found that the decoder can be handed neither the DC
+blocker's output (it costs 54 Mb/s 0.9 dB and a 13 % floor through TGn D with nothing to
+remove) nor the samples before it (an offset 20 dB below the packet loses a fifth of the
+frames), and left the cause as a guess. Two things to settle before ADR 0008: is the
+blocker's cost the CFO's, and is there a removal that costs nothing when there is nothing
+to remove.
+
+**The candidate.** Behind a CFO of ω per sample the long training field repeats after 64
+samples turned by φ = 64·ω; a DC offset D of the receiver repeats unturned. For every n of
+the first long symbol's FFT window
+
+  x[n + 64] − e^(jφ)·x[n] = D·(1 − e^(jφ)),
+
+whatever the channel (the field stays periodic through any linear channel shorter than
+GI2) and whatever the transmitter leaks at its own carrier (that is part of the periodic
+field). The estimate is the mean over the 64 pairs divided by 1 − e^(jφ). Once the CFO is
+out the offset is a tone φ/2π subcarrier spacings from the unused subcarrier: where
+|1 − e^(jφ)| is small the division magnifies the noise, and there the tone does no harm.
+Below |1 − e^(jφ)| = 1/16 (a CFO of 3.1 kHz at 20 MHz, the tone within 0.01 of a spacing)
+zero is returned. The error of the estimate, as a tone, reaches subcarrier k with a power
+of 1/(2π²(k − δ)²) of that subcarrier's noise, δ = φ/2π: bounded however small the divisor
+(0.2 of the noise on the nearest subcarrier at δ = 0.5, 0.75 at δ = 0.74), a few per cent
+on the next ones.
+
+**Interface and formats.**
+- Float: `rx_front::ltf_dc_offset(x, fft_start, cfo_hz, fs) -> Option<Sample>`;
+  `DC_MIN_TURN` = 1/16. `None` when the stream does not hold the 128 samples.
+- Integers: `rx_front_fixed::ltf_dc_offset_fixed(x, fft_start, cfo_phase, fx) -> Option<IQ>`
+  on the ADC's 12-bit samples. e = the front's rotator (`nco_table`, L = 9, Q = 11,
+  amplitude A = 1023) at the phase 64·`cfo_phase` with half a table address added before it
+  is cut to the address; d = A − e; S = Σ (x[n + 64]·A − e·x[n]) exactly (below 2²⁹);
+  D = S·d*/(64·|d|²), each component rounded half to even and saturated to 12 bits, in ADC
+  LSB. Zero where 256·|d|² < A². One division per packet (a 42-bit by a 28-bit number).
+- `rx_front_fixed::remove_dc_fixed(x, D) -> Vec<IQ>`: x − D, saturated to the 13 bits of
+  the rotator's input (two 12-bit numbers never reach the limit). `correct_fixed` then
+  turns it as it turns the blocker's output today.
+- The acquisition (detector, CFO, timing) still runs on the blocker's output. Nothing of
+  `RxFrontFixed`, `hw/rtl` or `hw/vectors` changes.
+
+**References.** No outside reference exists for this estimator; the gates are the
+definition worked by hand on single samples and the identity above on fields that are not
+ours (random 64-periodic sequences behind random CFOs), which is a consistency gate of the
+model and is recorded as such. Its worth is measured as packet error rate
+(`rxagc cfo`, `cand`).
+
+**Budget (G2).** The integer estimate against the float one on the same ADC samples:
+within half an LSB (its rounding) plus the table's address rounding (π/512 of phase) times
+the field's own level over |d|. Through the receiver: frames lost by the integer chain with
+this estimate against the float chain with the float estimate, paired, as stage B's.
+
+## 2026-11-21 · G1/G2 + measurements · R0-08d (2): the DC offset from the long training field
+
+**Tests first.** The eight tests below were written against the planned API and failed (the
+test files did not compile: `ltf_dc_offset`, `ltf_dc_offset_fixed`, `remove_dc_fixed`
+unresolved) before the functions existed. One expectation of mine was wrong and was
+corrected with the implementation: a phase exactly between two table addresses goes up
+(half an address is added, then the phase is cut), so −5.5 addresses is −5, inside the
+guard, where I had written it symmetric.
+
+**Gates** (`cargo test -p radio-phy --test g1_rx_front --test g2_rx_front`, rustc 1.98.1,
+commit 2ff20a4: 31 and 19 pass; after the review, b65c6d1: 31 and 20):
+- `g1_rx_front`: `ltf_dc_offset_worked_by_hand` (single samples at φ = π and ±π/2, the
+  window's four edges), `..._is_left_alone_where_the_cfo_is_too_small_to_divide_by` (both
+  sides of 3109.0 Hz, a constant stream as its own offset, the stream's length),
+  `..._is_exact_behind_a_repeating_field` (200 random fields, CFOs and offsets, to 10⁻¹¹).
+- `g2_rx_front`: `ltf_dc_offset_fixed_worked_by_hand` (the same by hand in integers, ties
+  to even of either sign, the CFO word negative and wrapped), `..._guard_and_limits`
+  (addresses 5 and 6 of the table by hand, the tie, full scale, saturation, the stream's
+  length, an invalid configuration), `remove_dc_fixed_worked_by_hand`,
+  `ltf_dc_offset_fixed_follows_the_float_one` (600 ADC streams of the preamble, AWGN and
+  TGn D at 10, 20 and 35 dB, offsets up to ±300 LSB: against the float estimate within the
+  budget above and against the offset put in within five standard deviations of the
+  noise's reach; both bounds are approached to within a factor of twenty),
+  `the_ltf_estimate_takes_a_dc_offset_out_of_the_decoders_samples` (frames at 54 and
+  6 Mb/s, ±31 / 27 / 20.7 ppm at 5.8 GHz, an offset 8 dB below the frame: decoded at the
+  three hand-off widths with the estimate taken out, not decoded at 54 Mb/s with it left
+  in).
+
+**Mutations** (30, each run against the two test files, the source restored with a copy and
+a touch; all fail a test): float — the sign of φ; the guard as |d|² < 1/16; the guard
+removed; the window one sample late; one sample short; 63 in the divisor; d in place of
+its conjugate; the turned sample added; the guard at 1/32. Integers — no half address; the
+guard at 128 and at 512; half up and half down in the division; the upper limit 2048; the
+lower −2047; 63 samples of phase; d's imaginary part unsigned; the turned sample added
+(each component); 32 in the divisor; the window one sample late; d in place of its
+conjugate; `remove_dc_fixed` adding; its limits 4096 and −4095; the Q offset taken from I;
+the configuration's check removed; the rotator's phase negated; A + 1.
+Not killed because equivalent: the CFO word reduced modulo 2^P before the multiplication by
+64 (the rotator reduces again; the reduction only keeps the product inside 64 bits).
+
+**Measurements** (`rxagc`, 2000 frames of 1000 octets per row, the scene of `rx_ofdm.md`'s
+stage B part 2: the gain-control model, ±40 ppm at 5.8 GHz, 12-bit ADC; a frame's random
+stream from the row and the frame's number).
+
+**1. The blocker's cost is the CFO's** (`rxagc cfo` → `reports/rx_front_dc_cfo.txt`, binary
+of 2ff20a4, run locally; no DC offset; 54 Mb/s; the clock offset's size in the band of the
+row; frames lost of 2000):
+
+| Clock offset | AWGN 20 dB: before the blocker / blocker 2⁻⁷ / LTF estimate (float) | TGn D 26.5 dB | TGn D 40 dB |
+|---|---|---|---|
+| 0 to 2 ppm | 189 / 190 / 188 | 213 / 213 / 215 | 0 / 0 / 0 |
+| 2 to 10 ppm | 186 / 188 / 192 | 236 / 231 / 235 | 0 / 0 / 0 |
+| 10 to 20 ppm | 189 / 208 / 192 | 231 / 241 / 237 | 0 / 3 / 0 |
+| 20 to 30 ppm | 178 / 268 / 179 | 235 / 483 / 237 | 0 / 195 / 0 |
+| 30 to 40 ppm | 163 / 919 / 166 | 223 / 1134 / 227 | 0 / 912 / 0 |
+
+- Below 10 ppm (58 kHz) the blocker in the decoder's path costs nothing; from 20 ppm on it
+  is the largest loss in the receiver. AWGN at 25 dB: 0 / 0 / 0 / 1 / 112 lost by band,
+  none before the blocker. The integer chain's columns say the same (report).
+- The guess of `rx_ofdm.md` holds as far as this test goes: the dependence on the CFO is
+  measured, the mechanism (the subcarrier next to DC on the skirt of a high-pass whose
+  memory is longer than a symbol) is the explanation that fits and was not isolated further.
+- The LTF estimate with nothing to remove is the samples before the blocker within the
+  run's noise in every band (paired: at most +17 −14).
+
+**2. The estimate from the long training field removes the offset and costs nothing**
+(`rxagc cand` → `reports/rx_front_dc_cand.txt`, binary of 2ff20a4 built and run on the build
+server; frames lost of 2000; float before the blocker / integer chain as it is (13 / 2,
+blocker 2⁻⁷) / float with the LTF estimate / integers 12 / 2 with it / integers 13 / 2 with it):
+
+| DC offset | AWGN 54 Mb/s 40 dB | AWGN 54 Mb/s 20 dB | AWGN 6 Mb/s 3.5 dB | TGn D 54 Mb/s 26.5 dB | TGn D 54 Mb/s 40 dB |
+|---|---|---|---|---|---|
+| none | 0 / 12 / 0 / 0 / 0 | 167 / 412 / 162 / 167 / 170 | 213 / 210 / 222 / 220 / 217 | 226 / 517 / 232 / 231 / 230 | 0 / 251 / 0 / 0 / 0 |
+| per index −40 dBFS | 0 / 11 / 0 / 0 / 0 | 231 / 416 / 163 / 177 / 179 | 256 / 217 / 219 / 223 / 222 | 334 / 515 / 230 / 228 / 231 | 42 / 250 / 0 / 0 / 0 |
+| per index −30 dBFS | 377 / 19 / 0 / 0 / 0 | 1207 / 403 / 162 / 172 / 170 | 1001 / 215 / 221 / 214 / 220 | 1231 / 535 / 229 / 231 / 228 | 978 / 264 / 0 / 0 / 0 |
+| per index −20 dBFS | 1636 / 98 / 0 / 0 / 0 | 1844 / 808 / 453 / 460 / 458 | 1801 / 215 / 219 / 224 / 223 | 1838 / 771 / 235 / 235 / 241 | 1744 / 418 / 0 / 0 / 0 |
+| before the gain −20 dBFS at the largest | 0 / 36 / 0 / 0 / 0 | 1834 / 636 / 417 / 427 / 434 | 1810 / 216 / 219 / 216 / 220 | 1540 / 544 / 238 / 235 / 238 | 125 / 283 / 0 / 0 / 0 |
+| before the gain −10 dBFS | 386 / 215 / 0 / 0 / 0 | 1989 / 1778 / 1743 / 1741 / 1741 | 1927 / 212 / 220 / 220 / 220 | 1905 / 1027 / 451 / 457 / 457 | 1047 / 642 / 0 / 0 / 0 |
+
+- Under every offset of the table the chain with the LTF estimate loses what it loses with
+  no offset, except where the gain control itself is disturbed: AWGN 20 dB under the
+  offsets at −20 dBFS (453 and 417 against 162: the gain changes in 0.39 of the frames
+  where it otherwise does not, report column `chg`), and the offset before the gain at
+  −10 dBFS at 20 and 26.5 dB, the blinded control of the 2026-11-19 entry (at 25 dB: 842 of
+  2000 in every LTF column). Which of these the acquisition loses is in 4 below (I first
+  wrote "lost before the decoder" here without having separated them; at 20 dB that was
+  wrong).
+- The integer estimate (whole ADC LSB) follows the float one: paired differences of the
+  13 / 2 column against the float LTF column are at most +23 −13 in the rows above and in
+  the size of stage B's own integer-against-float differences.
+- With the noise at the largest gain lowered to −48 and −54 dBFS (report, last two
+  sections) the 13-bit column with the estimate loses 214 and 254 at 6 Mb/s against the
+  float column's 214 and 238, and 196 and 224 against 186 and 199 at 54 Mb/s: the lower
+  edge of `rx_ofdm_agc_level.txt`, not moved by an estimate in whole LSB. The 12-bit
+  hand-off loses 240 and 336, 211 and 272 there.
+- 6 Mb/s at 10 dB loses no frame in any column but the unremoved one.
+
+**3. The gain held by the receiver instead of by the control's first lock**
+(`rxagc hold` → `reports/rx_front_dc_hold.txt`, binary of b65c6d1, local; first run with 6349c95): held from 479
+samples after the packet's first (T1 + 223 + 64, the latest declaration) with the control
+free until then, the float chain with the LTF estimate loses 2, 1, 5 and 0 frames of 2000
+at 54 Mb/s in AWGN at 25, 30, 40 and 60 dB, 2 and 4 through TGn D at 40 and 60 dB, where
+it loses none with the assumed hold; none at 6 Mb/s. The integer 13 / 1 column is the same
+frames. 530 to 546 of the 2000 6 Mb/s frames would leave the lock later without any hold.
+
+**4. What `cand` left out** (`rxagc edge` → `reports/rx_front_dc_edge.txt`, binary of
+a562eb1, local; asked for by the ADR's reviewer; float before the blocker / float blocker /
+float LTF / integers 13 / 1 LTF, then frames the float and the integer acquisition lost: none,
+or an FFT start more than 16 samples off):
+
+| Row | lost | not acquired |
+|---|---|---|
+| AWGN 54 Mb/s 20 dB, no offset | 167 / 403 / 162 / 172 | 0 / 0 |
+| …, per index −20 dBFS | 1844 / 801 / 453 / 460 | 0 / 0 |
+| …, before the gain −20 dBFS | 1834 / 626 / 417 / 435 | 0 / 0 |
+| …, before the gain −10 dBFS | 1989 / 1778 / 1743 / 1743 | 0 / 0 |
+| AWGN 54 Mb/s 25 dB, before the gain −10 dBFS | 1933 / 1115 / 842 / 843 | 508 / 508 |
+| AWGN 54 Mb/s 40 dB, per index −30 / −20 dBFS | 377 / 19 / 0 / 0 and 1636 / 99 / 0 / 0 | 0 / 0 |
+| clock offset 0 to 2 ppm, 54 Mb/s 40 dB, none / −30 / −20 dBFS | 0 / 0 / 0 / 0 in each | 0 / 0 |
+| …, 54 Mb/s 20 dB | 174 / 173 / 178 / 179, 181 / 175 / 178 / 176, 499 / 509 / 470 / 471 | 0 / 0 |
+| …, 6 Mb/s 3.5 dB | 187 / 188 / 190 / 195, 191 / 187 / 189 / 187, 225 / 192 / 190 / 193 | 0 / 0 |
+| 54 Mb/s 20 dB, noise at −48 / −54 dBFS, no offset | 179 / 402 / 186 / 196 and 200 / 406 / 199 / 227 | 0 / 0 |
+| 6 Mb/s 3.5 dB, noise at −48 / −54 dBFS, no offset | 212 / 219 / 214 / 221 and 233 / 230 / 238 / 276 | 0 / 0 |
+
+- The 13 / 1 hand-off with the estimate is the 13 / 2 one of `cand` within a few frames,
+  under an offset and at the lower edge.
+- **The frames lost under the −20 dBFS offsets at 20 dB are not lost by the acquisition**
+  (none of 2000 not acquired or mistimed, in either chain). At 20 dB the control has no
+  lock inside the packet, so no hold starts, and the offset provokes gain changes (`chg`
+  0.39 to 0.92 against 0.00) that fall somewhere in the frame; which of them cost the frame
+  was not separated. Only the blinded control at 25 dB loses acquisitions (508 of the 842).
+  So nothing here asks for a control on the DC blocker in the acquisition's path.
+- With the clock offset within 2 ppm, where the estimate is mostly or wholly left out, the
+  offset does no harm even unremoved at 40 dB, and the chain with the estimate is level
+  with the float one.
+
+**Reviews (two fresh agents, 2026-11-21).**
+*The code and G0* (not the results or the ADR), on 6349c95. Confirmed by rederivation: the
+identity, the sign against `correct_fixed` and `cfo_phase`, the rounding, the widths at the
+default configuration, every hand-worked number, the bound 1/(2π²(k − δ)²) within ±40 ppm,
+the tool's pairing of frames, `ppm_band`, `hold_after`. Found and corrected:
+- **a defect:** the integer estimate's products overflowed 64 bits for rotators the
+  configuration allows (Q from 24 with 12-bit samples, from 22 with full 16-bit ones): a
+  panic in library code. The products are 128 bits wide now; the default's results are
+  the same integers (reports unaffected); test `..._off_the_default_configuration`;
+- six surviving mutants of its twenty: the float guard on the angle instead of the chord,
+  and zero above 300 kHz (no test went near a full turn; G0's "the tone does no harm" was
+  false there, and the doc now says the offset is left in on a subcarrier at a CFO of one
+  spacing, outside the standard's range); the guard's constant at 200 and the half address
+  hard-coded (nothing tested another table: L = 12 by hand and L = P now); the guard
+  before the length check in either model (a short stream with no CFO now tested). All six
+  fail a test now, with two of mine (the widening cut to 32 bits; R1 to R7 of the rerun);
+  one of mine survives, half an address of 1 added at L = P, a phase unit of 2⁻²² of a
+  turn that no test stream can see;
+- the bound of `ltf_dc_offset_fixed_follows_the_float_one` was loose (worst 0.44 of it, a
+  2 LSB error would have passed) and had a term G0 did not: replaced by the reviewer's
+  derivation from the samples, 0.5 + 1.1·(π/512 + √2/1023)·|mean(T2) − mean(T1)|/|d|²,
+  approached to within a factor of two;
+- wording: the integer guard's edge is the table's (CFO word 704, 3.36 kHz) against the
+  float 3.11 kHz, so the two chains decide differently in about 0.1 % of frames;
+  `remove_dc_fixed`'s "never reach"; `hold`'s header (the hold is at a fixed sample, not
+  the chain's own acquisition; the general header said "held from the first lock" above
+  rows that are not; rerun with the corrected text, same numbers).
+- Its instrumented `hold` run: see ADR 0008, decision 2.
+Not checked by it: the `cfo` and `cand` reports as reruns, the TGn D rows of `hold`,
+release-mode behaviour of the overflow, the RTL feasibility of the division.
+
+*ADR 0008's first draft*, on a4589ad: recorded at the end of the ADR.
+
+**What this is not.** One seed per row; `cand` was run once (on the server), `cfo`, `edge`
+and `hold` locally (`hold` twice, identical rows). The offset is constant through a packet at a held gain by
+construction of the model; a real front end's drift and its transient at a gain change are
+not in it. The estimate uses the true model of the field (two identical symbols): a gain
+change or a phase jump inside the long training field breaks it and was not separated
+here. The hand-off measured with the estimate is 12 / 2 and 13 / 2 in `cand` and 13 / 1 in
+`hold`; ADR 0008 proposes 13 / 1 on `rx_ofdm_agc_level.txt`'s evidence that the two 13-bit
+ones do not differ. TGn B and E and other frame lengths were not run. The streaming front
+(`RxFrontFixed`) does not hold the second history or the replay yet.
+
+**Open**
+- The founder's decisions on ADR 0008.
+- `rxper` and `FixedOfdmConfig`'s defaults moved to the proposed hand-off, with the G2 rerun.
+- The estimate and the replay inside `RxFrontFixed` as a streaming model, then vectors.

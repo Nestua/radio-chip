@@ -1,0 +1,60 @@
+# rxagc cfo: 2000 frames per point of 1000 octets, a new PSDU per frame, clock offset
+# uniform in ±40 ppm (CFO and sample clock, carrier 5.8 GHz), channel::FastAttackAgc (power
+# over 16 samples, lock left on a large overload, 2 detector clocks per sample, lock level
+# −10 dBFS, largest gain 73 dB), the gain held from the first lock inside the packet
+# (assumed), phase jump ±30° per gain change (assumed), 12-bit ADC.
+# Chains on the ADC's samples:
+#   float     = float DC blocker (pole 2^-7), float front, rx_ofdm (8 bits, clip 3);
+#   int O/s   = dc_block_fixed (pole 2^-7), RxFrontFixed, correct_fixed to O bits,
+#               decode_ppdu_fixed with in_bits O and in_shift s, tracker started from the
+#               CFO word (its conversion to ppm is the one float between the ADC and
+#               the PSDU); the int columns of a row share one acquisition;
+#   known     = the same chain behind a gain that knows the frame (it at -12 dBFS at
+#               the ADC, no gain control, no DC offset);
+#   raw       = the decoder handed the samples before the DC blocker.
+# A frame's random stream depends on the row and the frame's number only.
+# Noise at -30 dBFS at the largest gain, no DC offset. The clock offset's size uniform in
+# the band of the row (40 ppm: 232 kHz of CFO, 0.74 of the subcarrier spacing), either sign.
+# The rows of a point are the same frames but for the clock offset.
+#   2^-7 = the decoder handed the blocker's output (the chain as it is);
+#   ltf  = the decoder handed the samples before the blocker less the offset estimated
+#          from the two long training symbols (ltf_dc_offset, ltf_dc_offset_fixed).
+# Each cell: frames lost (not decoded to the PSDU), then +a−b: lost by this column alone and
+# by the column 'float raw' alone (the same frames). A lost frame is one not acquired, acquired
+# wrongly (the first acquisition of the stream is the only one tried) or not decoded.
+# level: signal and noise of the frame's span at the settled gain, before the ADC clips and
+# without the DC offset, dBFS, the mean of the powers over the frames. chg: gain changes per
+# frame up to the hold (with no lock inside the packet: all of the stream's). held: frames in
+# which the gain would have changed again before the packet's end without the hold.
+
+## AWGN 54 Mb/s 20.0 dB
+# clock offset                                 frames  level   chg  held        float raw       float 2^-7        float ltf    int 13/2 2^-7     int 13/2 ltf
+   0 to  2 ppm                                   2000  -10.0  0.00     7              189        190 +10−9         188 +6−7       199 +23−13       199 +23−13
+   2 to 10 ppm                                   2000  -10.0  0.00    14              186       188 +12−10        192 +13−7       195 +21−12       199 +23−10
+  10 to 20 ppm                                   2000  -10.0  0.00    13              189       208 +36−17        192 +12−9       208 +39−20       195 +22−16
+  20 to 30 ppm                                   2000  -10.0  0.00     8              178      268 +116−26         179 +6−5      272 +118−24        191 +22−9
+  30 to 40 ppm                                   2000  -10.0  0.00    19              163      919 +772−16       166 +17−14      932 +784−15       180 +31−14
+
+## AWGN 54 Mb/s 25.0 dB
+# clock offset                                 frames  level   chg  held        float raw       float 2^-7        float ltf    int 13/2 2^-7     int 13/2 ltf
+   0 to  2 ppm                                   2000  -10.0  1.00    56                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+   2 to 10 ppm                                   2000  -10.0  1.00    55                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  10 to 20 ppm                                   2000  -10.0  1.00    49                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  20 to 30 ppm                                   2000  -10.0  1.00    54                0           1 +1−0           0 +0−0           1 +1−0           0 +0−0
+  30 to 40 ppm                                   2000  -10.0  1.00    61                0       112 +112−0           0 +0−0       111 +111−0           0 +0−0
+
+## TGn D 54 Mb/s 26.5 dB
+# clock offset                                 frames  level   chg  held        float raw       float 2^-7        float ltf    int 13/2 2^-7     int 13/2 ltf
+   0 to  2 ppm                                   2000  -10.0  1.81    77              213         213 +4−4         215 +6−4         219 +9−3         217 +8−4
+   2 to 10 ppm                                   2000  -10.0  1.86    77              236         231 +3−8         235 +3−4        237 +10−9         237 +9−8
+  10 to 20 ppm                                   2000  -10.0  1.87    73              231        241 +18−8         237 +8−2       240 +21−12         228 +4−7
+  20 to 30 ppm                                   2000  -10.0  1.85    79              235       483 +249−1         237 +4−2       487 +253−1         240 +9−4
+  30 to 40 ppm                                   2000  -10.0  1.87    83              223      1134 +911−0        227 +10−6      1137 +914−0        231 +14−6
+
+## TGn D 54 Mb/s 40.0 dB
+# clock offset                                 frames  level   chg  held        float raw       float 2^-7        float ltf    int 13/2 2^-7     int 13/2 ltf
+   0 to  2 ppm                                   2000  -10.0  6.65    72                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+   2 to 10 ppm                                   2000  -10.0  6.71    73                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  10 to 20 ppm                                   2000  -10.0  6.75    78                0           3 +3−0           0 +0−0           3 +3−0           0 +0−0
+  20 to 30 ppm                                   2000  -10.0  6.73    74                0       195 +195−0           0 +0−0       202 +202−0           0 +0−0
+  30 to 40 ppm                                   2000  -10.0  6.75    63                0       912 +912−0           0 +0−0       918 +918−0           0 +0−0

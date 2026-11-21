@@ -338,6 +338,50 @@ pub fn correct(x: &[Sample], cfo_hz: f64, sample_rate_hz: f64) -> Vec<Sample> {
         .collect()
 }
 
+/// Below this size of 1 − e^(jφ), φ the CFO's turn over one long training symbol,
+/// [`ltf_dc_offset`] leaves the offset in: 1/16 is a CFO of 3.1 kHz at 20 MHz, where the
+/// offset lies within a hundredth of a subcarrier spacing of the unused subcarrier.
+pub const DC_MIN_TURN: f64 = 1.0 / 16.0;
+
+/// The DC offset of the stream `x`, estimated from the two long training symbols whose FFT
+/// windows start at `fft_start` and 64 samples on (candidate for ADR 0008's hand-off; G0 in
+/// `docs/gates/rx_front.md`). Behind a CFO the field repeats after 64 samples turned by
+/// φ = 2π·64·cfo/fs while the offset D repeats unturned, so for each of the 64 pairs
+/// x[n + 64] − e^(jφ)·x[n] = D·(1 − e^(jφ)), whatever the channel and whatever the
+/// transmitter leaks at its carrier; the estimate is the mean over the pairs divided by
+/// 1 − e^(jφ).
+///
+/// Once the CFO is out the offset is a tone φ/2π subcarrier spacings from the unused
+/// subcarrier. Where |1 − e^(jφ)| < [`DC_MIN_TURN`] the division would magnify the noise
+/// without bound: zero is returned. Near φ = 0 the tone does no harm there. Near a full
+/// turn (a CFO of a whole subcarrier spacing, 312.5 kHz at 20 MHz, outside what the
+/// standard's ±20 ppm an end allow below 7.8 GHz) it lies on a data subcarrier, cannot be
+/// told from it by this method and is left in as well. `None` when the stream does not hold
+/// the 128 samples, whatever the CFO.
+pub fn ltf_dc_offset(
+    x: &[Sample],
+    fft_start: usize,
+    cfo_hz: f64,
+    sample_rate_hz: f64,
+) -> Option<Sample> {
+    let field = x.get(fft_start..fft_start.checked_add(PAIR_LEN)?)?;
+    let phi = 2.0 * PI * LTF_SYMBOL_LEN as f64 * cfo_hz / sample_rate_hz;
+    let e = (phi.cos(), phi.sin());
+    let d = (1.0 - e.0, -e.1);
+    if abs2(d) < DC_MIN_TURN * DC_MIN_TURN {
+        return Some((0.0, 0.0));
+    }
+    let (first, second) = field.split_at(LTF_SYMBOL_LEN);
+    let s = first.iter().zip(second).fold((0.0, 0.0), |s, (&a, &b)| {
+        let turned = mul(e, a);
+        (s.0 + b.0 - turned.0, s.1 + b.1 - turned.1)
+    });
+    // s / (64·d)
+    let q = mul(s, conj(d));
+    let den = LTF_SYMBOL_LEN as f64 * abs2(d);
+    Some((q.0 / den, q.1 / den))
+}
+
 /// FFT back-off in samples: `backoff_ns` at the sample rate, rounded.
 pub fn backoff_samples(cfg: &RxConfig) -> usize {
     (cfg.backoff_ns * 1e-9 * cfg.sample_rate_hz)

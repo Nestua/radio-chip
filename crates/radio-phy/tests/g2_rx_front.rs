@@ -16,10 +16,11 @@ use radio_phy::channel::{
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
-use radio_phy::rx_front::{acquire, detections, RxConfig};
+use radio_phy::rx_front::{acquire, detections, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
     acquire_fixed, acquisitions_fixed, cordic_angle, correct_fixed, dc_block_fixed,
-    detections_fixed, nco_mix, nco_rotator, to_adc, FixedRxConfig, ADC_FULL_SCALE, IQ,
+    detections_fixed, ltf_dc_offset_fixed, nco_mix, nco_rotator, remove_dc_fixed, to_adc,
+    FixedRxConfig, ADC_FULL_SCALE, IQ,
 };
 use radio_phy::rx_ofdm::RxOfdmConfig;
 use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
@@ -787,6 +788,343 @@ fn the_all_integer_chain_decodes_a_frame_from_adc_samples() {
             let raw = correct_fixed(&y, 0, out_bits, &fx);
             if cfo.abs() > 50e3 {
                 assert!(decode(&raw).map_or(true, |d| d.psdu != psdu), "{rate:?}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The DC offset from the two long training symbols, in integers (candidate for ADR 0008's
+// hand-off; G0 in `docs/gates/rx_front.md`).
+// ---------------------------------------------------------------------------------------------
+
+/// The default rotator: P = 22, a table of 512 entries of amplitude A = 1023, so the phase
+/// after 64 samples is 64·φ and one table address is 2^13 of it.
+#[test]
+fn ltf_dc_offset_fixed_worked_by_hand() {
+    let fx = FixedRxConfig::default();
+    assert_eq!(
+        (fx.nco_phase_bits, fx.nco_lut_bits, fx.nco_amp_bits),
+        (22, 9, 11)
+    );
+    let one = |at: usize, v: (i16, i16), cfo_phase: i64| {
+        let mut x = vec![(0i16, 0i16); 400];
+        x[at] = v;
+        ltf_dc_offset_fixed(&x, 100, cfo_phase, &fx).unwrap()
+    };
+    // 64·φ = π: φ = 2^21/64 = 2^15. e = −A, d = A − e = 2A, D = S·d/(64·d²) = b/128 for a
+    // sample b of the second symbol alone, a/128 for one of the first.
+    let pi = 1i64 << 15;
+    assert_eq!(one(164, (640, 0), pi), (5, 0));
+    assert_eq!(one(100, (0, -640), pi), (0, -5));
+    // The window: samples 100..=163 and 164..=227.
+    assert_eq!(one(163, (640, 0), pi), (5, 0));
+    assert_eq!(one(227, (640, 0), pi), (5, 0));
+    assert_eq!(one(99, (640, 0), pi), (0, 0));
+    assert_eq!(one(228, (640, 0), pi), (0, 0));
+    // Rounding half to even, either sign: 0.5 → 0, 1.5 → 2, 2.5 → 2, and just off the tie.
+    assert_eq!(one(164, (64, -64), pi), (0, 0));
+    assert_eq!(one(164, (192, -192), pi), (2, -2));
+    assert_eq!(one(164, (320, -320), pi), (2, -2));
+    assert_eq!(one(164, (65, -65), pi), (1, -1));
+    assert_eq!(one(164, (63, -63), pi), (0, 0));
+    assert_eq!(one(164, (191, -193), pi), (1, -2));
+    // 64·φ = π/2: φ = 2^14. e = jA, d = A(1 − j), 1/d = (1 + j)/(2A).
+    // b = 256: D = 256·(1 + j)/128 = 2 + 2j. a = 256: S = −jA·256, D = 2 − 2j.
+    let half = 1i64 << 14;
+    assert_eq!(one(164, (256, 0), half), (2, 2));
+    assert_eq!(one(100, (256, 0), half), (2, -2));
+    // The other sign of the CFO, given as a negative word or wrapped into P bits.
+    assert_eq!(one(164, (256, 0), -half), (2, -2));
+    assert_eq!(one(100, (256, 0), -half), (2, 2));
+    assert_eq!(one(164, (256, 0), (1 << 22) - half), (2, -2));
+    assert_eq!(one(164, (256, 0), half + (1 << 22)), (2, 2));
+}
+
+/// A constant stream is its own offset wherever the turn after 64 samples can be divided by:
+/// |d|²·256 ≥ A². Table address 5: e = (1021, 63), d = (2, −63), 3973·256 < 1023²; address
+/// 6: e = (1020, 75), d = (3, −75), 5634·256 > 1023². The address is the phase 64·φ rounded
+/// to the table: 5 up to φ = 703 (64·703 = 5.49·2^13), 6 from 704. Half an address is added
+/// and the phase cut, so a tie goes up: −704 (−5.5) is address −5, −705 is −6.
+#[test]
+fn ltf_dc_offset_fixed_guard_and_limits() {
+    let fx = FixedRxConfig::default();
+    let x = vec![(100i16, -50i16); 400];
+    for phi in [0i64, 1, 64, 640, 703, -640, -703, -704, (1 << 22) - 704] {
+        assert_eq!(
+            ltf_dc_offset_fixed(&x, 100, phi, &fx),
+            Some((0, 0)),
+            "{phi}"
+        );
+    }
+    for phi in [
+        704i64,
+        768,
+        -705,
+        -768,
+        1 << 14,
+        1 << 15,
+        48_600,
+        -48_600,
+        (1 << 22) - 705,
+    ] {
+        assert_eq!(
+            ltf_dc_offset_fixed(&x, 100, phi, &fx),
+            Some((100, -50)),
+            "{phi}"
+        );
+    }
+    // A full-scale constant stream, either sign: the estimate is the stream, 12 bits.
+    for v in [(2047i16, -2048i16), (-2048, 2047)] {
+        let x = vec![v; 400];
+        assert_eq!(
+            ltf_dc_offset_fixed(&x, 100, 1 << 15, &fx),
+            Some((i64::from(v.0), i64::from(v.1)))
+        );
+    }
+    // Two symbols that are not a repeating field can ask for more than 12 bits: the first
+    // at one rail and the second at the other, just above the guard. S = 64·(b·A − e·a),
+    // of the order of 2·2047·A against |d| = 0.07·A: saturated to 12 bits.
+    let mut y = vec![(-2048i16, 2047i16); 400];
+    for v in y.iter_mut().skip(164) {
+        *v = (2047, -2048);
+    }
+    let d = ltf_dc_offset_fixed(&y, 100, 704, &fx).unwrap();
+    assert!(
+        [d.0, d.1].iter().all(|c| *c == 2047 || *c == -2048),
+        "{d:?}"
+    );
+    // The 64 pairs must be in the stream, whatever the CFO; an invalid configuration gives
+    // nothing.
+    assert!(ltf_dc_offset_fixed(&x[..227], 100, 0, &fx).is_none());
+    assert!(ltf_dc_offset_fixed(&x[..228], 100, 0, &fx).is_some());
+    assert!(ltf_dc_offset_fixed(&x[..228], 100, 1 << 15, &fx).is_some());
+    assert!(ltf_dc_offset_fixed(&x[..227], 100, 1 << 15, &fx).is_none());
+    assert!(ltf_dc_offset_fixed(&x, usize::MAX, 1 << 15, &fx).is_none());
+    let bad = FixedRxConfig {
+        nco_lut_bits: 1,
+        ..fx
+    };
+    assert!(!bad.is_valid());
+    assert!(ltf_dc_offset_fixed(&x, 100, 1 << 15, &bad).is_none());
+}
+
+/// Off the default rotator. A table of 4096 entries (L = 12): one address is 2^10 of the
+/// phase 64·φ, so φ = 16 per address. Address 39: e = round(1023·(cos, sin)(2π·39/4096)) =
+/// (1021, 61), d = (2, −61), |d|² = 3725, 256·3725 < 1023²; address 41: e = (1021, 64),
+/// d = (2, −64), |d|² = 4100, 256·4100 > 1023². The tie at half an address goes up.
+/// A table as long as the phase (L = P): no half address to add. The widest rotator the
+/// configuration allows (Q = 30) and samples of the full 16 bits: nothing overflows.
+#[test]
+fn ltf_dc_offset_fixed_off_the_default_configuration() {
+    let x = vec![(100i16, -50i16); 400];
+    let fine = FixedRxConfig {
+        nco_lut_bits: 12,
+        ..FixedRxConfig::default()
+    };
+    assert!(fine.is_valid());
+    let at = |phi: i64| ltf_dc_offset_fixed(&x, 100, phi, &fine);
+    // Address 39 = φ 624; up to 39.49 addresses (φ 631) it stays 39; φ 632 is 39.5 → 40.
+    assert_eq!(at(624), Some((0, 0)));
+    assert_eq!(at(631), Some((0, 0)));
+    // Address 40: e = (1021, 63), d = (2, −63), |d|² = 3973 < 4087.9: still inside.
+    assert_eq!(at(632), Some((0, 0)));
+    assert_eq!(at(647), Some((0, 0)));
+    // Address 41 from φ = 648 (40.5): outside the guard.
+    assert_eq!(at(648), Some((100, -50)));
+    assert_eq!(at(656), Some((100, -50)));
+    let whole = FixedRxConfig {
+        nco_lut_bits: 22,
+        ..FixedRxConfig::default()
+    };
+    assert!(whole.is_valid());
+    assert_eq!(
+        ltf_dc_offset_fixed(&x, 100, 1 << 15, &whole),
+        Some((100, -50))
+    );
+    // A quarter turn: e = jA exactly, d = A(1 − j).
+    assert_eq!(
+        ltf_dc_offset_fixed(&x, 100, 1 << 14, &whole),
+        Some((100, -50))
+    );
+    let wide = FixedRxConfig {
+        nco_amp_bits: 30,
+        ..FixedRxConfig::default()
+    };
+    assert!(wide.is_valid());
+    let mut y = vec![(i16::MIN, i16::MAX); 400];
+    for v in y.iter_mut().skip(164) {
+        *v = (i16::MAX, i16::MIN);
+    }
+    for phi in [704i64, 1 << 13, 3 << 13, 1 << 14, 1 << 15, -(1 << 14)] {
+        let d = ltf_dc_offset_fixed(&y, 100, phi, &wide).unwrap();
+        assert!((-2048..=2047).contains(&d.0) && (-2048..=2047).contains(&d.1));
+    }
+    // And a constant stream is still its own offset with it.
+    assert_eq!(
+        ltf_dc_offset_fixed(&x, 100, 1 << 15, &wide),
+        Some((100, -50))
+    );
+}
+
+#[test]
+fn remove_dc_fixed_worked_by_hand() {
+    let x = [(0i16, 0i16), (5, -7), (2047, -2048), (-2048, 2047)];
+    assert_eq!(
+        remove_dc_fixed(&x, (3, -2)),
+        vec![(-3, 2), (2, -5), (2044, -2046), (-2051, 2049)]
+    );
+    // 12-bit samples less a 12-bit offset fit the 13 bits of the rotator's input.
+    assert_eq!(
+        remove_dc_fixed(&x, (-2048, 2047)),
+        vec![(2048, -2047), (2053, -2054), (4095, -4095), (0, 0)]
+    );
+    // An offset outside 12 bits cannot come from the estimator; the output saturates.
+    assert_eq!(
+        remove_dc_fixed(&x[2..], (-5000, 5000)),
+        vec![(4095, -4096), (2952, -2953)]
+    );
+    assert_eq!(remove_dc_fixed(&x, (0, 0))[1], (5, -7));
+}
+
+/// On ADC samples of frames with an offset added: the integer estimate is the float one of
+/// the same samples within its rounding (half an LSB) and what the table's address rounds
+/// away (below), and both are the offset within the noise's reach.
+#[test]
+fn ltf_dc_offset_fixed_follows_the_float_one() {
+    let fs = 20e6;
+    let fx = FixedRxConfig::default();
+    let f = preamble();
+    let mut rng = Rng::new(0x1dc0);
+    let d = Multipath::new(
+        tgn_taps(TgnModel::D, false),
+        Doppler::Static,
+        1,
+        fs,
+        &mut rng,
+    );
+    let (mut n, mut worst, mut worst_true) = (0, 0.0f64, 0.0f64);
+    for k in 0..600 {
+        let snr = [10.0, 20.0, 35.0][k % 3];
+        let ch = (k % 2 == 1).then_some(&d);
+        let (adc, t1, cfo) = adc_scene(&f, ch, snr, fs, &mut rng);
+        let dc = (
+            (rng.uniform() * 600.0 - 300.0).round(),
+            (rng.uniform() * 600.0 - 300.0).round(),
+        );
+        let adc: Vec<(i16, i16)> = adc
+            .iter()
+            .map(|&(a, b)| {
+                (
+                    (f64::from(a) + dc.0).clamp(-2048.0, 2047.0) as i16,
+                    (f64::from(b) + dc.1).clamp(-2048.0, 2047.0) as i16,
+                )
+            })
+            .collect();
+        let phi = (cfo / fs * 2f64.powi(22)).round() as i64;
+        let fixed = ltf_dc_offset_fixed(&adc, t1, phi, &fx).unwrap();
+        let float = ltf_dc_offset(&as_f64(&adc), t1, cfo, fs).unwrap();
+        // The integers differ from the float estimate by their rounding (half an LSB) and by
+        // their rotator: its phase is off by at most half an address (π/512) and each of
+        // its components by half a unit of 1023. To first order the estimate moves by that
+        // error times the difference of the two symbols' means over |d|² (the reviewer's
+        // derivation; 10 % for the second order).
+        let turn = 2.0 * (PI * 64.0 * cfo / fs).sin().abs();
+        let mean = |r: std::ops::Range<usize>| {
+            let s = adc[r].iter().fold((0.0, 0.0), |s, v| {
+                (s.0 + f64::from(v.0), s.1 + f64::from(v.1))
+            });
+            (s.0 / 64.0, s.1 / 64.0)
+        };
+        let (m1, m2) = (mean(t1..t1 + 64), mean(t1 + 64..t1 + 128));
+        let apart = (m2.0 - m1.0).hypot(m2.1 - m1.1);
+        if turn < 0.08 {
+            // At the guard the two may decide differently; both sides of it are tested above.
+            continue;
+        }
+        n += 1;
+        let bound = 0.5 + 1.1 * (PI / 512.0 + 2f64.sqrt() / 1023.0) * apart / (turn * turn);
+        let e = (fixed.0 as f64 - float.0)
+            .abs()
+            .max((fixed.1 as f64 - float.1).abs());
+        assert!(e <= bound, "frame {k}: {fixed:?} {float:?} bound {bound}");
+        worst = worst.max(e / bound);
+        // Against the offset put in: the noise of 64 differences, 2σ²/(64·|d|²) a
+        // component pair, five standard deviations and the bound above.
+        let sigma = 364.0 * 10f64.powf(-snr / 20.0);
+        let reach = 5.0 * sigma * (2.0f64 / 64.0).sqrt() / turn + bound;
+        let t = (fixed.0 as f64 - dc.0)
+            .abs()
+            .max((fixed.1 as f64 - dc.1).abs());
+        assert!(t <= reach, "frame {k}: {fixed:?} {dc:?} reach {reach}");
+        worst_true = worst_true.max(t / reach);
+    }
+    assert!(n > 500, "{n}");
+    // Neither bound is idle: something comes within a factor of two of the first and of
+    // twenty of the second.
+    assert!(worst > 0.5, "{worst}");
+    assert!(worst_true > 0.05, "{worst_true}");
+}
+
+/// A DC offset 8 dB below the frame (−20 dBFS under −12 dBFS), a clock offset that puts the
+/// offset between two subcarriers once the CFO is out: the frame comes back when the offset
+/// estimated from the long training field is taken out of the ADC's samples, at every
+/// hand-off width, and the 54 Mb/s one does not when it is left in.
+#[test]
+fn the_ltf_estimate_takes_a_dc_offset_out_of_the_decoders_samples() {
+    let fs = 20e6;
+    let cfg = RxConfig::new(fs);
+    let fx = FixedRxConfig::default();
+    let tx = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << tx.data.frac_bits());
+    let mut rng = Rng::new(0xdc20);
+    let carrier = 5.8e9;
+    for (rate, ppm) in [(Rate::R54, -31.0), (Rate::R54, 27.0), (Rate::R6, 20.7)] {
+        let cfo = ppm * 1e-6 * carrier;
+        let psdu: Vec<u8> = (0..300).map(|_| (rng.next_u64() & 0xff) as u8).collect();
+        let f: Vec<C> = build_ppdu(&psdu, rate, 0x5d, &tx)
+            .unwrap()
+            .iter()
+            .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+            .collect();
+        let mut x = vec![(0.0, 0.0); 500];
+        x.extend_from_slice(&f);
+        x.extend(vec![(0.0, 0.0); 200]);
+        let x = resample(&x, ppm);
+        let x = frequency_offset(&x, cfo, fs, 1.0);
+        let p = mean_power(&f);
+        let x = awgn(&x, 30.0, p, &mut rng);
+        let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-12.0 / 20.0) / p.sqrt();
+        let dc = 10f64.powf(-20.0 / 20.0) / gain * f64::from(ADC_FULL_SCALE);
+        let x: Vec<C> = x.iter().map(|s| (s.0 + 0.6 * dc, s.1 - 0.8 * dc)).collect();
+        let adc = to_adc(&x, gain);
+        let a = acquire_fixed(&adc, &cfg, &fx).unwrap();
+        let est = ltf_dc_offset_fixed(&adc, a.fft_start, a.cfo_phase, &fx).unwrap();
+        // 0.6 and −0.8 of 204.8 LSB.
+        assert!(
+            (est.0 - 123).abs() <= 4 && (est.1 + 164).abs() <= 4,
+            "{est:?}"
+        );
+        for (out_bits, in_shift) in [(12u32, 2u32), (13, 1), (13, 2)] {
+            let fo = FixedOfdmConfig {
+                in_bits: out_bits,
+                in_shift,
+                ..FixedOfdmConfig::default()
+            };
+            let decode = |y: &[IQ]| {
+                decode_ppdu_fixed(
+                    &correct_fixed(y, a.cfo_phase, out_bits, &fx),
+                    a.fft_start,
+                    &RxOfdmConfig::default(),
+                    &fo,
+                    FixedTracking::from_clock_offset(a.cfo_hz(&fx, fs) / carrier * 1e6, &fo),
+                )
+            };
+            let d = decode(&remove_dc_fixed(&adc, est)).unwrap();
+            assert_eq!(d.psdu, psdu, "{rate:?} O {out_bits} shift {in_shift}");
+            if rate == Rate::R54 {
+                let left_in = decode(&remove_dc_fixed(&adc, (0, 0)));
+                assert!(left_in.map_or(true, |d| d.psdu != psdu), "{ppm}");
             }
         }
     }
