@@ -1587,7 +1587,7 @@ blocker 2⁻⁷) / float with the LTF estimate / integers 12 / 2 with it / integ
   −10 dBFS at 20 and 26.5 dB, the blinded control of the 2026-11-19 entry (at 25 dB: 842 of
   2000 in every LTF column). Those frames are lost before the decoder.
 - The integer estimate (whole ADC LSB) follows the float one: paired differences of the
-  13 / 2 column against the float LTF column are at most +24 −5 in the rows above and in
+  13 / 2 column against the float LTF column are at most +23 −13 in the rows above and in
   the size of stage B's own integer-against-float differences.
 - With the noise at the largest gain lowered to −48 and −54 dBFS (report, last two
   sections) the 13-bit column with the estimate loses 214 and 254 at 6 Mb/s against the
