@@ -1178,4 +1178,107 @@ too: their committed reports were not rerun and are at their own commits.
 `rxagc` still starts its integer chains through the float conversion; it moves to the word
 with the gain control's timer and hold, when its reports are rerun.
 
-@@RESULTS@@
+**G2 results** (`rxper fixed`, 2000 frames of 1000 octets per point, clock offset uniform
+in ±40 ppm; SNR at 10 % PER against the float receiver with fine soft values, worst rate
+of each channel in Mb/s, and frames lost over all points of the channel):
+
+| Channel | float 8 / 3, worst | integer, worst | most negative | frames lost, fine | float 8 / 3 − fine | integer − float 8 / 3 |
+|---|---|---|---|---|---|---|
+| AWGN | +0.02 dB (24) | +0.04 dB (48, 54) | −0.01 dB | 15076 | +12 | +84 |
+| TGn B | +0.03 dB (36) | +0.03 dB (24, 36, 54) | −0.05 dB | 10840 | +8 | +32 |
+| TGn D | +0.00 dB | +0.04 dB (9, 12) | −0.02 dB | 10534 | −6 | +50 |
+| TGn E | +0.01 dB (9, 12) | +0.03 dB (54) | −0.03 dB | 11486 | −8 | +52 |
+
+- **The integer receiver from the ADC on — the hand-off's rotator, the offset's estimate,
+  13 / 1, the data path and the tracker started from the CFO word — costs at most
+  +0.04 dB in a cell** against the budget of 0.2 dB for the whole fixed receiver. The
+  crossings scatter by a few hundredths either way (the most negative cell is −0.05 dB),
+  so single cells are at the measurement's resolution; the frame sums are the steadier
+  figure: 32 to 84 frames more than the float receiver at the same soft format, of some
+  10 500 to 15 000 lost.
+- The sums are larger than in the report this one replaces (+10, +22, −2, +26 with the
+  float front correcting the samples before they were quantised): the hand-off's rotator
+  is inside the comparison now. They are still a few tenths of a percent of the frames
+  lost.
+
+**The widths** (`rxper fixedw`, frames lost of 2000, the same frames in every column; rows
+AWGN 6 Mb/s 3.5 dB, AWGN 54 Mb/s 20 dB, TGn D 18 Mb/s 15.5 dB, TGn D 54 Mb/s 26.5 dB,
+TGn E 54 Mb/s 26.5 dB; no column but U10 and U12 loses a frame at the two high-SNR points):
+
+| Column | lost |
+|---|---|
+| float | 217 / 181 / 182 / 220 / 144 |
+| the defaults, tracker from ppm | 220 / 191 / 181 / 221 / 143 |
+| the defaults, tracker from the CFO word | 220 / 191 / 181 / 221 / 143 |
+| every width far beyond need | 218 / 182 / 182 / 217 / 146 |
+| the front's widths alone beyond need | 218 / 181 / 182 / 217 / 143 |
+| the data path's alone | 221 / 194 / 182 / 221 / 148 |
+| rotator L11 Q14 | 218 / 184 / 181 / 221 / 144 |
+| rotator L8 | 223 / 206 / 181 / 229 / 154 |
+| rotator L7 | 218 / 246 / 180 / 248 / 177 |
+| rotator Q9 | 220 / 202 / 182 / 225 / 145 |
+| hand-off 12 bits, two fractional (Z12 s2) | 221 / 191 / 183 / 216 / 146 |
+| 13 bits, two fractional (W16 s2) | 221 / 189 / 182 / 220 / 144 |
+| 13 bits, none (W16 s0) | 218 / 192 / 182 / 221 / 145 |
+| FFT word 14 bits (W14 s1) | 221 / 191 / 182 / 224 / 145 |
+
+- **The start from the CFO word loses exactly the frames the float conversion loses**, at
+  every point.
+- **13 / 1 against 12 / 2 and 13 / 2: within 8 frames either way at every point**
+  (the default with the truncated phase, the base of these columns: 221 / 191 / 182 / 224 / 145), at
+  this level (−12 dBFS, where the ADC's last bit is not what limits; the lower edge of the
+  level is `rxagc level`'s). One fractional bit is enough, as is none at this level.
+- **Where the default differs from float it is the rotator, and more than before:** AWGN
+  54 Mb/s 20 dB loses 191 against 181 (it was 188 against 184 when only the data path's
+  rotation was in integers); with the front's widths beyond need 181, with L11 Q14 184.
+  Ten frames of 2000 at the steepest point of the grid, inside the +0.04 dB above. L8 costs
+  15 more there and L7 55: L9 Q11 stays, and a wider table (L11) is the first place to
+  buy back the difference if the budget is ever short.
+- The floors that W14 s2 and W16 s4 left with a 12-bit input (33 frames at 45 dB in
+  TGn E) are gone: those columns no longer exist (13 + 2 does not fit 14, 13 + 4 not 16),
+  and W14 s1 and W16 s3 lose nothing at 45 dB. U10 still does (41), U12 one frame.
+- The other columns are as on 2026-11-20 (C6, T8, U10, Q8 lose; the tracker's R6, M8, K8,
+  V4 do not): the report has them.
+
+Both reports are byte for byte the same rows on 10 and on 32 threads (`fixedw` was run on
+both machines).
+
+**Independent review (fresh agent, the code and ADR 0008's decisions 1 and 7, not this
+entry), 2026-11-21,** on 6c94df0. No defect in the arithmetic: it rederived
+`from_cfo_word` (units, sign, independence of P, the shift, no panic path for any widths),
+recomputed every hand-worked number, confirmed the bound of the float comparison, that the
+draws do not depend on the receiver set, the same samples and acquisition for float and
+integer, the output identical at 3 threads, and `word_at` for the columns at P = 30.
+Found and corrected:
+- five surviving mutants of its twelve (R and P unclamped — a panic for widths `is_valid`
+  refuses; a 64-bit wrapping product; a register value of 1 refused; `handoff_fixed`'s
+  width from `z_bits`): tests added, all fail now;
+- the rate's saturation was ±2^(P−6+R) inclusive, a limit no register width has: it is a
+  signed register of P − 6 + R bits now (reachable values unchanged);
+- wording: "ratios up to 1/16"; a stale comment on the ±π event (none in this run any
+  more, so that branch of the test is not taken); `fixedw`'s header on "wide" (the
+  acquisition is the default front's in every column) and on "round" (the same
+  configuration as "word start");
+- `rxper`: a missing offset estimate lost the frame for the integer receiver at 13 bits
+  and decoded without removal elsewhere (unreachable today; the same now).
+Its measurement of the tracker comparison against the fractional bits (rms 2.2·10⁻⁵ at two
+and three, 3.4·10⁻⁵ at one, 8.1·10⁻⁵ at none; the maximum one heavy-tailed symbol) is why
+the bound of 5·10⁻⁴ is recorded as close to that one sample and not as a margin.
+Left as they are: `rxper` has no DC offset in its scenes, so the equivalence of the float
+and integer offset removal is not shown by these reports (it is `rxagc`'s, `rx_front.md`),
+nor is the 0.1 % of frames in which the two guards decide differently; `word_at`'s
+narrowing branch is dead; a panicking thread would under-report; TGn D and E at 54 Mb/s
+26.5 dB share a seed in `fixedw` (different channels).
+Not checked by it: any run above 100 frames, `rxper fixed`, the journal's numbers,
+`scripts/check.sh`.
+
+**What this is not.** One seed per point. A gain that knows the frame and no DC offset:
+the gain control, the level's lower edge and the offset are `rxagc`'s. The reports were
+run at 6c94df0; the commits after it change the saturation of unreachable rates, tests,
+texts and the tool's handling of a stream too short for the estimate, and `fixedw` was run
+again on the final code with the same rows.
+
+**Open**
+- The second history and the replay in `RxFrontFixed`; the gain control's hold; then RTL.
+- `rxagc` on the word start with its reruns.
+- Narrowing the tracker (R 6, M 8, K 8, V 4 lose nothing here either) before its RTL.
