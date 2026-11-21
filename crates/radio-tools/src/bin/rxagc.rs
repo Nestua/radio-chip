@@ -7,6 +7,8 @@
 //!   input level), near 10 % PER.
 //! - `dc`: the DC offsets of `rxfront agcdc` through the integer chain.
 //! - `pole`: what the DC blocker's pole costs 54 Mb/s frames with no offset to remove.
+//! - `cfo`: that cost against the size of the clock offset (ADR 0008).
+//! - `cand`: what the decoder could be handed instead, under the DC offsets of `dc` (ADR 0008).
 //!
 //! The scene: a 1000-octet frame, a clock offset uniform in ±40 ppm that sets CFO and
 //! sample-clock offset at 5.8 GHz (as `rxper`), noise, then `channel::FastAttackAgc` (power
@@ -27,9 +29,10 @@ use radio_phy::channel::{
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
-use radio_phy::rx_front::{acquire, correct, dc_block, RxConfig};
+use radio_phy::rx_front::{acquire, correct, dc_block, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
-    acquire_fixed, correct_fixed, dc_block_fixed, to_adc, FixedRxConfig, ADC_FULL_SCALE, IQ,
+    acquire_fixed, correct_fixed, dc_block_fixed, ltf_dc_offset_fixed, remove_dc_fixed, to_adc,
+    FixedRxConfig, ADC_FULL_SCALE, IQ,
 };
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
 use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
@@ -100,6 +103,9 @@ struct Point {
     per_index_dbfs: f64,
     /// `GainDc::before_gain` at the largest gain, −∞ for none.
     before_dbfs: f64,
+    /// The clock offset's size drawn in this band of ppm instead of 0 to 40 (the sign and
+    /// every other draw of the frame as without it).
+    ppm_band: Option<(f64, f64)>,
 }
 
 /// A receiver chain on the ADC's samples.
@@ -123,6 +129,9 @@ struct Column {
     raw: bool,
     /// The DC blocker's pole, 2^(−shift).
     shift: u32,
+    /// The decoder is handed the samples before the DC blocker less the offset estimated from
+    /// the two long training symbols (`ltf_dc_offset`, `ltf_dc_offset_fixed`).
+    ltf: bool,
 }
 
 const fn col(name: &'static str, chain: Chain) -> Column {
@@ -132,6 +141,7 @@ const fn col(name: &'static str, chain: Chain) -> Column {
         known: false,
         raw: false,
         shift: DC_SHIFT,
+        ltf: false,
     }
 }
 
@@ -194,7 +204,11 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
         }
     };
     // The transmitter's oscillator fast by p ppm against ours (as `rxper`).
-    let ppm = (rng.uniform() * 2.0 - 1.0) * 40.0;
+    let v = rng.uniform() * 2.0 - 1.0;
+    let ppm = match pt.ppm_band {
+        None => v * 40.0,
+        Some((lo, hi)) => (lo + (hi - lo) * v.abs()).copysign(v),
+    };
     let x = resample(&x, ppm);
     let x = frequency_offset(&x, ppm * 1e-6 * CARRIER_HZ, FS, 2.0 * PI * rng.uniform());
     let p = mean_power(&f);
@@ -267,7 +281,17 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
                         return false;
                     };
                     acq.is_some_and(|(fft_start, cfo_hz)| {
-                        let y = correct(if c.raw { raw } else { blocked }, cfo_hz, FS);
+                        let less: Vec<C>;
+                        let handed = if c.ltf {
+                            let d = ltf_dc_offset(raw, fft_start, cfo_hz, FS).unwrap_or((0.0, 0.0));
+                            less = raw.iter().map(|s| (s.0 - d.0, s.1 - d.1)).collect();
+                            &less
+                        } else if c.raw {
+                            raw
+                        } else {
+                            blocked
+                        };
+                        let y = correct(handed, cfo_hz, FS);
                         let start = Tracking::from_clock_offset(cfo_hz / CARRIER_HZ * 1e6);
                         decode_ppdu_from(&y, fft_start, &ofdm, start).is_ok_and(|d| d.psdu == psdu)
                     })
@@ -297,12 +321,18 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
                             in_shift,
                             ..FixedOfdmConfig::default()
                         };
-                        let z = correct_fixed(
-                            if c.raw { raw } else { blocked },
-                            cfo_phase,
-                            out_bits,
-                            &fx,
-                        );
+                        let less: Vec<IQ>;
+                        let handed = if c.ltf {
+                            let d = ltf_dc_offset_fixed(adc, fft_start, cfo_phase, &fx)
+                                .unwrap_or((0, 0));
+                            less = remove_dc_fixed(adc, d);
+                            &less
+                        } else if c.raw {
+                            raw
+                        } else {
+                            blocked
+                        };
+                        let z = correct_fixed(handed, cfo_phase, out_bits, &fx);
                         let start =
                             FixedTracking::from_clock_offset(cfo_hz / CARRIER_HZ * 1e6, &fo);
                         decode_ppdu_fixed(&z, fft_start, &ofdm, &fo, start)
@@ -519,6 +549,7 @@ fn per(frames: usize) {
                     idle_dbfs: IDLE,
                     per_index_dbfs: none(),
                     before_dbfs: none(),
+                    ppm_band: None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 for (c, curve) in curves.iter_mut().enumerate() {
@@ -572,6 +603,7 @@ fn per(frames: usize) {
                     idle_dbfs: IDLE,
                     per_index_dbfs: none(),
                     before_dbfs: none(),
+                    ppm_band: None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!(
@@ -635,6 +667,7 @@ fn level(frames: usize) {
                 idle_dbfs: idle,
                 per_index_dbfs: none(),
                 before_dbfs: none(),
+                ppm_band: None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(&format!("{idle:>5.0} dBFS"), &t, reference));
@@ -695,6 +728,7 @@ fn dc(frames: usize) {
                     idle_dbfs: IDLE,
                     per_index_dbfs: per_index,
                     before_dbfs: before,
+                    ppm_band: None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!("{}", row_line(&format!("{name}, {snr} dB"), &t, reference));
@@ -745,6 +779,7 @@ fn pole(frames: usize) {
             idle_dbfs: IDLE,
             per_index_dbfs: none(),
             before_dbfs: none(),
+            ppm_band: None,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(&format!("{snr} dB"), &t, reference));
@@ -775,9 +810,181 @@ fn pole(frames: usize) {
             idle_dbfs: IDLE,
             per_index_dbfs: none(),
             before_dbfs: none(),
+            ppm_band: None,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(name, &t, reference));
+    }
+}
+
+/// Is the blocker's cost the CFO's? The clock offset's size in bands, no DC offset.
+fn cfo(frames: usize) {
+    let columns = [
+        Column {
+            raw: true,
+            ..col("float raw", Chain::Float)
+        },
+        col("float 2^-7", Chain::Float),
+        Column {
+            ltf: true,
+            ..col("float ltf", Chain::Float)
+        },
+        col("int 13/2 2^-7", INT_13_2),
+        Column {
+            ltf: true,
+            ..col("int 13/2 ltf", INT_13_2)
+        },
+    ];
+    let reference = 0;
+    const IDLE: f64 = -30.0;
+    preamble_text("cfo", frames);
+    println!(
+        "# Noise at {IDLE} dBFS at the largest gain, no DC offset. The clock offset's size uniform in\n\
+         # the band of the row (40 ppm: 232 kHz of CFO, 0.74 of the subcarrier spacing), either sign.\n\
+         # The rows of a point are the same frames but for the clock offset.\n\
+         #   2^-7 = the decoder handed the blocker's output (the chain as it is);\n\
+         #   ltf  = the decoder handed the samples before the blocker less the offset estimated\n\
+         #          from the two long training symbols (ltf_dc_offset, ltf_dc_offset_fixed)."
+    );
+    header(&columns, reference);
+    let d = Channel::Tgn(TgnModel::D);
+    let points: [(&str, Channel, f64); 4] = [
+        ("AWGN 54 Mb/s 20.0 dB", Channel::Awgn, 20.0),
+        ("AWGN 54 Mb/s 25.0 dB", Channel::Awgn, 25.0),
+        ("TGn D 54 Mb/s 26.5 dB", d, 26.5),
+        ("TGn D 54 Mb/s 40.0 dB", d, 40.0),
+    ];
+    for (pi, (name, ch, snr)) in points.into_iter().enumerate() {
+        println!("\n## {name}");
+        println!("{}", head_line("clock offset", &columns));
+        for (lo, hi) in [
+            (0.0, 2.0),
+            (2.0, 10.0),
+            (10.0, 20.0),
+            (20.0, 30.0),
+            (30.0, 40.0),
+        ] {
+            let pt = Point {
+                scene: 6000 + pi as u64,
+                rate: Rate::R54,
+                snr_db: snr,
+                ch,
+                idle_dbfs: IDLE,
+                per_index_dbfs: none(),
+                before_dbfs: none(),
+                ppm_band: Some((lo, hi)),
+            };
+            let t = run(&pt, &columns, reference, frames);
+            println!(
+                "{}",
+                row_line(&format!("{lo:>2.0} to {hi:>2.0} ppm"), &t, reference)
+            );
+        }
+    }
+}
+
+/// Candidates for what the decoder is handed (ADR 0008), under the DC offsets of `dc`.
+fn cand(frames: usize) {
+    let ltf = |name: &'static str, chain: Chain| Column {
+        ltf: true,
+        ..col(name, chain)
+    };
+    let columns = [
+        Column {
+            raw: true,
+            ..col("float raw", Chain::Float)
+        },
+        col("float 2^-7", Chain::Float),
+        ltf("float ltf", Chain::Float),
+        col("int 13/2 2^-7", INT_13_2),
+        ltf("int 12/2 ltf", INT_12_2),
+        ltf("int 13/2 ltf", INT_13_2),
+    ];
+    let reference = 2;
+    const IDLE: f64 = -30.0;
+    preamble_text("cand", frames);
+    println!(
+        "# Noise at {IDLE} dBFS at the largest gain. DC per gain state as in `dc`; the gain control's\n\
+         # detectors see the offset with the signal; the blocker (in every column's acquisition) is\n\
+         # told nothing. The rows of one point are the same frames at every offset.\n\
+         #   2^-7 = the decoder handed the blocker's output (the chain as it is);\n\
+         #   ltf  = the decoder handed the samples before the blocker less the offset estimated\n\
+         #          from the two long training symbols (ltf_dc_offset; in the int columns\n\
+         #          ltf_dc_offset_fixed, whole ADC LSB, and remove_dc_fixed)."
+    );
+    header(&columns, reference);
+    let d = Channel::Tgn(TgnModel::D);
+    let all: [(&str, f64, f64); 7] = [
+        ("no DC", none(), none()),
+        ("per index −40 dBFS", -40.0, none()),
+        ("per index −30 dBFS", -30.0, none()),
+        ("per index −20 dBFS", -20.0, none()),
+        ("before the gain −30 dBFS", none(), -30.0),
+        ("before the gain −20 dBFS", none(), -20.0),
+        ("before the gain −10 dBFS", none(), -10.0),
+    ];
+    // (title, channel, rate, SNR, scene): the scenes of `dc` and `pole` where they have one.
+    let points: [(&str, Channel, Rate, f64, u64); 11] = [
+        ("AWGN 54 Mb/s 25 dB", Channel::Awgn, Rate::R54, 25.0, 4000),
+        ("AWGN 54 Mb/s 30 dB", Channel::Awgn, Rate::R54, 30.0, 4001),
+        ("AWGN 54 Mb/s 40 dB", Channel::Awgn, Rate::R54, 40.0, 4002),
+        ("AWGN 54 Mb/s 60 dB", Channel::Awgn, Rate::R54, 60.0, 4003),
+        ("AWGN 6 Mb/s 10 dB", Channel::Awgn, Rate::R6, 10.0, 4010),
+        ("AWGN 54 Mb/s 20 dB", Channel::Awgn, Rate::R54, 20.0, 5003),
+        ("AWGN 6 Mb/s 3.5 dB", Channel::Awgn, Rate::R6, 3.5, 7000),
+        ("TGn D 6 Mb/s 8.5 dB", d, Rate::R6, 8.5, 5004),
+        ("TGn D 54 Mb/s 26.5 dB", d, Rate::R54, 26.5, 5007),
+        ("TGn D 54 Mb/s 40 dB", d, Rate::R54, 40.0, 5008),
+        ("TGn D 54 Mb/s 60 dB", d, Rate::R54, 60.0, 5009),
+    ];
+    for (name, ch, rate, snr, scene) in points {
+        println!("\n## {name}");
+        println!("{}", head_line("DC offset", &columns));
+        for (case, per_index, before) in all {
+            let pt = Point {
+                scene,
+                rate,
+                snr_db: snr,
+                ch,
+                idle_dbfs: IDLE,
+                per_index_dbfs: per_index,
+                before_dbfs: before,
+                ppm_band: None,
+            };
+            let t = run(&pt, &columns, reference, frames);
+            println!("{}", row_line(case, &t, reference));
+        }
+    }
+    // The lower edge of the level (`level`'s frames): the estimate is whole ADC LSB.
+    let low: [(&str, Channel, Rate, f64, u64); 2] = [
+        ("AWGN 6 Mb/s 3.5 dB", Channel::Awgn, Rate::R6, 3.5, 3000),
+        ("AWGN 54 Mb/s 20 dB", Channel::Awgn, Rate::R54, 20.0, 3002),
+    ];
+    for (name, ch, rate, snr, scene) in low {
+        println!("\n## {name}: the noise at the largest gain lower");
+        println!(
+            "{}",
+            head_line("noise at the largest gain, DC offset", &columns)
+        );
+        for idle in [-42.0, -48.0, -54.0] {
+            for (case, per_index) in [("no DC", none()), ("per index −50 dBFS", -50.0)] {
+                let pt = Point {
+                    scene,
+                    rate,
+                    snr_db: snr,
+                    ch,
+                    idle_dbfs: idle,
+                    per_index_dbfs: per_index,
+                    before_dbfs: none(),
+                    ppm_band: None,
+                };
+                let t = run(&pt, &columns, reference, frames);
+                println!(
+                    "{}",
+                    row_line(&format!("{idle:.0} dBFS, {case}"), &t, reference)
+                );
+            }
+        }
     }
 }
 
@@ -790,8 +997,10 @@ fn main() -> ExitCode {
         "level" => level(n.unwrap_or(2000)),
         "dc" => dc(n.unwrap_or(2000)),
         "pole" => pole(n.unwrap_or(2000)),
+        "cfo" => cfo(n.unwrap_or(2000)),
+        "cand" => cand(n.unwrap_or(2000)),
         _ => {
-            eprintln!("usage: rxagc per|level|dc|pole [frames]");
+            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand [frames]");
             return ExitCode::from(2);
         }
     }

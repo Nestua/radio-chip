@@ -1269,3 +1269,100 @@ fn dc_blocker_restart_averages_again_from_the_present_estimate() {
     assert_eq!(b.push((8.0, 0.0)).0, 6.125);
     assert_eq!(b.push((8.0, 0.0)).0, 0.0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The DC offset from the two long training symbols (candidate for ADR 0008's hand-off; G0 in
+// `docs/gates/rx_front.md`). The reference is the definition worked by hand and the identity
+// it rests on (a field that repeats after 64 samples behind a CFO): a consistency gate of the
+// model, not an outside reference.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn ltf_dc_offset_worked_by_hand() {
+    use radio_phy::rx_front::ltf_dc_offset;
+    let one = |at: usize, v: C, cfo: f64| {
+        let mut x = vec![(0.0, 0.0); 400];
+        x[at] = v;
+        ltf_dc_offset(&x, 100, cfo, FS).unwrap()
+    };
+    let near = |a: C, b: C| (a.0 - b.0).abs() < 1e-12 && (a.1 - b.1).abs() < 1e-12;
+    let u = 1.0 / 128.0;
+    // φ = π (cfo = fs/128): e = −1, 1 − e = 2. A sample of the second symbol alone: S = b,
+    // D = b/(64·2). One of the first alone: S = −e·a = a.
+    let cfo = FS / 128.0;
+    assert!(near(one(164, (1.0, 0.0), cfo), (u, 0.0)));
+    assert!(near(one(100, (1.0, 0.0), cfo), (u, 0.0)));
+    // Sample 163 is the last of the first symbol, 227 the last of the second; 99 and 228
+    // are outside the 64 pairs.
+    assert!(near(one(163, (0.0, 1.0), cfo), (0.0, u)));
+    assert!(near(one(227, (1.0, 0.0), cfo), (u, 0.0)));
+    assert!(near(one(99, (1.0, 0.0), cfo), (0.0, 0.0)));
+    assert!(near(one(228, (1.0, 0.0), cfo), (0.0, 0.0)));
+    // φ = π/2 (cfo = fs/256): e = j, 1 − e = 1 − j, 1/(1 − j) = (1 + j)/2.
+    // b = 1: D = (1 + j)/128. a = 1: S = −j, D = −j(1 + j)/128 = (1 − j)/128.
+    let cfo = FS / 256.0;
+    assert!(near(one(164, (1.0, 0.0), cfo), (u, u)));
+    assert!(near(one(100, (1.0, 0.0), cfo), (u, -u)));
+    // The other sign of the CFO: e = −j, 1/(1 + j) = (1 − j)/2.
+    assert!(near(one(164, (1.0, 0.0), -cfo), (u, -u)));
+    assert!(near(one(100, (1.0, 0.0), -cfo), (u, u)));
+}
+
+/// |1 − e^(jφ)| = 1/16 at φ = 2·asin(1/32), a CFO of 3109.0 Hz at 20 MHz: below it the
+/// offset is left in (it falls within a hundredth of the unused subcarrier).
+#[test]
+fn ltf_dc_offset_is_left_alone_where_the_cfo_is_too_small_to_divide_by() {
+    use radio_phy::rx_front::ltf_dc_offset;
+    let x = vec![(5.0, -3.0); 400];
+    let edge = 2.0 * (1.0f64 / 32.0).asin() * FS / (2.0 * PI * 64.0);
+    assert!((edge - 3109.0).abs() < 0.1, "{edge}");
+    for cfo in [0.0, 1e3, -1e3, edge - 1.0, -(edge - 1.0)] {
+        assert_eq!(ltf_dc_offset(&x, 100, cfo, FS), Some((0.0, 0.0)), "{cfo}");
+    }
+    // A constant stream is its own offset at every CFO above the edge.
+    for cfo in [edge + 1.0, -(edge + 1.0), 50e3, -232e3, 232e3] {
+        let d = ltf_dc_offset(&x, 100, cfo, FS).unwrap();
+        assert!(
+            (d.0 - 5.0).abs() < 1e-9 && (d.1 + 3.0).abs() < 1e-9,
+            "{cfo} {d:?}"
+        );
+    }
+    // The 64 pairs must be in the stream: fft_start + 128 samples.
+    assert!(ltf_dc_offset(&x[..228], 100, 50e3, FS).is_some());
+    assert!(ltf_dc_offset(&x[..227], 100, 50e3, FS).is_none());
+    assert!(ltf_dc_offset(&x, 400, 50e3, FS).is_none());
+    assert!(ltf_dc_offset(&x, usize::MAX, 50e3, FS).is_none());
+}
+
+/// Any field that repeats after 64 samples, behind any CFO and any channel, gives the offset
+/// back exactly: x[n] = s[n mod 64]·e^(jωn) + D.
+#[test]
+fn ltf_dc_offset_is_exact_behind_a_repeating_field() {
+    use radio_phy::rx_front::ltf_dc_offset;
+    let mut rng = Rng::new(0xdc0f);
+    for k in 0..200 {
+        let s: Vec<C> = (0..64)
+            .map(|_| (rng.uniform() * 2.0 - 1.0, rng.uniform() * 2.0 - 1.0))
+            .collect();
+        let d = (rng.uniform() - 0.5, rng.uniform() - 0.5);
+        let mut cfo = (rng.uniform() * 2.0 - 1.0) * 232e3;
+        if cfo.abs() < 3200.0 {
+            cfo = 3200.0;
+        }
+        let w = 2.0 * PI * cfo / FS;
+        let start = 7 + k;
+        let x: Vec<C> = (0..start + 128)
+            .map(|n| {
+                let v = s[n % 64];
+                let (sin, cos) = (w * n as f64).sin_cos();
+                (v.0 * cos - v.1 * sin + d.0, v.0 * sin + v.1 * cos + d.1)
+            })
+            .collect();
+        let got = ltf_dc_offset(&x, start, cfo, FS).unwrap();
+        // The division by |1 − e^(jφ)| ≥ 1/16 magnifies the rounding of the sums.
+        assert!(
+            (got.0 - d.0).abs() < 1e-11 && (got.1 - d.1).abs() < 1e-11,
+            "{cfo} {got:?} {d:?}"
+        );
+    }
+}
