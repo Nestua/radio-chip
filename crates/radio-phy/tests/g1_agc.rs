@@ -795,3 +795,71 @@ fn the_timer_and_the_hold_at_their_edges() {
     assert_eq!(t.gain_db[100], 70.0);
     assert_eq!(t.gain_db[101], 65.0);
 }
+
+#[test]
+fn the_control_stepped_a_sample_at_a_time_is_the_run_with_the_same_holds() {
+    // The closed loop of a receiver's hold needs the control one sample at a time: the hold
+    // of sample n is decided from what the samples before it gave. Stepped with a hold
+    // raised 10 samples after each lock it reports and kept 50 samples, the gains, locks
+    // and unlocks are those of `run_held` with the windows that came out.
+    use radio_phy::channel::GainDc;
+    let mut x = level(-50.0, 150);
+    x.extend(level(-80.0, 200));
+    x.extend(level(-30.0, 200));
+    x.extend(vec![(0.0, 0.0); 100]);
+    let dc = GainDc {
+        per_index: 0.01,
+        seed: 7,
+        before_gain: (0.0, 1e-5),
+    };
+    for (control, dc) in [
+        (agc(), None),
+        (agc(), Some(dc)),
+        (
+            FastAttackAgc {
+                lock_hold: 30,
+                lock_hold_at_max: false,
+                unlock_to_max: false,
+                ..agc()
+            },
+            Some(dc),
+        ),
+    ] {
+        let mut run = control.start(dc);
+        let mut windows: Vec<(usize, usize)> = Vec::new();
+        let (mut gains, mut locks, mut unlocks) = (Vec::new(), Vec::new(), Vec::new());
+        for (n, s) in x.iter().enumerate() {
+            let held = windows.iter().any(|w| w.0 <= n && n < w.1);
+            let step = run.push(*s, held);
+            gains.push(step.gain_db);
+            if let Some(l) = step.locked {
+                locks.push(l);
+                windows.push((l + 10, l + 60));
+            }
+            unlocks.extend(step.unlocked);
+        }
+        assert!(windows.len() >= 2, "{windows:?}");
+        let t = control.run_held(&x, dc.as_ref(), &windows);
+        assert_eq!(gains, t.gain_db);
+        // A lock decided at the last sample has no sample to act on and is not in the trace.
+        locks.retain(|l| *l < x.len());
+        assert_eq!(locks, t.locks);
+        assert_eq!(unlocks, t.unlocks);
+        // The trace's changes are where the stepped gain differs from the sample before.
+        let mut changes = vec![(0, gains[0])];
+        for n in 1..gains.len() {
+            if gains[n] != gains[n - 1] {
+                changes.push((n, gains[n]));
+            }
+        }
+        assert_eq!(changes, t.changes);
+    }
+    // Stepped with a hold that ends on the stream's last sample, the lock is still held
+    // when the stream ends: `locked` says so (the run records its release there).
+    let x = level(-50.0, 300);
+    let mut run = agc().start(None);
+    for (n, s) in x.iter().enumerate() {
+        run.push(*s, n >= 100);
+    }
+    assert!(run.locked());
+}
