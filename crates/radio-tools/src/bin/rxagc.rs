@@ -9,7 +9,8 @@
 //! - `pole`: what the DC blocker's pole costs 54 Mb/s frames with no offset to remove.
 //! - `cfo`: that cost against the size of the clock offset (ADR 0008).
 //! - `cand`: what the decoder could be handed instead, under the DC offsets of `dc` (ADR 0008).
-//! - `hold`: the gain held by the control's first lock or by the receiver's acquisition (ADR 0008).
+//! - `hold`: the gain held from the control's first lock or from the latest sample at which
+//!   the receiver can have declared its acquisition (ADR 0008).
 //! - `edge`: the 13 / 1 hand-off under an offset, small clock offsets, the acquisition's share.
 //!
 //! The scene: a 1000-octet frame, a clock offset uniform in ±40 ppm that sets CFO and
@@ -495,7 +496,7 @@ fn preamble_text(what: &str, frames: usize) {
          # uniform in ±40 ppm (CFO and sample clock, carrier 5.8 GHz), channel::FastAttackAgc (power\n\
          # over 16 samples, lock left on a large overload, 2 detector clocks per sample, lock level\n\
          # −10 dBFS, largest gain 73 dB), the gain held from the first lock inside the packet\n\
-         # (assumed), phase jump ±{JUMP_DEG}° per gain change (assumed), 12-bit ADC.\n\
+         # (assumed; `hold` has rows that hold it later), phase jump ±{JUMP_DEG}° per gain change (assumed), 12-bit ADC.\n\
          # Chains on the ADC's samples:\n\
          #   float     = float DC blocker (pole 2^-{DC_SHIFT}), float front, rx_ofdm (8 bits, clip 3);\n\
          #   int O/s   = dc_block_fixed (pole 2^-{DC_SHIFT}), RxFrontFixed, correct_fixed to O bits,\n\
@@ -1030,16 +1031,19 @@ fn hold(frames: usize) {
     ];
     let reference = 0;
     const IDLE: f64 = -30.0;
-    // First sample of T1 (192) + the latest declaration (223, `rx_front::HISTORY`) + the
-    // decision latency (64).
+    // First sample of T1 (192) + the latest declaration (223, the doc of
+    // `rx_front::HISTORY`) + the decision latency (64).
     const DECLARED: usize = 192 + 223 + 64;
     preamble_text("hold", frames);
     println!(
         "# Noise at {IDLE} dBFS at the largest gain, no DC offset. Rows 'lock': the gain held from the\n\
          # control's first lock inside the packet (as everywhere else). Rows 'declared': held from\n\
          # {DECLARED} samples after the packet's first, the latest the acquisition is declared (T1 + 223\n\
-         # + 64), or from the first lock if that is later: until then the control is free. The\n\
-         # two rows of a point are the same frames.\n\
+         # + 64), or from the first lock if that is later: until then the control is free. That\n\
+         # sample is fixed by the frame's position, not taken from the chain's own acquisition,\n\
+         # and the hold lasts to the stream's end whether or not the frame was acquired. The\n\
+         # two rows of a point are the same frames; they differ only in frames whose gain\n\
+         # changes between the first lock and that sample (a handful per row).\n\
          #   2^-7 = the decoder handed the blocker's output (the chain as it is);\n\
          #   ltf  = the decoder handed the samples before the blocker less the offset estimated\n\
          #          from the two long training symbols."

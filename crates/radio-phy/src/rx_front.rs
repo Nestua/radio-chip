@@ -353,8 +353,11 @@ pub const DC_MIN_TURN: f64 = 1.0 / 16.0;
 ///
 /// Once the CFO is out the offset is a tone φ/2π subcarrier spacings from the unused
 /// subcarrier. Where |1 − e^(jφ)| < [`DC_MIN_TURN`] the division would magnify the noise
-/// without bound and the tone does no harm: zero is returned. `None` when the stream does
-/// not hold the 128 samples.
+/// without bound: zero is returned. Near φ = 0 the tone does no harm there. Near a full
+/// turn (a CFO of a whole subcarrier spacing, 312.5 kHz at 20 MHz, outside what the
+/// standard's ±20 ppm an end allow below 7.8 GHz) it lies on a data subcarrier, cannot be
+/// told from it by this method and is left in as well. `None` when the stream does not hold
+/// the 128 samples, whatever the CFO.
 pub fn ltf_dc_offset(
     x: &[Sample],
     fft_start: usize,

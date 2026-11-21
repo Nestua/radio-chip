@@ -282,7 +282,7 @@ pub fn correct_fixed(y: &[IQ], cfo_phase: i64, out_bits: u32, fx: &FixedRxConfig
 }
 
 /// n / d for d > 0, rounded half to even.
-fn div_half_even(n: i64, d: i64) -> i64 {
+fn div_half_even(n: i128, d: i128) -> i128 {
     let (q, r) = (n.div_euclid(d), n.rem_euclid(d));
     match (2 * r).cmp(&d) {
         std::cmp::Ordering::Greater => q + 1,
@@ -299,9 +299,11 @@ fn div_half_even(n: i64, d: i64) -> i64 {
 /// S = Σ (x[n + 64]·A − e·x[n]) over the 64 pairs, exactly, and D = S·d*/(64·|d|²) rounded
 /// half to even and saturated to the ADC's 12 bits. One division per packet.
 ///
-/// Zero where 256·|d|² < A² (the float model's [`crate::rx_front::DC_MIN_TURN`]): the offset
-/// is then within a hundredth of a subcarrier spacing of the unused subcarrier. `None` when
-/// the stream does not hold the 128 samples or the configuration is invalid.
+/// Zero where 256·|d|² < A² (the float model's [`crate::rx_front::DC_MIN_TURN`], decided on
+/// the table's entry: with the default table from a CFO word of 704, 3.36 kHz at 20 MHz,
+/// where the float model's edge is 3.11 kHz): the offset is then within about a hundredth
+/// of a subcarrier spacing of the unused subcarrier. `None` when the stream does not hold
+/// the 128 samples (whatever the CFO) or the configuration is invalid.
 pub fn ltf_dc_offset_fixed(
     x: &[(i16, i16)],
     fft_start: usize,
@@ -320,8 +322,8 @@ pub fn ltf_dc_offset_fixed(
     let e = rotate_with(turn, fx, &table);
     let a = rotate_with(0, fx, &table).0;
     let d = (a - e.0, -e.1);
-    let d2 = d.0 * d.0 + d.1 * d.1;
-    if 256 * d2 < a * a {
+    let d2 = iabs2(d);
+    if 256 * d2 < i128::from(a) * i128::from(a) {
         return Some((0, 0));
     }
     let (first, second) = field.split_at(LTF_SYMBOL_LEN);
@@ -332,20 +334,24 @@ pub fn ltf_dc_offset_fixed(
             s.1 + i64::from(v.1) * a - turned.1,
         )
     });
-    // |S| < 2^29 and |d| < 2^12 with the widest rotator the configuration allows in
-    // practice (Q = 11); the products stay far inside 64 bits.
-    let num = imul(s, iconj(d));
-    let den = LTF_SYMBOL_LEN as i64 * d2;
-    let (lo, hi) = (-(1i64 << (ADC_BITS - 1)), (1i64 << (ADC_BITS - 1)) - 1);
-    Some((
-        div_half_even(num.0, den).clamp(lo, hi),
-        div_half_even(num.1, den).clamp(lo, hi),
-    ))
+    // With the default rotator (Q = 11) and 12-bit samples |S| < 2^29, the numerator has 42
+    // bits and the divisor 28: the hardware's widths. The model keeps the products in 128
+    // bits, so that no rotator the configuration allows (Q up to 30) and no 16-bit sample
+    // overflows them.
+    let wide = |v: i64| i128::from(v);
+    let num = (
+        wide(s.0) * wide(d.0) + wide(s.1) * wide(d.1),
+        wide(s.1) * wide(d.0) - wide(s.0) * wide(d.1),
+    );
+    let den = LTF_SYMBOL_LEN as i128 * d2;
+    let (lo, hi) = (-(1i128 << (ADC_BITS - 1)), (1i128 << (ADC_BITS - 1)) - 1);
+    let q = |n: i128| div_half_even(n, den).clamp(lo, hi) as i64;
+    Some((q(num.0), q(num.1)))
 }
 
 /// The ADC's samples less a DC offset in ADC LSB, saturated to the [`Y_BITS`] of the
 /// rotator's input: what [`correct_fixed`] is handed when the offset comes from
-/// [`ltf_dc_offset_fixed`] instead of the DC blocker. Two 12-bit values never reach the limit.
+/// [`ltf_dc_offset_fixed`] instead of the DC blocker. Two 12-bit values never exceed the limit.
 pub fn remove_dc_fixed(x: &[(i16, i16)], dc: IQ) -> Vec<IQ> {
     let (lo, hi) = (-(1i64 << (Y_BITS - 1)), (1i64 << (Y_BITS - 1)) - 1);
     x.iter()

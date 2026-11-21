@@ -1327,7 +1327,21 @@ fn ltf_dc_offset_is_left_alone_where_the_cfo_is_too_small_to_divide_by() {
             "{cfo} {d:?}"
         );
     }
-    // The 64 pairs must be in the stream: fft_start + 128 samples.
+    // The guard is the chord, not the angle: it closes again near a full turn (a CFO of one
+    // subcarrier spacing, 312.5 kHz), where the offset would lie on a subcarrier.
+    for cfo in [300e3, -300e3, 312.5e3 - edge - 1.0, -(312.5e3 - edge - 1.0)] {
+        let d = ltf_dc_offset(&x, 100, cfo, FS).unwrap();
+        assert!(
+            (d.0 - 5.0).abs() < 1e-9 && (d.1 + 3.0).abs() < 1e-9,
+            "{cfo} {d:?}"
+        );
+    }
+    for cfo in [312.5e3, -312.5e3, 312.5e3 - edge + 1.0, 312.5e3 + 1e3] {
+        assert_eq!(ltf_dc_offset(&x, 100, cfo, FS), Some((0.0, 0.0)), "{cfo}");
+    }
+    // The 64 pairs must be in the stream: fft_start + 128 samples, whatever the CFO.
+    assert!(ltf_dc_offset(&x[..227], 100, 0.0, FS).is_none());
+    assert!(ltf_dc_offset(&x[..228], 100, 0.0, FS).is_some());
     assert!(ltf_dc_offset(&x[..228], 100, 50e3, FS).is_some());
     assert!(ltf_dc_offset(&x[..227], 100, 50e3, FS).is_none());
     assert!(ltf_dc_offset(&x, 400, 50e3, FS).is_none());

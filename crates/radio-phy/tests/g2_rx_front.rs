@@ -894,8 +894,10 @@ fn ltf_dc_offset_fixed_guard_and_limits() {
         [d.0, d.1].iter().all(|c| *c == 2047 || *c == -2048),
         "{d:?}"
     );
-    assert!([d.0, d.1].contains(&2047) || [d.0, d.1].contains(&-2048));
-    // The 64 pairs must be in the stream; an invalid configuration gives nothing.
+    // The 64 pairs must be in the stream, whatever the CFO; an invalid configuration gives
+    // nothing.
+    assert!(ltf_dc_offset_fixed(&x[..227], 100, 0, &fx).is_none());
+    assert!(ltf_dc_offset_fixed(&x[..228], 100, 0, &fx).is_some());
     assert!(ltf_dc_offset_fixed(&x[..228], 100, 1 << 15, &fx).is_some());
     assert!(ltf_dc_offset_fixed(&x[..227], 100, 1 << 15, &fx).is_none());
     assert!(ltf_dc_offset_fixed(&x, usize::MAX, 1 << 15, &fx).is_none());
@@ -905,6 +907,64 @@ fn ltf_dc_offset_fixed_guard_and_limits() {
     };
     assert!(!bad.is_valid());
     assert!(ltf_dc_offset_fixed(&x, 100, 1 << 15, &bad).is_none());
+}
+
+/// Off the default rotator. A table of 4096 entries (L = 12): one address is 2^10 of the
+/// phase 64·φ, so φ = 16 per address. Address 39: e = round(1023·(cos, sin)(2π·39/4096)) =
+/// (1021, 61), d = (2, −61), |d|² = 3725, 256·3725 < 1023²; address 41: e = (1021, 64),
+/// d = (2, −64), |d|² = 4100, 256·4100 > 1023². The tie at half an address goes up.
+/// A table as long as the phase (L = P): no half address to add. The widest rotator the
+/// configuration allows (Q = 30) and samples of the full 16 bits: nothing overflows.
+#[test]
+fn ltf_dc_offset_fixed_off_the_default_configuration() {
+    let x = vec![(100i16, -50i16); 400];
+    let fine = FixedRxConfig {
+        nco_lut_bits: 12,
+        ..FixedRxConfig::default()
+    };
+    assert!(fine.is_valid());
+    let at = |phi: i64| ltf_dc_offset_fixed(&x, 100, phi, &fine);
+    // Address 39 = φ 624; up to 39.49 addresses (φ 631) it stays 39; φ 632 is 39.5 → 40.
+    assert_eq!(at(624), Some((0, 0)));
+    assert_eq!(at(631), Some((0, 0)));
+    // Address 40: e = (1021, 63), d = (2, −63), |d|² = 3973 < 4087.9: still inside.
+    assert_eq!(at(632), Some((0, 0)));
+    assert_eq!(at(647), Some((0, 0)));
+    // Address 41 from φ = 648 (40.5): outside the guard.
+    assert_eq!(at(648), Some((100, -50)));
+    assert_eq!(at(656), Some((100, -50)));
+    let whole = FixedRxConfig {
+        nco_lut_bits: 22,
+        ..FixedRxConfig::default()
+    };
+    assert!(whole.is_valid());
+    assert_eq!(
+        ltf_dc_offset_fixed(&x, 100, 1 << 15, &whole),
+        Some((100, -50))
+    );
+    // A quarter turn: e = jA exactly, d = A(1 − j).
+    assert_eq!(
+        ltf_dc_offset_fixed(&x, 100, 1 << 14, &whole),
+        Some((100, -50))
+    );
+    let wide = FixedRxConfig {
+        nco_amp_bits: 30,
+        ..FixedRxConfig::default()
+    };
+    assert!(wide.is_valid());
+    let mut y = vec![(i16::MIN, i16::MAX); 400];
+    for v in y.iter_mut().skip(164) {
+        *v = (i16::MAX, i16::MIN);
+    }
+    for phi in [704i64, 1 << 13, 3 << 13, 1 << 14, 1 << 15, -(1 << 14)] {
+        let d = ltf_dc_offset_fixed(&y, 100, phi, &wide).unwrap();
+        assert!((-2048..=2047).contains(&d.0) && (-2048..=2047).contains(&d.1));
+    }
+    // And a constant stream is still its own offset with it.
+    assert_eq!(
+        ltf_dc_offset_fixed(&x, 100, 1 << 15, &wide),
+        Some((100, -50))
+    );
 }
 
 #[test]
@@ -964,16 +1024,26 @@ fn ltf_dc_offset_fixed_follows_the_float_one() {
         let phi = (cfo / fs * 2f64.powi(22)).round() as i64;
         let fixed = ltf_dc_offset_fixed(&adc, t1, phi, &fx).unwrap();
         let float = ltf_dc_offset(&as_f64(&adc), t1, cfo, fs).unwrap();
-        // The turn after 64 samples, as the table has it: off by at most half an address
-        // (π/512) from the true one. That error times the field's own mean over a symbol
-        // (at most its RMS, 364 LSB at −15 dBFS) over |d| is what the integers add.
+        // The integers differ from the float estimate by their rounding (half an LSB) and by
+        // their rotator: its phase is off by at most half an address (π/512) and each of
+        // its components by half a unit of 1023. To first order the estimate moves by that
+        // error times the difference of the two symbols' means over |d|² (the reviewer's
+        // derivation; 10 % for the second order).
         let turn = 2.0 * (PI * 64.0 * cfo / fs).sin().abs();
+        let mean = |r: std::ops::Range<usize>| {
+            let s = adc[r].iter().fold((0.0, 0.0), |s, v| {
+                (s.0 + f64::from(v.0), s.1 + f64::from(v.1))
+            });
+            (s.0 / 64.0, s.1 / 64.0)
+        };
+        let (m1, m2) = (mean(t1..t1 + 64), mean(t1 + 64..t1 + 128));
+        let apart = (m2.0 - m1.0).hypot(m2.1 - m1.1);
         if turn < 0.08 {
             // At the guard the two may decide differently; both sides of it are tested above.
             continue;
         }
         n += 1;
-        let bound = 0.5 + 1.0 + (PI / 512.0) * 364.0 / turn;
+        let bound = 0.5 + 1.1 * (PI / 512.0 + 2f64.sqrt() / 1023.0) * apart / (turn * turn);
         let e = (fixed.0 as f64 - float.0)
             .abs()
             .max((fixed.1 as f64 - float.1).abs());
@@ -990,8 +1060,9 @@ fn ltf_dc_offset_fixed_follows_the_float_one() {
         worst_true = worst_true.max(t / reach);
     }
     assert!(n > 500, "{n}");
-    // Neither bound is idle: something comes within a factor of twenty of each.
-    assert!(worst > 0.05, "{worst}");
+    // Neither bound is idle: something comes within a factor of two of the first and of
+    // twenty of the second.
+    assert!(worst > 0.5, "{worst}");
     assert!(worst_true > 0.05, "{worst_true}");
 }
 
