@@ -781,11 +781,12 @@ fn width_points() -> [(&'static str, Rate, f64, Channel); 7] {
     ]
 }
 
-/// Samples from the FFT window of T1 to the end of SIGNAL's window, and the periods after
-/// it at which the decoder gives the front its verdict (ADR 0008, decision 3: SIGNAL is
-/// known 9 µs after its last sample at the latest; as `rxagc loop`).
+/// Samples from the FFT window of T1 to the end of SIGNAL's window, and the periods the
+/// decoder takes from the beat that completes them to its verdict (ADR 0008, decision 3
+/// budgets 600 clocks, 75 periods, from the declaration to SIGNAL decoded; the replay has
+/// handed on SIGNAL's window some 46 periods after the declaration).
 const SIGNAL_END: usize = 128 + 80;
-const VERDICT_LATENCY: usize = 180;
+const VERDICT_LATENCY: usize = 50;
 
 /// What `stream` counts of one frame.
 #[derive(Clone, Copy, Default)]
@@ -798,17 +799,16 @@ struct Streamed {
     stream: bool,
     /// Acquisitions the streaming front declared.
     declared: usize,
-    /// A stream was aborted by a new declaration; one was stopped on a failed SIGNAL; one
-    /// was lost to the reader.
+    /// A stream was aborted by a new declaration; one was stopped on a failed SIGNAL.
     aborted: bool,
     stopped: bool,
-    overrun: bool,
 }
 
 /// One frame through the streaming front ([`RxHandoffFixed`]) and the integer decoder as
-/// its reader: the decoder takes every beat at once, tells the front SIGNAL's verdict
-/// [`VERDICT_LATENCY`] periods after SIGNAL's window and decodes the stream when its end
-/// mark comes. Nothing here knows where the frame is.
+/// its reader: the decoder takes every beat at once (so no stream is lost to it), tells the
+/// front SIGNAL's verdict [`VERDICT_LATENCY`] periods after the beat that completes SIGNAL's
+/// window, with the tag of the stream it read, and decodes the stream when its end mark
+/// comes. The reader sees the beats alone: not the acquisition, not where the frame is.
 fn streamed(scene: Scene, seed: u64, number: u64) -> Streamed {
     let rx = RxConfig::new(FS);
     let front = FixedRxConfig::default();
@@ -835,40 +835,41 @@ fn streamed(scene: Scene, seed: u64, number: u64) -> Streamed {
 
     let mut hand = RxHandoffFixed::new(rx, front, HandoffConfig::default());
     let mut z: Vec<IQ> = Vec::new();
-    let mut word = 0i64;
-    let mut due = None;
+    let (mut word, mut tag) = (0i64, 0u8);
+    // The verdict that is due: its period, the stream's tag and what SIGNAL said.
+    let mut due: Option<(usize, u8, Option<usize>)> = None;
     for (n, &s) in adc.iter().enumerate() {
         let step = hand.push(s, usize::MAX);
-        if let Some(a) = step.acquired {
-            out.declared += 1;
-            due = Some(a.fft_start + SIGNAL_END + VERDICT_LATENCY);
-        }
+        out.declared += usize::from(step.acquired.is_some());
         for beat in step.beats {
             match beat {
                 HandoffBeat::Sample { z: v, first } => {
-                    if let Some(w) = first {
+                    if let Some(f) = first {
                         z.clear();
-                        word = w;
+                        (word, tag) = (f.cfo_phase, f.packet);
                     }
                     z.push(v);
+                    if z.len() == SIGNAL_END {
+                        let verdict = decode_signal_fixed(&z, 0, &ofdm, &fo, start(word))
+                            .ok()
+                            .map(|s| data_symbols(s.rate, s.length));
+                        due = Some((n + VERDICT_LATENCY, tag, verdict));
+                    }
                 }
                 HandoffBeat::End(end) => {
                     match end {
                         HandoffEnd::Packet => out.stream |= decode(&z, 0, word),
                         HandoffEnd::Stopped => out.stopped = true,
-                        HandoffEnd::Acquisition => out.aborted = true,
-                        HandoffEnd::Overrun => out.overrun = true,
+                        // The reader always has room: no stream is lost to it.
+                        HandoffEnd::Acquisition | HandoffEnd::Overrun => out.aborted = true,
                     }
                     z.clear();
                 }
             }
         }
-        if due == Some(n) {
+        if let Some((_, tag, verdict)) = due.filter(|d| d.0 == n) {
             due = None;
-            let verdict = decode_signal_fixed(&z, 0, &ofdm, &fo, start(word))
-                .ok()
-                .map(|s| data_symbols(s.rate, s.length));
-            hand.signal(verdict);
+            hand.signal(tag, verdict);
         }
     }
     out
@@ -881,11 +882,11 @@ fn streams(frames: usize) {
          # the points, frames and receiver of `fixedw` (its column `word start` is `whole` here): the frame at {ADC_LEVEL_DBFS} dBFS at the 12-bit ADC, clock offset uniform in ±40 ppm.\n\
          # whole: acquire_fixed, handoff_fixed of the buffer rotated from its first sample, decode_ppdu_fixed;\n\
          # slice: the same with the rotation started at T1's window, the replay's phase;\n\
-         # stream: every sample through RxHandoffFixed (8 beats a period, replay 20 periods after the declaration), the decoder as its reader: it gives SIGNAL's verdict\n\
-         #   (decode_signal_fixed on the stream) {VERDICT_LATENCY} periods after SIGNAL's window and decodes when the end mark comes; no part of it knows where the frame is.\n\
-         # only: frames lost by the stream alone / by the slice alone. again: frames in which the front declared more than once. aborted, stopped, overrun: frames with a stream\n\
-         #   ended by a new declaration, by a failed SIGNAL, by the reader falling a history behind.\n\
-         # columns: whole | slice | stream | only | again | aborted | stopped | overrun"
+         # stream: every sample through RxHandoffFixed (8 beats a period, replay 20 periods after the declaration), the decoder as its reader: it takes every beat at once, gives SIGNAL's verdict\n\
+         #   (decode_signal_fixed on the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods after the beat that completes them and decodes when the end mark comes; it sees the beats alone.\n\
+         # w/s: frames lost by whole alone / by slice alone. s/s: frames lost by the stream alone / by the slice alone. again: frames in which the front declared more than once.\n\
+         # aborted, stopped: frames with a stream ended by a new declaration, by a failed SIGNAL. (The reader always has room: no stream can be lost to it here.)\n\
+         # columns: whole | slice | stream | w/s | s/s | again | aborted | stopped"
     );
     for (label, rate, snr, ch) in width_points() {
         let scene = Scene {
@@ -898,19 +899,20 @@ fn streams(frames: usize) {
         let seed = 9000 + rate.mbps() as u64 + snr as u64;
         let n = threads();
         let parts = par(|t| {
-            let mut c = [0usize; 9];
+            let mut c = [0usize; 10];
             for number in (t..frames).step_by(n) {
                 let s = streamed(scene, seed, number as u64);
                 for (k, hit) in [
                     !s.whole,
                     !s.slice,
                     !s.stream,
+                    !s.whole && s.slice,
+                    s.whole && !s.slice,
                     !s.stream && s.slice,
                     s.stream && !s.slice,
                     s.declared > 1,
                     s.aborted,
                     s.stopped,
-                    s.overrun,
                 ]
                 .into_iter()
                 .enumerate()
@@ -920,15 +922,15 @@ fn streams(frames: usize) {
             }
             c
         });
-        let mut c = [0usize; 9];
+        let mut c = [0usize; 10];
         for p in &parts {
             for (s, v) in c.iter_mut().zip(p) {
                 *s += v;
             }
         }
         println!(
-            "{label:<22} | {:>4} {:>4} {:>4} | {:>2} / {:<2} | {:>4} {:>4} {:>4} {:>4}  of {frames}",
-            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]
+            "{label:<22} | {:>4} {:>4} {:>4} | {:>2} / {:<2} | {:>2} / {:<2} | {:>4} {:>4} {:>4}  of {frames}",
+            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]
         );
     }
 }

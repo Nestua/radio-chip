@@ -13,9 +13,10 @@ use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::RxConfig;
 use radio_phy::rx_front_fixed::{
-    acquisitions_fixed, cordic_angle, cordic_table, handoff_fixed, ltf_taps, nco_rotator,
-    nco_table, to_adc, FixedAcquisition, FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd,
-    RxHandoffFixed, ADC_FULL_SCALE, ADC_HISTORY, HANDOFF_TAIL, IQ, MAX_DATA_SYMBOLS,
+    acquisitions_fixed, cordic_angle, cordic_table, handoff_fixed, ltf_dc_offset_fixed, ltf_taps,
+    nco_rotator, nco_table, to_adc, FixedAcquisition, FixedRxConfig, HandoffBeat, HandoffConfig,
+    HandoffEnd, HandoffStart, RxHandoffFixed, ADC_FULL_SCALE, ADC_HISTORY, HANDOFF_TAIL, IQ,
+    MAX_DATA_SYMBOLS,
 };
 use radio_phy::rx_ofdm::RxOfdmConfig;
 use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
@@ -33,6 +34,18 @@ const B: usize = 4;
 /// samples of noise after each, the transmitter's clock off by `ppm`, on a DC offset of
 /// −20 dBFS at the ADC.
 fn scene(
+    frames: &[(Rate, usize)],
+    lead: usize,
+    gap: usize,
+    ppm: f64,
+    seed: u64,
+) -> (Vec<(i16, i16)>, Vec<Vec<u8>>) {
+    scene_at(30.0, frames, lead, gap, ppm, seed)
+}
+
+/// [`scene`] at another signal-to-noise ratio.
+fn scene_at(
+    snr_db: f64,
     frames: &[(Rate, usize)],
     lead: usize,
     gap: usize,
@@ -59,7 +72,7 @@ fn scene(
     }
     let x = if ppm == 0.0 { x } else { resample(&x, ppm) };
     let x = frequency_offset(&x, ppm * 1e-6 * CARRIER, FS, 2.0);
-    let x = awgn(&x, 30.0, p, &mut rng);
+    let x = awgn(&x, snr_db, p, &mut rng);
     let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-12.0 / 20.0) / p.sqrt();
     let dc = 10f64.powf(-20.0 / 20.0) / gain * f64::from(ADC_FULL_SCALE);
     let x: Vec<C> = x.iter().map(|s| (s.0 - 0.8 * dc, s.1 + 0.6 * dc)).collect();
@@ -78,6 +91,18 @@ struct Log {
 }
 
 impl Log {
+    /// The tag on the latest first beat, 0 before any.
+    fn tag(&self) -> u8 {
+        self.beats
+            .iter()
+            .rev()
+            .find_map(|b| match b.1 {
+                HandoffBeat::Sample { first: Some(s), .. } => Some(s.packet),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
     /// The beats without their push indices.
     fn stream(&self) -> Vec<HandoffBeat> {
         self.beats.iter().map(|b| b.1).collect()
@@ -150,7 +175,8 @@ fn run_with(
         log.hold.push(step.hold);
         log.beats.extend(step.beats.into_iter().map(|b| (n, b)));
         if let Some(v) = verdict(n, &log) {
-            rx.signal(v);
+            // The reader gives back the tag of the stream it is in (0 before any).
+            rx.signal(log.tag(), v);
             log.after_verdict.push((n, rx.hold()));
         }
     }
@@ -208,7 +234,10 @@ fn the_stream_is_the_hand_off_from_t1_and_the_hold_lasts_the_packet() {
             };
             assert_eq!(
                 first,
-                (k == 0).then_some(a.cfo_phase),
+                (k == 0).then_some(HandoffStart {
+                    cfo_phase: a.cfo_phase,
+                    packet: 1
+                }),
                 "seed {seed} beat {k}"
             );
         }
@@ -356,7 +385,10 @@ fn a_failed_signal_drops_the_hold_and_ends_the_stream_and_the_front_goes_on() {
             b.decided_at + 20,
             HandoffBeat::Sample {
                 z: reference(&adc, &b, &fx)[0],
-                first: Some(b.cfo_phase)
+                first: Some(HandoffStart {
+                    cfo_phase: b.cfo_phase,
+                    packet: 2
+                })
             }
         )
     );
@@ -481,10 +513,10 @@ fn a_verdict_is_taken_once_and_a_late_one_ends_at_once() {
         [(f + 300, true), (f + 301, true), (f + 302, true)]
     );
 
-    // "At once if that is past": a verdict that follows the push of the frame's last
-    // sample finds the hold down as it is given; one a sample earlier leaves it up for
-    // that last sample.
-    for (at, down) in [(end - 2, false), (end - 1, true)] {
+    // The hold covers the frame's samples, to `end` − 1, whenever the verdict comes before
+    // sample `end` is pushed: a verdict after the push of the last sample leaves it up for
+    // the rest of that period, as a timely one does. One period later it is down at once.
+    for (at, up, dropped) in [(end - 1, true, end), (end, false, end + 1)] {
         let log = run(
             &adc,
             fx,
@@ -492,9 +524,140 @@ fn a_verdict_is_taken_once_and_a_late_one_ends_at_once() {
             |_| usize::MAX,
             |n, _| (n == at).then_some(Some(SHORT_SYMBOLS)),
         );
-        assert_eq!(log.after_verdict, [(at, !down)]);
-        assert_eq!(log.holds(), [(a.decided_at, end)]);
+        assert_eq!(log.after_verdict, [(at, up)]);
+        assert_eq!(log.holds(), [(a.decided_at, dropped)]);
     }
+
+    // A SIGNAL of no data symbols (none exists; the call is the decoder's to make) is a
+    // packet that ended with SIGNAL's window: given 320 periods after T1 the hold is down
+    // at once and the mark is the packet's end, not a stop.
+    let log = run(
+        &adc,
+        fx,
+        HandoffConfig::default(),
+        |_| usize::MAX,
+        |n, _| (n == f + 320).then_some(Some(0)),
+    );
+    assert_eq!(log.after_verdict, [(f + 320, false)]);
+    assert_eq!(log.holds(), [(a.decided_at, f + 321)]);
+    // The replay, 27 periods old, had handed on 216 samples; it ends at the tail after
+    // SIGNAL's window.
+    let count = SIGNAL_END + B + HANDOFF_TAIL;
+    assert_eq!(log.beats.len(), count + 1);
+    assert_eq!(
+        log.beats[count],
+        (f + 321, HandoffBeat::End(HandoffEnd::Packet))
+    );
+}
+
+#[test]
+fn a_verdict_on_a_replaced_packet_does_not_touch_the_new_one() {
+    // Two frames 600 samples apart. The decoder's verdict on the first comes five periods
+    // after the second was declared: it carries the first one's tag and is ignored, as a
+    // failed SIGNAL and as a length; the second packet's own verdict is taken.
+    let fx = FixedRxConfig::default();
+    let (adc, _) = scene(&[SHORT, SHORT], 700, 600, 12.5, 4);
+    for stale in [None, Some(SHORT_SYMBOLS + 3)] {
+        let mut rx = RxHandoffFixed::new(RxConfig::new(FS), fx, HandoffConfig::default());
+        let mut acquired = Vec::new();
+        let mut tags = Vec::new();
+        let mut marks = Vec::new();
+        let mut hold = Vec::new();
+        for (n, &x) in adc.iter().enumerate() {
+            let step = rx.push(x, usize::MAX);
+            acquired.extend(step.acquired);
+            hold.push(step.hold);
+            for b in step.beats {
+                match b {
+                    HandoffBeat::Sample { first: Some(s), .. } => tags.push(s.packet),
+                    HandoffBeat::End(e) => marks.push((n, e)),
+                    HandoffBeat::Sample { .. } => {}
+                }
+            }
+            if let [_, b] = acquired[..] {
+                if n == b.decided_at + 5 {
+                    rx.signal(1, stale);
+                    assert!(rx.hold());
+                }
+                if n == b.fft_start + SIGNAL_END + 180 {
+                    rx.signal(2, Some(SHORT_SYMBOLS));
+                }
+            }
+        }
+        let (a, b) = (acquired[0], acquired[1]);
+        assert_eq!(tags, [1, 2]);
+        let end = b.fft_start + SIGNAL_END + 80 * SHORT_SYMBOLS + B;
+        assert_eq!(
+            marks,
+            [
+                (b.decided_at, HandoffEnd::Acquisition),
+                (end + HANDOFF_TAIL - 1, HandoffEnd::Packet)
+            ]
+        );
+        assert!(hold[a.decided_at..end].iter().all(|h| *h));
+        assert!(hold[end..].iter().all(|h| !*h));
+        assert!(!hold[a.decided_at - 1]);
+    }
+}
+
+#[test]
+fn the_word_handed_on_is_the_acquisitions_also_with_a_coarse_weight() {
+    // With a coarse weight the CFO handed on is neither the fine nor the coarse estimate:
+    // the stream's word, its rotation and its offset estimate use the one handed on.
+    let fx = FixedRxConfig {
+        coarse_weight_64: 15,
+        ..FixedRxConfig::default()
+    };
+    let (adc, _) = scene(&[SHORT], 700, 900, -33.0, 2);
+    let log = run(
+        &adc,
+        fx,
+        HandoffConfig::default(),
+        |_| usize::MAX,
+        verdict_at(180, Some(SHORT_SYMBOLS)),
+    );
+    let a = log.acquired[0];
+    assert!(a.cfo_phase != a.fine_phase && a.cfo_phase != a.coarse_phase);
+    let count = log.beats.len() - 1;
+    assert_eq!(log.samples(0, count), reference(&adc, &a, &fx)[..count]);
+    assert_eq!(
+        log.beats[0].1,
+        HandoffBeat::Sample {
+            z: reference(&adc, &a, &fx)[0],
+            first: Some(HandoffStart {
+                cfo_phase: a.cfo_phase,
+                packet: 1
+            })
+        }
+    );
+
+    // The offset's estimate too: at 6 dB the two estimates of the CFO are far enough apart
+    // in some frames for the offset to come out differently from each (the rotator's table
+    // is read one address on from 610 Hz of difference), and the stream has the one of the
+    // word handed on.
+    let mut told_apart = 0;
+    for seed in 0..40 {
+        let (adc, _) = scene_at(6.0, &[SHORT], 700, 900, -33.0, 100 + seed);
+        let log = run(
+            &adc,
+            fx,
+            HandoffConfig::default(),
+            |_| usize::MAX,
+            |_, _| None,
+        );
+        let Some(&a) = log.acquired.first() else {
+            continue;
+        };
+        let field = &adc[a.fft_start..];
+        let of = |word| ltf_dc_offset_fixed(field, 0, word, &fx).unwrap();
+        if of(a.cfo_phase) == of(a.fine_phase) {
+            continue;
+        }
+        told_apart += 1;
+        let count = 400;
+        assert_eq!(log.samples(0, count), reference(&adc, &a, &fx)[..count]);
+    }
+    assert!(told_apart >= 3, "{told_apart}");
 }
 
 #[test]
@@ -637,7 +800,10 @@ fn a_new_declaration_aborts_the_open_stream_and_opens_its_own() {
             b.decided_at + 20,
             HandoffBeat::Sample {
                 z: reference(&adc, &b, &fx)[0],
-                first: Some(b.cfo_phase)
+                first: Some(HandoffStart {
+                    cfo_phase: b.cfo_phase,
+                    packet: 2
+                })
             }
         )
     );
@@ -667,6 +833,65 @@ fn a_new_declaration_aborts_the_open_stream_and_opens_its_own() {
         (b.decided_at + 40, HandoffBeat::End(HandoffEnd::Acquisition))
     );
     assert_eq!(blocked.beats[count + 1].0, b.decided_at + 40);
+
+    // A first packet whose last sample was taken, its end mark still waiting for the
+    // reader when the second is declared, ends as a packet.
+    let last = a.fft_start + SIGNAL_END + 80 * SHORT_SYMBOLS + B + HANDOFF_TAIL - 1;
+    let done = run(
+        &adc,
+        fx,
+        HandoffConfig::default(),
+        |n| match n {
+            n if n < last => usize::MAX,
+            n if n == last => 1,
+            n if n <= b.decided_at => 0,
+            _ => usize::MAX,
+        },
+        verdict_at(180, Some(SHORT_SYMBOLS)),
+    );
+    let count = last - a.fft_start + 1;
+    assert_eq!(
+        done.beats[count],
+        (b.decided_at + 1, HandoffBeat::End(HandoffEnd::Packet))
+    );
+    assert!(matches!(
+        done.beats[count + 1].1,
+        HandoffBeat::Sample { first: Some(s), .. } if s.packet == 2
+    ));
+
+    // A reader that stops with the next sample 512 behind the second declaration's: the
+    // loss and the declaration fall in one period, and the mark is the declaration's.
+    // Stopped one sample earlier, the stream is lost a period before, and the mark says so.
+    for (stop, mark, lost_at) in [
+        (b.decided_at - ADC_HISTORY, HandoffEnd::Acquisition, None),
+        (
+            b.decided_at - ADC_HISTORY - 1,
+            HandoffEnd::Overrun,
+            Some(b.decided_at - 1),
+        ),
+    ] {
+        let log = run(
+            &adc,
+            fx,
+            HandoffConfig::default(),
+            |n| {
+                if n >= stop && n < b.decided_at {
+                    0
+                } else {
+                    usize::MAX
+                }
+            },
+            |_, _| None,
+        );
+        assert_eq!(
+            log.beats[stop - a.fft_start],
+            (b.decided_at, HandoffBeat::End(mark))
+        );
+        match lost_at {
+            None => assert_eq!(log.holds(), [(a.decided_at, adc.len())]),
+            Some(l) => assert_eq!(log.holds(), [(a.decided_at, l), (b.decided_at, adc.len())]),
+        }
+    }
 
     // A reader with no room until both streams are lost (each 512 periods after its T1)
     // gets one abort mark for the two: a mark that finds the one before it still waiting
@@ -797,7 +1022,7 @@ fn an_invalid_configuration_hands_on_nothing_and_builds_no_table() {
         assert!(!fx.is_valid());
         assert!(nco_table(&fx).is_empty() && cordic_table(&fx).is_empty());
         assert_eq!(nco_rotator(12345, &fx), (0, 0));
-        assert_eq!(cordic_angle(3, 4, &fx), 0);
+        assert_eq!(cordic_angle(-3, 4, &fx), 0);
         assert!(ltf_taps(&fx).iter().all(|t| *t == (0, 0)));
         assert!(acquisitions_fixed(&adc, &RxConfig::new(FS), &fx).is_empty());
         let log = run(

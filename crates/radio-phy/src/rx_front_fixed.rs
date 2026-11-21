@@ -996,9 +996,11 @@ pub fn acquisitions_fixed(
 }
 
 /// Depth of the second history, of the ADC's own samples (ADR 0008, decision 1): as deep as
-/// the history the decision reads ([`HISTORY`]). A declaration comes at most
-/// 223 + [`MAX_DECISION_LATENCY`] + the back-off samples after its T1's window began, so the
-/// two long symbols and everything after them are still in it.
+/// the history the decision reads ([`HISTORY`]). The decision refuses a candidate whose
+/// short training field has left that history, which keeps T1's window in this one when
+/// the acquisition is declared (274 to 277 samples after the window began in the gate's
+/// scenes). The first beat must follow while it is still there: a `start_delay` beyond
+/// some 230 periods always loses the stream.
 pub const ADC_HISTORY: usize = HISTORY;
 /// Samples the stream runs on after the hold's end, the frame's nominal last sample: the
 /// decoder's timing tracker moves its windows with the transmitter's clock, four samples
@@ -1050,16 +1052,27 @@ pub enum HandoffEnd {
     Overrun,
 }
 
+/// What a stream's first beat carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandoffStart {
+    /// The acquisition's CFO word ([`FixedAcquisition::cfo_phase`]).
+    pub cfo_phase: i64,
+    /// The packet's tag: a counter of the packets opened, modulo 256. The decoder gives it
+    /// back with its verdict ([`RxHandoffFixed::signal`]), so that a verdict on a packet
+    /// that a new acquisition has replaced meanwhile is not taken for the new one.
+    pub packet: u8,
+}
+
 /// One beat of the hand-off's stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandoffBeat {
-    /// A sample of [`handoff_fixed`]'s stream, [`Y_BITS`] wide; `first` carries the CFO word
-    /// on the first sample of T1's FFT window, which is rotated by the phase zero.
+    /// A sample of [`handoff_fixed`]'s stream, [`Y_BITS`] wide; `first` is set on the first
+    /// sample of T1's FFT window, which is rotated by the phase zero.
     Sample {
         /// The sample.
         z: IQ,
-        /// The acquisition's CFO word, on a stream's first sample only.
-        first: Option<i64>,
+        /// The packet's CFO word and tag, on a stream's first sample only.
+        first: Option<HandoffStart>,
     },
     /// The end or abort mark; a beat of its own.
     End(HandoffEnd),
@@ -1079,6 +1092,7 @@ pub struct HandoffStep {
 /// A declared packet whose samples are being handed on.
 #[derive(Debug, Clone, Copy)]
 struct Replay {
+    packet: u8,
     fft_start: usize,
     cfo_phase: i64,
     dc: IQ,
@@ -1110,7 +1124,9 @@ struct Replay {
 /// packet is open ends it with an abort mark and opens its own (the hold stays up); a reader
 /// that falls [`ADC_HISTORY`] samples behind loses the stream and the hold. Every packet
 /// opened ends in one mark, also one whose first sample was never taken; a mark that finds
-/// the one before it still waiting for the reader is not sent.
+/// the one before it still waiting for the reader is not sent. A new acquisition and an
+/// overrun in the same period give the acquisition's mark. A packet whose last sample was
+/// taken ends as a packet whatever comes before its mark is taken.
 ///
 /// The front searches on while a packet is read; what it should search for then is not
 /// decided (ADR 0008, decision 1). The clock-exact schedule is the RTL's.
@@ -1122,6 +1138,7 @@ pub struct RxHandoffFixed {
     replay: Option<Replay>,
     hold: bool,
     mark: Option<HandoffEnd>,
+    opened: u8,
 }
 
 impl RxHandoffFixed {
@@ -1134,6 +1151,7 @@ impl RxHandoffFixed {
             replay: None,
             hold: false,
             mark: None,
+            opened: 0,
         }
     }
 
@@ -1142,12 +1160,17 @@ impl RxHandoffFixed {
         self.hold
     }
 
-    /// The decoder's verdict on the open packet's SIGNAL: its number of data symbols, or
-    /// `None` when it did not decode. The first verdict for a packet counts; one with no
-    /// packet open is ignored. The hold ends at the back-off after the last symbol's window,
-    /// at once if that is past or SIGNAL failed.
-    pub fn signal(&mut self, data_symbols: Option<usize>) {
-        let Some(r) = self.replay.as_mut().filter(|r| !r.verdict) else {
+    /// The decoder's verdict on SIGNAL of the packet tagged `packet` (the tag of its first
+    /// beat): its number of data symbols, or `None` when it did not decode. The first
+    /// verdict for a packet counts; one for a packet that is not the open one is ignored.
+    /// The hold covers the samples to the back-off after the last symbol's window: it is
+    /// down at once if the first sample after them has been pushed, or SIGNAL failed.
+    pub fn signal(&mut self, packet: u8, data_symbols: Option<usize>) {
+        let Some(r) = self
+            .replay
+            .as_mut()
+            .filter(|r| r.packet == packet && !r.verdict)
+        else {
             return;
         };
         match data_symbols {
@@ -1155,7 +1178,8 @@ impl RxHandoffFixed {
                 r.verdict = true;
                 r.hold_end = packet_end(r.fft_start, symbols, self.front.b);
                 r.last = r.hold_end.saturating_add(HANDOFF_TAIL);
-                if self.front.n >= r.hold_end {
+                // As in `push`: the hold is down with sample `hold_end`, not before it.
+                if self.front.n > r.hold_end {
                     self.hold = false;
                 }
             }
@@ -1214,7 +1238,10 @@ impl RxHandoffFixed {
             if r.read > n {
                 break;
             }
-            let first = (r.read == r.fft_start).then_some(r.cfo_phase);
+            let first = (r.read == r.fft_start).then_some(HandoffStart {
+                cfo_phase: r.cfo_phase,
+                packet: r.packet,
+            });
             let v = remove_dc(self.x.get(r.read), r.dc);
             let z = turn(v, &mut r.phase, r.cfo_phase, Y_BITS, &fx, &self.front.nco);
             r.read += 1;
@@ -1230,8 +1257,14 @@ impl RxHandoffFixed {
 
     /// Opens the packet of an acquisition declared at sample `n`.
     fn open(&mut self, a: &FixedAcquisition, n: usize) {
-        if self.replay.is_some() {
-            self.close(HandoffEnd::Acquisition);
+        // A packet whose last sample has been taken ends as a packet, even if its end mark
+        // was still waiting for the reader.
+        if let Some(old) = self.replay {
+            self.close(if old.read >= old.last {
+                HandoffEnd::Packet
+            } else {
+                HandoffEnd::Acquisition
+            });
         }
         // Both long symbols are in the history: a declaration follows them and comes within
         // the history's depth of T1 (see [`ADC_HISTORY`]). The estimate is there for every
@@ -1239,7 +1272,9 @@ impl RxHandoffFixed {
         let field: Vec<(i16, i16)> = (0..PAIR_LEN).map(|k| self.x.get(a.fft_start + k)).collect();
         let dc = ltf_dc_offset_fixed(&field, 0, a.cfo_phase, &self.front.fx).unwrap_or_default();
         let hold_end = packet_end(a.fft_start, MAX_DATA_SYMBOLS, self.front.b);
+        self.opened = self.opened.wrapping_add(1);
         self.replay = Some(Replay {
+            packet: self.opened,
             fft_start: a.fft_start,
             cfo_phase: a.cfo_phase,
             dc,

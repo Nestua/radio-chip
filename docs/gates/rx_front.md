@@ -1868,8 +1868,9 @@ were not rerun.
 
 ## 2026-11-21 · G0 + model gate + measurement · the streaming hand-off: second history, replay, hold
 
-Commit cae398e (on 128c559, after #57 and #58). Commands:
-`cargo test -p radio-phy --test g2_rx_handoff` (10 pass), `--test g2_rx_ofdm` (27 pass),
+Commits cae398e (first version) and the one carrying this entry (after the review below),
+on 128c559 (after #57 and #58). Commands:
+`cargo test -p radio-phy --test g2_rx_handoff` (12 pass), `--test g2_rx_ofdm` (27 pass),
 `--test g2_rx_front` (23 pass);
 `cargo run -q --release -p radio-tools --bin rxper -- stream 2000` →
 `reports/rx_front_stream.txt` (2.5 min on 10 cores).
@@ -1881,35 +1882,42 @@ acquisitions, traces and G3 vectors are the same.
 - **Second history:** the ADC's samples as they come, 512 deep (`ADC_HISTORY`), written
   every sample.
 - **Opening:** at the sample an acquisition is declared the offset is taken from the 128
-  samples of the two long symbols in that history (`ltf_dc_offset_fixed`), the hold is
-  raised and a stream is opened. Its first beat comes `start_delay` periods later (20: the
-  ≈ 160 clocks of the estimate at 8 clocks a sample).
+  samples of the two long symbols in that history (`ltf_dc_offset_fixed`, with the CFO word
+  handed on), the hold is raised and a packet is opened with a tag (*new*: a counter of
+  the packets opened, modulo 256). Its first beat comes `start_delay` periods later (20:
+  the ≈ 160 clocks of the estimate at 8 clocks a sample; beyond some 230 periods T1's
+  window has left the history and the stream is always lost).
 - **Stream:** beats of one 13-bit sample each, `handoff_fixed` of the ADC's stream cut at
   T1's FFT window: *new* — the first sample is rotated by the phase zero, the phase steps
-  back by the CFO word per sample. The first beat carries the CFO word. At most `rate`
-  beats a sample period (8) and at most what the reader takes (`room`), never a sample the
-  antenna has not given: eight a period until the reader has caught up, one a period after.
-  Neither number changes a sample.
-- **Verdict:** the decoder calls `signal(Some(data symbols))` or `signal(None)` once per
-  packet (*new*: the first call counts; `decode_signal_fixed` gives it from the stream's
-  first 208 samples).
-- **Hold:** up from the declaration's sample to the frame's nominal last sample,
-  T1's window + 208 + 80·N + the back-off; dropped at once on `None` or when that sample
-  has passed; without a verdict the watchdog is N = 1366 (4095 octets at 6 Mb/s,
-  5.47 ms). The level reported with a sample is the hold after that sample; the radio's
-  delay is its own (`rxagc loop`: 2 µs late costs nothing).
+  back by the CFO word per sample. The first beat carries the CFO word and the tag. At most
+  `rate` beats a sample period (8) and at most what the reader takes (`room`), never a
+  sample the antenna has not given: eight a period until the reader has caught up, one a
+  period after. Neither number changes a sample.
+- **Verdict:** the decoder calls `signal(tag, Some(data symbols))` or `signal(tag, None)`
+  (`decode_signal_fixed` gives it from the stream's first 208 samples). *New:* it counts
+  only for the open packet of that tag, and only the first time: the verdict comes beside
+  the stream and may arrive after a new acquisition has replaced its packet.
+- **Hold:** covers the samples from the declaration's to the frame's nominal last, the one
+  before T1's window + 208 + 80·N + the back-off (`end`). The level reported with a sample
+  is the hold over that sample: it is down with sample `end`, whether the verdict came long
+  before or in the last sample's period; a verdict that comes after sample `end` was pushed
+  drops it at once, as `signal(tag, None)` does. Without a verdict the watchdog is
+  N = 1366 (4095 octets at 6 Mb/s, 5.47 ms). The radio's delay is its own (`rxagc loop`:
+  2 µs late costs nothing).
 - **End:** *new* — the stream runs `HANDOFF_TAIL` = 8 samples past the hold's end and
   closes with an end mark, a beat of its own. The tail is for the decoder's timing
   tracker: from a transmitter 40 ppm slow the longest frame is 4.4 samples longer and the
   last window is moved 4 late; the default back-off of 4 just holds it, a front with none
   does not.
-- **Marks:** end (`Packet`, `Stopped` after `signal(None)`) and abort (`Acquisition`: a
-  new declaration while a packet is open — its own stream follows and the hold stays up;
+- **Marks:** end (`Packet`; `Stopped` after `signal(tag, None)`) and abort (`Acquisition`:
+  a new declaration while a packet is open — its own stream follows and the hold stays up;
   `Overrun`: the next sample to hand on is 512 behind the newest — the hold drops).
-  *New:* every opened packet ends in exactly one mark, also one whose first sample was
-  never taken, except that a mark which finds the one before it still waiting for the
-  reader is not sent (one register, the first mark stays: it closes the stream the reader
-  was in).
+  *New:* every opened packet ends in one mark, also one whose first sample was never
+  taken, with these rules: a mark waits for a beat of room, and one that finds the mark
+  before it still waiting is not sent (one register; the first stays: it closes the stream
+  the reader was in); a packet whose last sample has been taken ends as `Packet` even if a
+  new declaration comes before its mark is taken; a new declaration and an overrun in the
+  same period give `Acquisition`. With `rate` 0 nothing is ever sent.
 - The front goes on searching while a packet is open, as `RxFrontFixed` does; what it
   should search for then is still not decided (ADR 0008, decision 1).
 - Timing is in sample periods; the clock-exact schedule is the RTL's.
@@ -1917,95 +1925,156 @@ acquisitions, traces and G3 vectors are the same.
 **Gate.** The reference for the samples is `handoff_fixed` (gated by hand and against the
 float chain above); pace, hold and marks are worked by hand from the rules. The tests were
 written before the model and failed to compile; 7 of 10 passed on the first run of the
-model, 3 failed on the tests' own expectations (the declaration is 270 to 290 samples
-after T1's window, not "some 290"; a fast transmitter moves the windows early, a slow one
-late; an invalid configuration panicked, below). Scenes: frames at −12 dBFS, 30 dB,
-±12.5 to ±40 ppm, a DC offset of −20 dBFS.
-- samples = `handoff_fixed(&adc[fft_start..], 0, word)` to the sample, the word on the
-  first beat only, the hold exactly [declaration, T1 + 208 + 80·N + 4), the mark in the
-  last sample's period (three scenes);
+model, 3 failed on the tests' own expectations (the declaration is 274 to 277 samples
+after T1's window in these scenes, not "some 290"; a fast transmitter moves the windows
+early, a slow one late; an invalid configuration panicked, below). The tests for the
+review's findings were written after it, with the corrections. Scenes: frames at −12 dBFS,
+30 dB, ±12.5 to ±40 ppm, a DC offset of −20 dBFS.
+- samples = `handoff_fixed(&adc[fft_start..], 0, word)` to the sample, the word and tag on
+  the first beat only, the hold exactly [declaration, T1 + 208 + 80·N + 4), the mark in the
+  last sample's period (three scenes); the same with a coarse weight of 15/64, where the
+  word handed on is neither estimate, and at 6 dB in the frames where the offset's estimate
+  differs between the two words;
 - catching up by hand: with L samples waiting at the first push, eight beats for
   ⌊(L − 8)/7⌋ + 1 periods, then the rest, then one a period: 43 periods at L = 295
   (ADR 0008, decision 3, said 43 for 300); also at 3 beats a period;
 - the same beats whatever the reader's pace (5 beats every third period; 1 a period with
   a start delay of 100);
 - `signal(None)`: hold down with the call, `Stopped` alone in the next period, the next
-  frame its own stream; a late verdict ends hold and stream at once; a second verdict
-  changes nothing; the watchdog at N = 1366 (also for a verdict above it);
+  frame its own stream; a late verdict ends hold and stream at once; a verdict in the last
+  sample's period and one a period later, to the sample; a second verdict changes nothing;
+  a length of no symbols ends the packet at SIGNAL's window as a packet; the watchdog at
+  N = 1366 (also for a verdict above it);
+- a verdict with the tag of a packet a new acquisition has replaced, as a failure and as a
+  length: the new packet's hold, stream and own verdict are untouched;
 - a reader that takes nothing loses hold and stream 512 periods after T1; at half the
   antenna's pace the loss is at the period the hand count gives, to the sample; an end
   mark waiting 700 periods for room is not an overrun;
 - two frames without a verdict: `Acquisition` in the period of the second declaration,
-  the second stream 20 periods later with its own word, one hold across both; two streams
-  lost to a stalled reader give one mark, and it is the first one's;
+  the second stream 20 periods later with its own word and tag, one hold across both; a
+  delivered first packet whose mark waited ends as `Packet`; a loss and a declaration in
+  one period give `Acquisition`, a loss one period earlier `Overrun`; two streams lost to
+  a stalled reader give one mark, and it is the first one's;
 - the longest frame (4095 octets, 6 Mb/s, −40 ppm) decodes from the stream's samples with
   the same timing log as from the whole buffer; cut at the hold's end it decodes with the
   default back-off and not with none.
 
-**Mutations** (cp + touch; `g2_rx_handoff` and `g2_rx_front` after each): 32 of 32 fail —
-both comparisons of the hold's end, the overrun's bound and its `read < last`, the stream's
-end test, `read > n`, the word's beat, the first phase, the tail (in the verdict and at
+**Mutations** (cp + touch; `g2_rx_handoff` and `g2_rx_front` after each). First version:
+32 of 32 failed. After the review, on the corrected model: 42 mutants, 41 failed and one
+survived (the offset estimated with the fine word instead of the one handed on: no scene
+told the two apart), which fails now with the 6 dB scenes — both comparisons of the hold's
+end in `push` and in `signal`, the overrun's bound and its `read < last`, the stream's end
+test, `read > n`, the first beat, the first phase, the tail (in the verdict and at
 opening), the start delay, the rate, a free mark, the last mark winning, a close that
-keeps the hold, the back-off, the symbol's 80, the clamp at 1366, the verdict's flag and
-filter, the offset (zeroed; estimated one sample off), no abort on a new declaration,
-`open_at`, the word's sign, a history of 256, SIGNAL's end at 200, a hold not raised, the
-rotator's output width, three of the configuration guards.
+keeps the hold, the back-off, the symbol's 80, the clamp at 1366, the verdict's flag, the
+tag ignored, the tag never counted, a delivered packet aborted, no abort at all, the word
+and the offset from the fine estimate, no symbols as a stop, the overrun tested before the
+declaration, `open_at`, the word's sign, a history of 256, SIGNAL's end at 200, a hold not
+raised, the rotator's output width, five configuration guards. Not killable and left: no
+mark for a replaced stream that was never read (no true frames declare twice within the
+history's depth), and the validity guard in `push` (the front inside does nothing either).
 
 **Also changed in the model.**
 - `decode_signal_fixed`: SIGNAL alone from the two long symbols and its window, the head
-  of `decode_ppdu_fixed` taken out as one function (`signal_with`). Gate
+  of `decode_ppdu_fixed` taken out as one function (`signal_with`; the length's second
+  check there was a copy of `signal_from_soft`'s and is gone). Gate
   (`signal_alone_is_the_frames_signal_from_its_first_208_samples`): rate and length as
   transmitted for the eight rates and random lengths, equal to the whole decoder's; one
-  sample short is `Truncated`; on noise its errors are the whole decoder's. Two of three
-  mutants of the moved head survived at first (SIGNAL decoded as symbol 1; the tracker not
-  stepped over SIGNAL) — a gap older than this change: nothing pinned the first entries of
-  the timing log. `the_timing_log_starts_at_signal` does (ε·(112 + 80·i) by hand for a
-  tracker that applies 40 ppm); 3 of 3 fail now.
+  sample short is `Truncated`; the caller's tracker places the window (moved one sample it
+  needs 209); on noise its errors are the whole decoder's. Two of three mutants of the
+  moved head survived at first (SIGNAL decoded as symbol 1; the tracker not stepped over
+  SIGNAL) — a gap older than this change: nothing pinned the first entries of the timing
+  log. `the_timing_log_starts_at_signal` does (ε·(112 + 80·i) by hand for a tracker that
+  applies 40 ppm); 4 of 4 fail now (the fourth: the caller's tracker ignored).
 - **A panic found by the new gate:** `RxFrontFixed::new`, `nco_table`, `nco_rotator`,
   `cordic_table`, `cordic_angle` and `ltf_taps` panicked (or would have built a table of
   2^28 entries) on an invalid `FixedRxConfig`, against `RxFrontFixed`'s own documentation.
-  They return empty tables, zeros and a front that never acquires now.
+  They return empty tables, zeros and a front that never acquires now. No caller used an
+  invalid configuration on purpose (`rvec` uses the default; `tables()` already required a
+  valid front).
 - `correct_fixed` and `remove_dc_fixed` share their per-sample step with the replay (their
   by-hand gates unchanged).
 
 **Measurement — `rxper stream 2000`** (the seven points, frames and receiver of `fixedw`;
-frames lost of 2000, 1000 octets, clock offset uniform in ±40 ppm, the frame at −12 dBFS).
+frames lost of 2000, 1000 octets, clock offset uniform in ±40 ppm, the frame at −12 dBFS;
+`rxper fixedw 40` is byte-identical before and after the tool's change).
 `whole` is the hand-off rotated from the buffer's first sample (`fixedw`'s column
 `word start`, reproduced to the frame); `slice` is rotated from T1's window; `stream` is
-every sample through `RxHandoffFixed` with the integer decoder as reader, which gives
-SIGNAL's verdict 180 periods after SIGNAL's window and decodes at the end mark, knowing
-nothing of where the frame is.
+every sample through `RxHandoffFixed` with the integer decoder as reader: it sees the
+beats alone, takes each at once, gives SIGNAL's verdict with the stream's tag 50 periods
+after the beat that completes SIGNAL's window, and decodes at the end mark.
 
-| Point | whole | slice | stream | lost by one only | declared again / aborted / stopped / overrun |
-|---|---|---|---|---|---|
-| AWGN 6 Mb/s 3.5 dB | 220 | 219 | 219 | 0 / 0 | 0 / 0 / 0 / 0 |
-| AWGN 54 Mb/s 20 dB | 191 | 189 | 189 | 0 / 0 | 0 / 0 / 0 / 0 |
-| AWGN 54 Mb/s 35 dB | 0 | 0 | 0 | 0 / 0 | 0 / 0 / 0 / 0 |
-| TGn D 18 Mb/s 15.5 dB | 181 | 179 | 179 | 0 / 0 | 0 / 0 / 0 / 0 |
-| TGn D 54 Mb/s 26.5 dB | 221 | 217 | 217 | 0 / 0 | 0 / 0 / 0 / 0 |
-| TGn E 54 Mb/s 26.5 dB | 143 | 145 | 145 | 0 / 0 | 0 / 0 / 0 / 0 |
-| TGn E 54 Mb/s 45 dB | 0 | 0 | 0 | 0 / 0 | 0 / 0 / 0 / 0 |
+| Point | whole | slice | stream | lost by whole only / slice only | by stream only / slice only | declared again / aborted / stopped |
+|---|---|---|---|---|---|---|
+| AWGN 6 Mb/s 3.5 dB | 220 | 219 | 219 | 3 / 2 | 0 / 0 | 0 / 0 / 0 |
+| AWGN 54 Mb/s 20 dB | 191 | 189 | 189 | 19 / 17 | 0 / 0 | 0 / 0 / 0 |
+| AWGN 54 Mb/s 35 dB | 0 | 0 | 0 | 0 / 0 | 0 / 0 | 0 / 0 / 0 |
+| TGn D 18 Mb/s 15.5 dB | 181 | 179 | 179 | 2 / 0 | 0 / 0 | 0 / 0 / 0 |
+| TGn D 54 Mb/s 26.5 dB | 221 | 217 | 217 | 9 / 5 | 0 / 0 | 0 / 0 / 0 |
+| TGn E 54 Mb/s 26.5 dB | 143 | 145 | 145 | 8 / 10 | 0 / 0 | 0 / 0 / 0 |
+| TGn E 54 Mb/s 45 dB | 0 | 0 | 0 | 0 / 0 | 0 / 0 | 0 / 0 / 0 |
 
 1. **The stream loses the frames the slice loses, frame for frame**, at every point: the
-   replay, the verdict from the stream and the end from SIGNAL's length change nothing.
-2. **The replay's phase is free:** starting the rotation at T1's window instead of the
-   buffer's first sample moves 1 to 4 frames of 2000 either way (the rotator's table is
-   read at other addresses). G2 was measured with `whole`; the hardware's stream is
-   `slice`. The full G2 grid was not rerun with it.
+   replay, the verdict from the stream and the end from SIGNAL's length change nothing
+   with a reader that always has room.
+2. **Where the rotation starts decides single frames near the edge:** up to 19 frames of
+   2000 are lost by one start only and 17 by the other at 54 Mb/s; the counts differ by
+   −2 to +4. G2 was measured with `whole`; the hardware's stream is `slice`. The full G2
+   grid was not rerun with it. (That the cause is the rotator's table being read at other
+   addresses is reasoned, not measured.)
 3. **The front did not declare a second time in any of 14 000 frames** of 1000 octets, so
    no stream was aborted by its own packet's data; none was stopped on a failed SIGNAL
-   either (at 6 Mb/s and 3.5 dB the frames are lost in the data).
+   either (at 6 Mb/s and 3.5 dB the frames are lost in the data). These two columns are
+   zero by measurement; a loss to the reader cannot occur in this tool and has no column.
+
+**Independent review (fresh agent; the code, the tests and ADR 0008's clauses, not the
+conclusions), 2026-11-21, on cae398e.** It confirmed by its own runs and reading: the
+samples' identity with `handoff_fixed` (also after a new declaration, after a stop and on
+a wrapped history), no stuck state, no panic on hostile pace numbers, `decode_ppdu_fixed`
+unchanged in the order of its checks and errors, `fixedw 40` byte-identical with `main`,
+the hand arithmetic, and that the tool's paths for stopped, aborted and lost streams work
+when forced. Found and corrected:
+- *a verdict had no packet identity:* one arriving after a new acquisition had replaced
+  its packet stopped the new packet (a failure) or set its length and blocked its own
+  verdict (a length). The tag above;
+- *a delivered packet got an abort mark* when a new declaration came before its end mark
+  was taken: `Packet` now;
+- *the hold's end was two comparisons,* a period apart between a timely and a last-period
+  verdict: one rule now, stated above;
+- *the tool's reader used the acquisition's position* to time its verdict, and its
+  `overrun` column was zero by construction: the verdict is timed from the beats now and
+  the column is gone; the report was regenerated (same counts);
+- the first journal text said the rotation's start "moves 1 to 4 frames": those were
+  differences of counts; per frame it is up to 19 and 17, now a column;
+- the ADR's paragraph said every packet ends in one mark without the exceptions; the
+  history's bound in the constant's documentation was not derived (restated as what the
+  decision guarantees and what the scenes measure); the start delay's limit was unstated;
+- ten surviving mutants: eight fail now (above), two are the unkillable ones named above;
+  one more it listed, the `needed` of a later `Truncated` in `decode_ppdu_fixed`, is older
+  than this change and is left.
+Not checked by it: the 2000-frame run, the first 35 mutants, `scripts/check.sh`, the
+clock-level buildability of a write and a read of the history in one period.
 
 **What this is not.** A model in sample periods with two pace numbers, not the hardware's
 schedule. A still gain (no gain control in `rxper`): `rxagc loop` still models the hold in
-the tool and is to be moved onto this model. One frame per buffer in the measurement;
-frames after a SIFS, a false SIGNAL with a long length and an overrun are in the unit
-tests only. The verdict's latency is one number (180 periods). No vectors for the RTL yet:
-they come with the hand-off's RTL, the last step of part d.
+the tool and is to be moved onto this model. One frame per buffer in the measurement, a
+reader that always has room; frames after a SIFS, a false SIGNAL with a long length, a
+stale verdict and an overrun are in the unit tests only. The verdict's latency is one
+number (50 periods after SIGNAL's window is read). No vectors for the RTL yet: they come
+with the hand-off's RTL, the last step of part d.
 
 **Open**
 - What the front searches for while a packet is open; a second declaration aborts the
   stream as the ADR says, and none was seen on true frames.
 - `rxagc`'s commands onto `RxHandoffFixed` (the hold, the release) and their reruns.
-- SIGNAL's reserved bit in the decoder.
-- The G2 grid with the replay's phase, if the 1 to 4 frames matter to anyone.
+- The G2 grid with the replay's phase.
+- A hold on a phantom SIGNAL (the entry above, finding 4): see the correction below.
+
+**Correction to the entry above (decision 2 as a closed loop), finding 4 and its "Open".**
+It proposed checking SIGNAL's reserved bit to halve the holds on a SIGNAL decoded from
+noise. The standard forbids rejecting a frame for it: "Bit 4 is reserved. It shall be set
+to 0 on transmit and ignored on receive" (IEEE Std 802.11-2024 §17.3.4.4, read in the local
+copy on 2026-11-21; `rx_ofdm.rs` already says so beside `decode_signal`). A receiver that
+checks it would drop frames of a future amendment that sets it. So that item is withdrawn
+as written; what else can end a hold on a phantom length (the level falling by the packet's
+height, a restart on a stronger packet) is a question for the founder, not yet asked.

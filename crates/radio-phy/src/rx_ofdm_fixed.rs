@@ -25,7 +25,7 @@ use crate::modulation::Modulation;
 use crate::ofdm::{
     data_subcarriers, fft_bin, pilot_polarity, FFT_SIZE, PILOT_BASE, PILOT_SUBCARRIERS,
 };
-use crate::ppdu::{data_symbols, long_training_sequence, MAX_PSDU_LEN};
+use crate::ppdu::{data_symbols, long_training_sequence};
 use crate::rx_front_fixed::{
     cordic_table, cordic_with, nco_table, rotate_with, FixedRxConfig, IQ, Y_BITS,
 };
@@ -888,10 +888,8 @@ fn signal_with(
     let w = window_of(z, fft_start, 0, tracking)?;
     let (soft, phi) =
         symbol_with(w, &ch, 0, Modulation::Bpsk, cfg, fx, tracking, t).ok_or(short)?;
+    // A length of 0 is refused there (`SignalLength`).
     let signal = signal_from_soft(&soft)?;
-    if !(1..=MAX_PSDU_LEN).contains(&signal.length) {
-        return Err(RxOfdmError::SignalLength);
-    }
     Ok((ch, signal, phi))
 }
 

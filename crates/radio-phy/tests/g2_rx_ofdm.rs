@@ -307,6 +307,15 @@ fn signal_alone_is_the_frames_signal_from_its_first_208_samples() {
         assert_eq!((s.rate, s.length), (rate, len), "{rate:?}");
         let d = decode_ppdu_fixed(&z, t1, &cfg, &fx, unknown(&fx)).unwrap();
         assert_eq!(d.signal, s);
+        // The caller's tracker places SIGNAL's window: moved one sample late it needs one
+        // sample more.
+        let mut late = unknown(&fx);
+        late.shift = 1;
+        assert!(matches!(
+            decode_signal_fixed(&z[..t1 + 208], t1, &cfg, &fx, late),
+            Err(RxOfdmError::Truncated { .. })
+        ));
+        assert!(decode_signal_fixed(&z[..t1 + 209], t1, &cfg, &fx, late).is_ok());
         // One sample short there is no SIGNAL yet.
         assert!(matches!(
             decode_signal_fixed(&z[..t1 + 207], t1, &cfg, &fx, unknown(&fx)),
