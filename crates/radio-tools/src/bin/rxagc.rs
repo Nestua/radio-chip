@@ -9,6 +9,7 @@
 //! - `pole`: what the DC blocker's pole costs 54 Mb/s frames with no offset to remove.
 //! - `cfo`: that cost against the size of the clock offset (ADR 0008).
 //! - `cand`: what the decoder could be handed instead, under the DC offsets of `dc` (ADR 0008).
+//! - `hold`: the gain held by the control's first lock or by the receiver's acquisition (ADR 0008).
 //!
 //! The scene: a 1000-octet frame, a clock offset uniform in ±40 ppm that sets CFO and
 //! sample-clock offset at 5.8 GHz (as `rxper`), noise, then `channel::FastAttackAgc` (power
@@ -106,6 +107,9 @@ struct Point {
     /// The clock offset's size drawn in this band of ppm instead of 0 to 40 (the sign and
     /// every other draw of the frame as without it).
     ppm_band: Option<(f64, f64)>,
+    /// The gain is held from this many samples after the packet's first sample instead of
+    /// from the first lock inside the packet (never before that lock).
+    hold_after: Option<usize>,
 }
 
 /// A receiver chain on the ADC's samples.
@@ -232,7 +236,8 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
     // The gain is held from the first lock inside the packet (assumed: a hold driven by the
     // receiver, ADR 0008's question); without it a peak of the data unlocks it again.
     let mut held = false;
-    if let Some(&at) = t.locks.iter().find(|l| **l > lead) {
+    if let Some(&lock) = t.locks.iter().find(|l| **l > lead) {
+        let at = pt.hold_after.map_or(lock, |after| lock.max(lead + after));
         held = t.changes.iter().any(|c| c.0 > at && c.0 < end);
         t.changes.retain(|c| c.0 <= at);
         t.locks.retain(|l| *l <= at);
@@ -550,6 +555,7 @@ fn per(frames: usize) {
                     per_index_dbfs: none(),
                     before_dbfs: none(),
                     ppm_band: None,
+                    hold_after: None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 for (c, curve) in curves.iter_mut().enumerate() {
@@ -604,6 +610,7 @@ fn per(frames: usize) {
                     per_index_dbfs: none(),
                     before_dbfs: none(),
                     ppm_band: None,
+                    hold_after: None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!(
@@ -668,6 +675,7 @@ fn level(frames: usize) {
                 per_index_dbfs: none(),
                 before_dbfs: none(),
                 ppm_band: None,
+                hold_after: None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(&format!("{idle:>5.0} dBFS"), &t, reference));
@@ -729,6 +737,7 @@ fn dc(frames: usize) {
                     per_index_dbfs: per_index,
                     before_dbfs: before,
                     ppm_band: None,
+                    hold_after: None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!("{}", row_line(&format!("{name}, {snr} dB"), &t, reference));
@@ -780,6 +789,7 @@ fn pole(frames: usize) {
             per_index_dbfs: none(),
             before_dbfs: none(),
             ppm_band: None,
+            hold_after: None,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(&format!("{snr} dB"), &t, reference));
@@ -811,6 +821,7 @@ fn pole(frames: usize) {
             per_index_dbfs: none(),
             before_dbfs: none(),
             ppm_band: None,
+            hold_after: None,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(name, &t, reference));
@@ -873,6 +884,7 @@ fn cfo(frames: usize) {
                 per_index_dbfs: none(),
                 before_dbfs: none(),
                 ppm_band: Some((lo, hi)),
+                hold_after: None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!(
@@ -950,6 +962,7 @@ fn cand(frames: usize) {
                 per_index_dbfs: per_index,
                 before_dbfs: before,
                 ppm_band: None,
+                hold_after: None,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(case, &t, reference));
@@ -977,6 +990,7 @@ fn cand(frames: usize) {
                     per_index_dbfs: per_index,
                     before_dbfs: none(),
                     ppm_band: None,
+                    hold_after: None,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!(
@@ -984,6 +998,68 @@ fn cand(frames: usize) {
                     row_line(&format!("{idle:.0} dBFS, {case}"), &t, reference)
                 );
             }
+        }
+    }
+}
+
+/// Who holds the gain: the control's first lock inside the packet (the assumption of every
+/// other command) against the receiver, from the latest sample at which its acquisition can
+/// be declared.
+fn hold(frames: usize) {
+    let ltf = |name: &'static str, chain: Chain| Column {
+        ltf: true,
+        ..col(name, chain)
+    };
+    let columns = [
+        ltf("float ltf", Chain::Float),
+        col("float 2^-7", Chain::Float),
+        ltf("int 13/1 ltf", INT_13_1),
+    ];
+    let reference = 0;
+    const IDLE: f64 = -30.0;
+    // First sample of T1 (192) + the latest declaration (223, `rx_front::HISTORY`) + the
+    // decision latency (64).
+    const DECLARED: usize = 192 + 223 + 64;
+    preamble_text("hold", frames);
+    println!(
+        "# Noise at {IDLE} dBFS at the largest gain, no DC offset. Rows 'lock': the gain held from the\n\
+         # control's first lock inside the packet (as everywhere else). Rows 'declared': held from\n\
+         # {DECLARED} samples after the packet's first, the latest the acquisition is declared (T1 + 223\n\
+         # + 64), or from the first lock if that is later: until then the control is free. The\n\
+         # two rows of a point are the same frames.\n\
+         #   2^-7 = the decoder handed the blocker's output (the chain as it is);\n\
+         #   ltf  = the decoder handed the samples before the blocker less the offset estimated\n\
+         #          from the two long training symbols."
+    );
+    header(&columns, reference);
+    let d = Channel::Tgn(TgnModel::D);
+    let points: [(&str, Channel, Rate, f64); 9] = [
+        ("AWGN 54 Mb/s 25 dB", Channel::Awgn, Rate::R54, 25.0),
+        ("AWGN 54 Mb/s 30 dB", Channel::Awgn, Rate::R54, 30.0),
+        ("AWGN 54 Mb/s 40 dB", Channel::Awgn, Rate::R54, 40.0),
+        ("AWGN 54 Mb/s 60 dB", Channel::Awgn, Rate::R54, 60.0),
+        ("AWGN 6 Mb/s 30 dB", Channel::Awgn, Rate::R6, 30.0),
+        ("AWGN 6 Mb/s 60 dB", Channel::Awgn, Rate::R6, 60.0),
+        ("TGn D 54 Mb/s 40 dB", d, Rate::R54, 40.0),
+        ("TGn D 54 Mb/s 60 dB", d, Rate::R54, 60.0),
+        ("TGn D 6 Mb/s 30 dB", d, Rate::R6, 30.0),
+    ];
+    println!("{}", head_line("point, the gain held from", &columns));
+    for (pi, (name, ch, rate, snr)) in points.into_iter().enumerate() {
+        for (what, hold_after) in [("lock", None), ("declared", Some(DECLARED))] {
+            let pt = Point {
+                scene: 8000 + pi as u64,
+                rate,
+                snr_db: snr,
+                ch,
+                idle_dbfs: IDLE,
+                per_index_dbfs: none(),
+                before_dbfs: none(),
+                ppm_band: None,
+                hold_after,
+            };
+            let t = run(&pt, &columns, reference, frames);
+            println!("{}", row_line(&format!("{name}, {what}"), &t, reference));
         }
     }
 }
@@ -999,8 +1075,9 @@ fn main() -> ExitCode {
         "pole" => pole(n.unwrap_or(2000)),
         "cfo" => cfo(n.unwrap_or(2000)),
         "cand" => cand(n.unwrap_or(2000)),
+        "hold" => hold(n.unwrap_or(2000)),
         _ => {
-            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand [frames]");
+            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold [frames]");
             return ExitCode::from(2);
         }
     }
