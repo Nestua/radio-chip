@@ -53,11 +53,11 @@ packet, turned by the acquisition's CFO word, 13 bits wide.
 
 | What the decoder is handed (54 Mb/s, frames lost of 2000) | no offset, AWGN 20 dB | no offset, TGn D 40 dB | offset −30 dBFS, AWGN 40 dB | offset −20 dBFS, AWGN 40 dB |
 |---|---|---|---|---|
-| the blocker's output, pole 2⁻⁷ (today) | CAND_A1 | CAND_A2 | CAND_A3 | CAND_A4 |
+| the blocker's output, pole 2⁻⁷ (today), integers | 412 | 251 | 19 | 98 |
 | the same, pole 2⁻⁹ / 2⁻¹¹ (`rxagc pole`) | 200 / 172 | 55 / 14 | — | — |
-| the samples before it, nothing removed | CAND_R1 | CAND_R2 | CAND_R3 | CAND_R4 |
+| the samples before it, nothing removed (float) | 167 | 0 | 377 | 1636 |
 | the blocker's estimate frozen at the acquisition (`rxfront agcdc`, float, other frames) | worse than the blocker left running (35 of 2000 against 8 at 25 dB) | | | |
-| **the offset from the long training field, integers, 13 bits** | CAND_L1 | CAND_L2 | CAND_L3 | CAND_L4 |
+| **the offset from the long training field, integers, 13 bits** (`in_shift` 2 in this run; 13 / 1 in `rx_front_dc_hold.txt`) | 170 | 0 | 0 | 0 |
 
 (The offset is `GainDc::per_index`, at that level at every gain; the packet settles at
 −10 dBFS. `rx_front_dc_cand.txt` has the offset before the gain, 6 Mb/s, TGn D and the 12-bit

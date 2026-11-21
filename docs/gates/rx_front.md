@@ -1541,3 +1541,80 @@ the configuration's check removed; the rotator's phase negated; A + 1.
 Not killed because equivalent: the CFO word reduced modulo 2^P before the multiplication by
 64 (the rotator reduces again; the reduction only keeps the product inside 64 bits).
 
+**Measurements** (`rxagc`, 2000 frames of 1000 octets per row, the scene of `rx_ofdm.md`'s
+stage B part 2: the gain-control model, ±40 ppm at 5.8 GHz, 12-bit ADC; a frame's random
+stream from the row and the frame's number).
+
+**1. The blocker's cost is the CFO's** (`rxagc cfo` → `reports/rx_front_dc_cfo.txt`, binary
+of 2ff20a4, run locally; no DC offset; 54 Mb/s; the clock offset's size in the band of the
+row; frames lost of 2000):
+
+| Clock offset | AWGN 20 dB: before the blocker / blocker 2⁻⁷ / LTF estimate (float) | TGn D 26.5 dB | TGn D 40 dB |
+|---|---|---|---|
+| 0 to 2 ppm | 189 / 190 / 188 | 213 / 213 / 215 | 0 / 0 / 0 |
+| 2 to 10 ppm | 186 / 188 / 192 | 236 / 231 / 235 | 0 / 0 / 0 |
+| 10 to 20 ppm | 189 / 208 / 192 | 231 / 241 / 237 | 0 / 3 / 0 |
+| 20 to 30 ppm | 178 / 268 / 179 | 235 / 483 / 237 | 0 / 195 / 0 |
+| 30 to 40 ppm | 163 / 919 / 166 | 223 / 1134 / 227 | 0 / 912 / 0 |
+
+- Below 10 ppm (58 kHz) the blocker in the decoder's path costs nothing; from 20 ppm on it
+  is the largest loss in the receiver. AWGN at 25 dB: 0 / 0 / 0 / 1 / 112 lost by band,
+  none before the blocker. The integer chain's columns say the same (report).
+- The guess of `rx_ofdm.md` holds as far as this test goes: the dependence on the CFO is
+  measured, the mechanism (the subcarrier next to DC on the skirt of a high-pass whose
+  memory is longer than a symbol) is the explanation that fits and was not isolated further.
+- The LTF estimate with nothing to remove is the samples before the blocker within the
+  run's noise in every band (paired: at most +17 −14).
+
+**2. The estimate from the long training field removes the offset and costs nothing**
+(`rxagc cand` → `reports/rx_front_dc_cand.txt`, binary of 2ff20a4 built and run on the build
+server; frames lost of 2000; float before the blocker / integer chain as it is (13 / 2,
+blocker 2⁻⁷) / float with the LTF estimate / integers 12 / 2 with it / integers 13 / 2 with it):
+
+| DC offset | AWGN 54 Mb/s 40 dB | AWGN 54 Mb/s 20 dB | AWGN 6 Mb/s 3.5 dB | TGn D 54 Mb/s 26.5 dB | TGn D 54 Mb/s 40 dB |
+|---|---|---|---|---|---|
+| none | 0 / 12 / 0 / 0 / 0 | 167 / 412 / 162 / 167 / 170 | 213 / 210 / 222 / 220 / 217 | 226 / 517 / 232 / 231 / 230 | 0 / 251 / 0 / 0 / 0 |
+| per index −40 dBFS | 0 / 11 / 0 / 0 / 0 | 231 / 416 / 163 / 177 / 179 | 256 / 217 / 219 / 223 / 222 | 334 / 515 / 230 / 228 / 231 | 42 / 250 / 0 / 0 / 0 |
+| per index −30 dBFS | 377 / 19 / 0 / 0 / 0 | 1207 / 403 / 162 / 172 / 170 | 1001 / 215 / 221 / 214 / 220 | 1231 / 535 / 229 / 231 / 228 | 978 / 264 / 0 / 0 / 0 |
+| per index −20 dBFS | 1636 / 98 / 0 / 0 / 0 | 1844 / 808 / 453 / 460 / 458 | 1801 / 215 / 219 / 224 / 223 | 1838 / 771 / 235 / 235 / 241 | 1744 / 418 / 0 / 0 / 0 |
+| before the gain −20 dBFS at the largest | 0 / 36 / 0 / 0 / 0 | 1834 / 636 / 417 / 427 / 434 | 1810 / 216 / 219 / 216 / 220 | 1540 / 544 / 238 / 235 / 238 | 125 / 283 / 0 / 0 / 0 |
+| before the gain −10 dBFS | 386 / 215 / 0 / 0 / 0 | 1989 / 1778 / 1743 / 1741 / 1741 | 1927 / 212 / 220 / 220 / 220 | 1905 / 1027 / 451 / 457 / 457 | 1047 / 642 / 0 / 0 / 0 |
+
+- Under every offset of the table the chain with the LTF estimate loses what it loses with
+  no offset, except where the gain control itself is disturbed: AWGN 20 dB under the
+  offsets at −20 dBFS (453 and 417 against 162: the gain changes in 0.39 of the frames
+  where it otherwise does not, report column `chg`), and the offset before the gain at
+  −10 dBFS at 20 and 26.5 dB, the blinded control of the 2026-11-19 entry (at 25 dB: 842 of
+  2000 in every LTF column). Those frames are lost before the decoder.
+- The integer estimate (whole ADC LSB) follows the float one: paired differences of the
+  13 / 2 column against the float LTF column are at most +24 −5 in the rows above and in
+  the size of stage B's own integer-against-float differences.
+- With the noise at the largest gain lowered to −48 and −54 dBFS (report, last two
+  sections) the 13-bit column with the estimate loses 214 and 254 at 6 Mb/s against the
+  float column's 214 and 238, and 196 and 224 against 186 and 199 at 54 Mb/s: the lower
+  edge of `rx_ofdm_agc_level.txt`, not moved by an estimate in whole LSB. The 12-bit
+  hand-off loses 240 and 336, 211 and 272 there.
+- 6 Mb/s at 10 dB loses no frame in any column but the unremoved one.
+
+**3. The gain held by the receiver instead of by the control's first lock**
+(`rxagc hold` → `reports/rx_front_dc_hold.txt`, binary of 6349c95, local): held from 479
+samples after the packet's first (T1 + 223 + 64, the latest declaration) with the control
+free until then, the float chain with the LTF estimate loses 2, 1, 5 and 0 frames of 2000
+at 54 Mb/s in AWGN at 25, 30, 40 and 60 dB, 2 and 4 through TGn D at 40 and 60 dB, where
+it loses none with the assumed hold; none at 6 Mb/s. The integer 13 / 1 column is the same
+frames. 530 to 546 of the 2000 6 Mb/s frames would leave the lock later without any hold.
+
+**What this is not.** One seed per row; `cand` was run once (on the server), `cfo` and
+`hold` once (locally). The offset is constant through a packet at a held gain by
+construction of the model; a real front end's drift and its transient at a gain change are
+not in it. The estimate uses the true model of the field (two identical symbols): a gain
+change or a phase jump inside the long training field breaks it and was not separated
+here. The hand-off measured with the estimate is 12 / 2 and 13 / 2 in `cand` and 13 / 1 in
+`hold`; ADR 0008 proposes 13 / 1 on `rx_ofdm_agc_level.txt`'s evidence that the two 13-bit
+ones do not differ. TGn B and E and other frame lengths were not run. The streaming front
+(`RxFrontFixed`) does not hold the second history or the replay yet.
+
+**Open**
+- The founder's decisions on ADR 0008.
+- `rxper` and `FixedOfdmConfig`'s defaults moved to the proposed hand-off, with the G2 rerun.
+- The estimate and the replay inside `RxFrontFixed` as a streaming model, then vectors.
