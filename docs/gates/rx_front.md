@@ -1731,3 +1731,137 @@ word negated (steps, the chain); a short stream not refused (by hand).
 - The second history and the replay inside `RxFrontFixed`, with the phase of the replay's
   first sample; then the hand-off's vectors.
 - The gain control's timer and hold input (`FastAttackAgc`).
+
+## 2026-11-21 · measurements · decision 2 as a closed loop: the control's timer and the front's hold
+
+Commit: the report from the commit before this entry's (the tool as reviewed). Command:
+`rxagc loop 2000` → `reports/rx_front_agc_loop.txt` (locally, 10 threads, about 15
+minutes). The model's side (`lock_hold`, `lock_hold_at_max`, `run_held`) is in `channel.md`
+under the same date.
+
+**What the loop is.** Per frame and per column: the gain control runs on the stream; the
+ADC's samples are formed from its trace; the integer front (`RxFrontFixed`) declares an
+acquisition; a hold is raised at that sample (or 40 or 400 samples later) and the control
+is run again with it; the decoder (`handoff_fixed`, `decode_ppdu_fixed`, tracker from the
+CFO word) reads SIGNAL. A SIGNAL that decodes drops the hold at the end its length gives
+(4 samples of back-off after the last FFT window), and a frame counts only if it decodes
+from the stream with the hold dropped there; a SIGNAL that fails drops the hold 180
+samples after its symbol (decision 3's 9 µs) and the front searches again from there. A
+hold that would act only after its own end is not raised. A released control returns to
+the largest gain and searches. Gains and phase jumps are absolute and a jump is drawn from
+its change's own sample, so the samples before a decision do not depend on what is decided
+after it (the first version of the tool referred them to the last gain and did not have
+this property; the review found it, below). The first nine rows are the frames of `hold`;
+the others are new.
+
+**Results** (frames lost of 2000; in brackets, where not 0, the frames whose gain changed
+after the short training field and more than 16 samples before the frame's end):
+
+| Row | from the lock (the old assumption) | timer on every lock + front | timer below the largest gain + front | front alone | that timer alone | nothing | timer below + front, hold 40 late | 400 late |
+|---|---|---|---|---|---|---|---|---|
+| AWGN 54 Mb/s 25 dB | 0 | 0 | 0 | 0 | 61 (61) | 67 (67) | 0 | 5 (5) |
+| AWGN 54 Mb/s 30 dB | 0 | 0 | 0 | 1 (1) | 68 (68) | 70 (70) | 0 | 7 (7) |
+| AWGN 54 Mb/s 40 dB | 0 | 0 | 0 | 4 (4) | 55 (55) | 61 (61) | 0 | 8 (8) |
+| AWGN 54 Mb/s 60 dB | 0 | 0 | 0 | 0 | 60 (60) | 60 (60) | 0 | 14 (14) |
+| AWGN 6 Mb/s 30 dB | 0 | 0 | 0 | 0 (2) | 0 (528) | 0 (530) | 0 | 0 (6) |
+| AWGN 6 Mb/s 60 dB | 0 | 0 | 0 | 0 (2) | 26 (543) | 24 (546) | 0 | 0 (3) |
+| TGn D 54 Mb/s 40 dB | 0 | 0 | 0 | 2 (2) | 85 (85) | 87 (87) | 0 | 12 (12) |
+| TGn D 54 Mb/s 60 dB | 0 | 0 | 0 | 3 (3) | 64 (64) | 68 (68) | 0 | 8 (8) |
+| TGn D 6 Mb/s 30 dB | 0 | 0 | 0 | 0 | 1 (536) | 1 (539) | 0 | 0 (9) |
+| AWGN 6 Mb/s 5 dB | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 |
+| preamble alone, then 54 Mb/s 30 dB | — | 1991 | 478 | 479 | — | — | 478 | 483 |
+| preamble alone, then 6 Mb/s 30 dB | — | 503 | 503 | 503 | — | — | 503 | 503 |
+| frame, SIFS, 54 Mb/s 30 dB | — | **2000** | 0 | 3 (3) | — | — | 0 | 2 (2) |
+| frame, SIFS, 6 Mb/s 30 dB | — | **2000** | 0 | 0 (2) | — | — | 0 | 0 (4) |
+| noise −5 dBFS: 54 Mb/s 30 dB | 0 | 20 | 19 | 2 (2) | 65 | 51 | 19 | 22 |
+| noise −5 dBFS: preamble alone, then 54 Mb/s | — | 1577 | 1577 | 499 | — | — | 1576 | 1725 |
+| noise −5 dBFS: frame, SIFS, 54 Mb/s | — | **2000** | **2000** | 1 (1) | — | — | 2000 | 1978 |
+
+("—": these columns try the stream's first acquisition only and lose every such frame by
+construction. "preamble alone": the frame's two training fields, nothing behind them, 280
+to 330 samples before the frame. "frame, SIFS": a whole frame of 100 octets at the same
+rate and level, the counted frame 320 samples after its end. "noise −5 dBFS": the noise at
+−5 dBFS at the largest gain, above the lock level of −10, so the control locks on it below
+the largest gain; elsewhere it is at −30 dBFS.)
+
+1. **A timer on every lock (ADR 0008's first wording) loses every frame that follows
+   another after a SIFS.** The hold is dropped at the first frame's end, the control
+   returns to the largest gain and locks on noise 26 samples later; the next frame comes
+   320 samples after the end, 218 samples before the timer runs out, and its overload is
+   not answered until then: 2000 of 2000 lost at 54 and at 6 Mb/s. After a preamble alone
+   the same happens within a few µs of the drop (1991 at 54 Mb/s; 6 Mb/s survives the
+   clipping of its first samples there).
+2. **A timer that spares a lock at the largest gain cures that only while the idle noise
+   locks the control at the largest gain.** At −30 dBFS: 0 lost after a SIFS and 478 after
+   a preamble alone (finding 4). At −5 dBFS the lock on noise is below the largest gain,
+   is kept, and the rows are those of the first timer: 2000 and 1577; even the ordinary
+   row loses 19 against 2.
+3. **The front's hold alone, without any timer, is the one column that holds in every
+   row:** 0 to 4 of 2000 at 54 Mb/s in the ordinary rows, each a frame whose gain changed
+   between the control's lock and the declaration (it was 0 to 5 with a fixed sample in
+   `hold`), none at 6 Mb/s; 3 and 0 after a SIFS; 2, 499 and 1 at the loud noise.
+   **The founder decided on this (2026-11-21, a second amendment the same day): no timer;
+   ADR 0008's decision 2 is its step 2 alone.**
+4. **After a preamble with nothing behind it a quarter of the frames are lost in every
+   column:** 478 to 503 of 2000. The SIGNAL read there is noise; about 1500 fail (parity,
+   rate or length) and drop the hold, the rest pass and hold the gain and the front for
+   the length they claim. One parity bit and eight valid rates of sixteen give
+   2000/4 = 500 ± 19. The decoder does not check SIGNAL's reserved bit (IEEE 802.11-2020 §17.3.4 says it
+   is 0): checking it would halve this. A receiver that restarts on a stronger packet
+   would remove it; not designed.
+5. **Without the front's hold** 55 to 87 of 2000 are lost at 54 Mb/s — every frame whose
+   gain changed inside the data. At 6 Mb/s a quarter of the frames have such a change and
+   nearly all survive it (0 to 26 lost).
+6. **How late the hold may act** (measured with the timer of finding 2, at −30 dBFS):
+   40 samples (2 µs) late costs nothing; 400 (20 µs) late 5 to 14 of 2000 at 54 Mb/s.
+   Without a timer it was not run: the cost of a late hold there is at least finding 3's
+   and grows with the delay.
+7. The ten ordinary rows could not show finding 1: the control's first lock on noise is at
+   sample 26 and the packet comes after 600, when its timer has run out.
+
+**Independent review (fresh agent, the code and the G0 text, not the conclusions),
+2026-11-21,** on the first version of the tool and model (815eec2). The model matched G0
+at every boundary it probed and the hand-worked numbers were right. Found and corrected:
+- *the tool's ADC stream was not causal* (gains and phases referred to the last gain: a
+  later hold rotated and rescaled every earlier sample, so the stream that was decoded was
+  not the one the acquisition was found on; it measured 150 of 206 re-acquisitions
+  differing). Absolute gains and phases now; the columns that share the physics of a row
+  agree exactly where the first report had 473 / 477 / 490 / 500;
+- the first ADR amendment said the frame came 15 µs after a dropped hold (it was 1.2 to
+  3.7 µs) and extended the finding to "every ACK and every next frame of a burst" without
+  the case having been run: the "frame, SIFS" rows are that case, run;
+- "a lock at the largest gain" is "a lock on noise" at one noise level only: the "noise
+  −5 dBFS" rows, which changed the decision;
+- the hold's end from SIGNAL was never applied to a frame that counted, and was 4 samples
+  (the back-off) early: applied now, with the back-off;
+- "nothing here reduces it": the reserved bit (finding 4);
+- model: a release that coincides with the stream's end was not recorded; no test with a
+  timer without end, with an offset per gain across a release, with an overload on an
+  unkept lock's first sample, or with a quiet signal after a hold from sample 0 (five of
+  its twenty mutants survived; all fail now, `channel.md`).
+It also confirmed by instrumenting single frames that the loss in the preamble rows is the
+kept lock on noise (the whole frame received at the largest gain, a third of its samples
+clipped), that the columns do not share a code path, and that `hold`, `cfo` and `edge` give
+byte-identical output before and after `stream()` was taken out of `one()`.
+Not checked by it: runs above 300 frames, the TGn rows under instrumentation, the other
+commands' outputs, the AD9361's documents.
+
+**What this is not.** One seed per row, one run. The timer and the release's behaviour (to
+the largest gain, the search from scratch) are assumptions about a radio, not the AD9361's
+documented behaviour. The watchdog at the longest PPDU never acts: a length SIGNAL can
+carry ends before it. The front between a drop and the next search is the streaming
+model's whole-stream run filtered by the detection's sample, not a front restarted at the
+drop. No DC offset; two noise levels; frames of 1000 octets; TGn B and E not run; the
+bursts are one gap and the frame's own level each. The first frame of a "frame, SIFS" row
+is not counted. The float chain is not in the loop. `rxagc`'s other commands still hold
+from the control's lock and start the tracker through the float conversion; their reports
+were not rerun.
+
+**Open**
+- The second history and the replay inside `RxFrontFixed`; the hold's raise and drop as
+  outputs of the streaming front (they are the tool's here).
+- SIGNAL's reserved bit in the decoder (float first, then integer): its own gate.
+- At R1: how the radio's hold pin acts and how fast; a late hold without a timer.
+- A restart of the receiver on a stronger packet while it holds on a false SIGNAL.
+- A timer that ignores only the data's own peaks and still answers a large overload was
+  not modelled; the 0 to 4 frames of 2000 are what it could win back.

@@ -334,6 +334,14 @@ pub struct FastAttackAgc {
     pub unlock_on_overload: bool,
     /// Whether an unlocked gain returns to the maximum (or stays).
     pub unlock_to_max: bool,
+    /// Samples from taking a lock in which it is not left, whatever the detectors say
+    /// (ADR 0008, decision 2, step 1; 0: the control as published). The power comparison
+    /// goes on counting meanwhile; an overload seen then is not remembered.
+    pub lock_hold: usize,
+    /// Whether [`Self::lock_hold`] also keeps a lock taken at the largest gain (a lock on
+    /// noise, or on a packet too weak to overload): if not, such a lock is left at once
+    /// when a detector says so, and only a lock below the largest gain is kept.
+    pub lock_hold_at_max: bool,
 }
 
 /// What [`FastAttackAgc::run`] did.
@@ -379,6 +387,8 @@ impl FastAttackAgc {
             lost_db: 10.0,
             unlock_on_overload: false,
             unlock_to_max: true,
+            lock_hold: 0,
+            lock_hold_at_max: true,
         }
     }
 
@@ -391,6 +401,23 @@ impl FastAttackAgc {
     /// [`FastAttackAgc::run`] with the chain's DC offset at each gain added after the gain,
     /// where the detectors measure: an offset is a signal to them like any other.
     pub fn run_dc(&self, x: &[Sample], dc: Option<&GainDc>) -> AgcTrace {
+        self.run_held(x, dc, &[])
+    }
+
+    /// [`FastAttackAgc::run_dc`] with the gain held from outside (ADR 0008, decision 2,
+    /// step 2: the receiver's `hold`). Each window (a, b) of `holds` keeps samples
+    /// a … b − 1 at the gain of sample a: the detectors are not looked at and nothing is
+    /// counted. At the end of sample b − 1 the control is released as by an unlock (an
+    /// assumption, `docs/gates/channel.md`): a lock is left there, the gain is at the
+    /// maximum from b if [`Self::unlock_to_max`], and the search starts at b with nothing
+    /// kept from before the hold. Windows may overlap or come in any order; a sample is
+    /// held if any contains it.
+    pub fn run_held(
+        &self,
+        x: &[Sample],
+        dc: Option<&GainDc>,
+        holds: &[(usize, usize)],
+    ) -> AgcTrace {
         enum State {
             /// Peak detection and power measurement; `since` is the first sample at the
             /// present gain (or of the state), `look` the first sample the peak detectors
@@ -420,7 +447,25 @@ impl FastAttackAgc {
         // Power after the gain, per sample, for the locked state's window.
         let mut powers: Vec<f64> = Vec::with_capacity(x.len());
         let mut offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
+        let held_at = |n: usize| holds.iter().any(|h| h.0 <= n && n < h.1);
         for (n, s) in x.iter().enumerate() {
+            let held = held_at(n);
+            if n > 0 && !held && held_at(n - 1) {
+                // The release: decided at the end of the last held sample.
+                if matches!(state, State::Locked { .. }) {
+                    t.unlocks.push(n - 1);
+                }
+                if self.unlock_to_max && gain != self.max_gain_db {
+                    gain = self.max_gain_db;
+                    offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
+                    t.changes.push((n, gain));
+                }
+                state = State::Seeking {
+                    since: n,
+                    look: n,
+                    sum: 0.0,
+                };
+            }
             t.gain_db.push(gain);
             let g = 10f64.powf(gain / 20.0);
             // A sample that is not a number is no signal.
@@ -429,6 +474,9 @@ impl FastAttackAgc {
             let peak = re.abs().max(im.abs());
             let power = re * re + im * im;
             powers.push(power);
+            if held {
+                continue;
+            }
             let mut next = gain;
             match &mut state {
                 State::Seeking { since, look, sum } => {
@@ -501,7 +549,13 @@ impl FastAttackAgc {
                         *stood += 1;
                         unlock |= *stood >= self.exit_count.max(1);
                     }
-                    if unlock {
+                    // The gain does not change while locked: `gain` is the lock's.
+                    let kept = if self.lock_hold_at_max || gain < self.max_gain_db {
+                        self.lock_hold
+                    } else {
+                        0
+                    };
+                    if unlock && n >= since.saturating_add(kept) {
                         t.unlocks.push(n);
                         if self.unlock_to_max {
                             next = self.max_gain_db;
@@ -519,6 +573,15 @@ impl FastAttackAgc {
                 offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
                 t.changes.push((n + 1, gain));
             }
+        }
+        // A hold that ends with the stream leaves its lock at the last sample, as a free
+        // control's unlock there is recorded.
+        if !x.is_empty()
+            && held_at(x.len() - 1)
+            && !held_at(x.len())
+            && matches!(state, State::Locked { .. })
+        {
+            t.unlocks.push(x.len() - 1);
         }
         // A change decided at the last sample has no sample to act on.
         t.changes.retain(|c| c.0 < x.len().max(1));

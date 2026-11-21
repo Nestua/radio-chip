@@ -432,3 +432,62 @@ number removed. The reviewer's five survivors are among these and the DC blocker
 
 **Measured with it:** `rxfront agcdc`, `docs/gates/rx_front.md` (2026-11-19, the DC blocker
 at a gain change).
+
+## 2026-11-21 · G0 + G1 · the gain control's lock timer and hold input (ADR 0008, decision 2)
+
+Commit: the one carrying this entry. Command: `cargo test -p radio-phy --test g1_agc`
+(19 pass).
+
+**G0 — what is defined here, none of it published for the AD9361** (whether its
+fast-attack machine has such a timer, and how its hold pin acts, is to be read from its
+documents and tried at R1):
+- `lock_hold`: samples from taking a lock in which it is not left. Samples
+  since … since + lock_hold − 1 are kept; the power comparison goes on counting meanwhile
+  and its exit is taken at the first sample allowed; an overload seen while kept is not
+  remembered. 0 (the reset value here): the control as published.
+- `lock_hold_at_max`: whether the timer also keeps a lock taken at the largest gain. With
+  it off only a lock below the largest gain is kept. (ADR 0008's decision 2 ended, after
+  the measurement, with no timer at all: both fields are the simulator's, to show why.)
+- `run_held(x, dc, holds)`: each window (a, b) keeps samples a … b − 1 at the gain of
+  sample a; no detector is looked at and nothing is counted. At the end of sample b − 1
+  the control is released as by an unlock: a lock is left there (recorded at b − 1), the
+  gain is the largest from b if `unlock_to_max`, and the search starts at b with nothing
+  kept from before. A window that ends with the stream leaves the lock at the last sample;
+  one that runs beyond it leaves nothing. Windows may overlap; an empty one does nothing. `run_dc` is `run_held`
+  without windows.
+
+**G1 — tests, written before the code** (the fields and the function did not exist; the
+third test failed on the flag's effect), all worked by hand from G0's first case (−50 dB:
+locked from 45 at a gain of 40):
+- `a_lock_is_kept_for_its_first_samples`: a one-sample overload at 100 unlocks a free
+  control and not one that keeps 100 samples (whose trace is the one without the spike);
+  the last kept sample is 144, an overload at 145 unlocks; the power exit due at 243 after
+  a packet's end is taken at 557 with 512 kept, at 243 with 198 and at 244 with 199.
+- `a_hold_freezes_the_gain_and_its_release_starts_the_search_again`: held over 20 … 59 at
+  the gain of 47 reached at 19, then the first case again from 60; a control that stays
+  on an unlock searches from 47 and locks at 86; a hold on a locked gain through the
+  packet's end, released at 199; a comparison that stood before a hold is forgotten by
+  it; a hold to the stream's end; from sample 0; two windows out of order with an empty
+  one and one outside the stream; no window is `run`.
+- `a_lock_at_the_largest_gain_may_be_left_unkept`: a lock on silence at the largest gain,
+  a packet 14 samples later: kept, the control sits through 86 samples of overload; with
+  the flag off it leaves at the packet's first sample as with no timer, and the packet's
+  own lock, below the largest gain, is kept against a spike.
+
+- `the_timer_and_the_hold_at_their_edges` (after the review, `rx_front.md`): a lock kept
+  without end; an overload on the first sample of a lock that is not kept; a hold ending
+  with the stream, one sample before and one after; silence after a hold from sample 0
+  locked 26 samples after the release; an offset before the gain that overloads at the
+  largest gain acts from the release's own sample.
+
+**Mutations** (17 and, after the review, 6 more: a wrapping addition of the timer, an
+unkept lock kept one sample, the offset not refreshed at the release, no release for a
+window from sample 0, the release at the stream's end not recorded, or recorded for a hold
+that runs beyond it; clean build each, restored by `cp` + `touch`; every one fails its
+test): kept one sample longer and one less; the timer ignored; a window one longer and
+starting one late; the first window only; the release not an unlock, recorded one late,
+always to the largest gain, the state kept over the hold, the peak detectors reset after
+it, the detectors acting inside the hold, an unlock recorded when not locked; the flag
+ignored, `and` for `or`, no lock kept without the flag, the flag inverted.
+
+**Measured with it:** `rxagc loop`, `docs/gates/rx_front.md` (2026-11-21).

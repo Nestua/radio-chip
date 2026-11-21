@@ -10,7 +10,12 @@ by ADR 0009 (the count for one to eight chains, the sample interface).
    the two long training symbols, replayed from a second history, turned by the CFO word,
    13 bits wide (`in_shift` 1).
 2. **The gain:** the control keeps a lock for 512 samples after taking it, and the front
-   holds the gain from its declaration to the packet's end.
+   holds the gain from its declaration to the packet's end. **Amended 2026-11-21 (the
+   founder, twice the same day, on the closed-loop measurement; `rx_front.md` of that
+   date): no timer. The front's hold alone keeps the gain.** A timer on every lock loses
+   every frame that follows another after a SIFS; one that spares a lock at the largest
+   gain (the first amendment) does the same as soon as noise or interference locks the
+   control below the largest gain. The hold alone costs 0 to 4 frames of 2000 at 54 Mb/s.
 3. **Latency:** the budget below; everything behind the hand-off takes one sample per clock.
 4. **Folding: option C** — the search correlator folded over R, the decision's over 4, the
    detector's arithmetic serial; ADR 0006's R = 6 fallback given up; the folded search
@@ -188,6 +193,23 @@ estimate is whole ADC LSB.
   whether its fast-attack machine has step 1's timer are to be read from its documentation
   and tried at R1. A hold by SPI is slower; how slow a hold may be was not measured (a
   delayed-hold row in `rxagc hold` would say).
+
+**Amendment, 2026-11-21 (measured as a closed loop, `rxagc loop`,
+`reports/rx_front_agc_loop.txt`; journal `rx_front.md`): step 1 is withdrawn.** The
+control locks on noise 26 samples after every release, and step 1 kept that lock too. A
+frame that follows another after a SIFS (320 samples) then overloads the ADC at the
+largest gain for 218 samples before the control may answer: 2000 of 2000 lost, at 54 and
+at 6 Mb/s. A timer that keeps only a lock taken below the largest gain (the founder's
+first amendment, the same day) loses none of those — while the idle noise locks the
+control at the largest gain. With noise or interference above the lock level (−5 dBFS at
+the largest gain in the run) the lock on it is below the largest gain, is kept, and again
+2000 of 2000 are lost. **Step 2 alone stands: the front's hold, from its declaration to the
+packet's end.** It loses 0 to 4 frames of 2000 at 54 Mb/s (none at 6 Mb/s) in the rows
+where the timer lost none — the frames whose gain changes between the control's lock and
+the declaration — and 1 to 3 of 2000 after a SIFS, at either noise level. The requirement
+on the radio is the hold alone: no timer inside its gain control. A hold acting 2 µs late
+costs nothing more, 20 µs late 5 to 14 of 2000 (measured with the first amendment's timer;
+without a timer it was not run).
 
 ## Decision 3 — the latency budget
 
