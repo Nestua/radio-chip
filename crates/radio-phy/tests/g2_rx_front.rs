@@ -23,7 +23,7 @@ use radio_phy::rx_front_fixed::{
     to_adc, FixedRxConfig, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_ofdm::RxOfdmConfig;
-use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
+use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 use std::f64::consts::PI;
 
 type C = (f64, f64);
@@ -1253,8 +1253,28 @@ fn the_default_receiver_decodes_the_hand_off() {
         let adc = to_adc(&x, gain);
         let a = acquire_fixed(&adc, &cfg, &fx).unwrap();
         let z = handoff_fixed(&adc, a.fft_start, a.cfo_phase, &fx).unwrap();
-        let start = FixedTracking::from_clock_offset(a.cfo_hz(&fx, fs) / carrier * 1e6, &fo);
+        // The tracker is started from the CFO word and the channel's register (ADR 0008,
+        // decision 7): no floating point between the ADC and the PSDU.
+        let ratio = clock_ratio(fs, carrier).unwrap();
+        let start = FixedTracking::from_cfo_word(a.cfo_phase, ratio, &fo);
         let d = decode_ppdu_fixed(&z, a.fft_start, &RxOfdmConfig::default(), &fo, start).unwrap();
         assert_eq!(d.psdu, psdu, "{rate:?} {ppm}");
+        // The sign is the clock's: a transmitter fast by ε has moved the last symbol's
+        // window ε·(112 + 80·i) samples late (i symbols after SIGNAL; 0.31 of a sample
+        // early at the end of the 6 Mb/s frame), and the start from the word knows it from
+        // the first symbol on.
+        let i = d.timing.len() - 1;
+        let late = ppm * 1e-6 * (112 + 80 * i) as f64;
+        assert!(
+            (d.timing[i] - late).abs() < 0.03,
+            "{rate:?} {ppm}: {} against {late}",
+            d.timing[i]
+        );
+        if rate == Rate::R6 {
+            assert!(i == 101 && late < -0.3, "{i} {late}");
+            let wrong = FixedTracking::from_cfo_word(-a.cfo_phase, ratio, &fo);
+            let w = decode_ppdu_fixed(&z, a.fft_start, &RxOfdmConfig::default(), &fo, wrong);
+            assert!(w.map_or(true, |w| (w.timing[i] - late).abs() > 0.1));
+        }
     }
 }

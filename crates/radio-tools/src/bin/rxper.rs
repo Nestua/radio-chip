@@ -37,7 +37,7 @@ use radio_phy::rx_front_fixed::{
     FixedRxConfig, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
+use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
 
@@ -94,6 +94,9 @@ struct Receiver {
     hint: bool,
     /// The integer data path with these widths instead of the float one.
     fixed: Option<FixedOfdmConfig>,
+    /// An integer receiver's tracker started through the float conversion of the CFO to ppm
+    /// (the tools' way before ADR 0008's decision 7) instead of from the CFO word.
+    float_start: bool,
 }
 
 fn receiver(name: &'static str, hint: bool, cfg: RxOfdmConfig) -> Receiver {
@@ -102,6 +105,7 @@ fn receiver(name: &'static str, hint: bool, cfg: RxOfdmConfig) -> Receiver {
         cfg,
         hint,
         fixed: None,
+        float_start: false,
     }
 }
 
@@ -231,10 +235,14 @@ fn one(scene: Scene, receivers: &[Receiver], seed: u64, number: u64) -> Vec<bool
             Some(fx) => {
                 let word = word_at(a.cfo_phase, front.nco_phase_bits, fx.front.nco_phase_bits);
                 let z = handed(&adc, a.fft_start, word, fx);
-                let start = if r.hint {
-                    FixedTracking::from_clock_offset(ppm, fx)
-                } else {
-                    FixedTracking::unknown(fx)
+                // The integer receiver's start is the CFO word times the channel's register
+                // (ADR 0008, decision 7): nothing in floating point from the ADC on.
+                let start = match (r.hint, clock_ratio(FS, CARRIER_HZ)) {
+                    (true, Some(ratio)) if !r.float_start => {
+                        FixedTracking::from_cfo_word(word, ratio, fx)
+                    }
+                    (true, _) => FixedTracking::from_clock_offset(ppm, fx),
+                    _ => FixedTracking::unknown(fx),
                 };
                 decode_ppdu_fixed(&z, a.fft_start, &r.cfg, fx, start).is_ok_and(|d| d.psdu == psdu)
             }
@@ -654,7 +662,18 @@ fn widths(frames: usize) {
             }),
         ),
     ];
-    let mut rx = vec![receiver("float", true, base())];
+    let mut rx = vec![
+        receiver("float", true, base()),
+        Receiver {
+            fixed: Some(FixedOfdmConfig::default()),
+            float_start: true,
+            ..receiver("ppm start", true, base())
+        },
+        Receiver {
+            fixed: Some(FixedOfdmConfig::default()),
+            ..receiver("word start", true, base())
+        },
+    ];
     for (name, fx) in &variants {
         if !fx.is_valid() {
             println!("# {name}: not a usable set of widths, left out");
@@ -672,6 +691,7 @@ fn widths(frames: usize) {
          # eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.\n\
          # default = hand-off Z13 s1, W16 T12 U16 C10 F4, rotator L9 Q11 (the data path's truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says\n\
          # (round: half a table address added to the data path's rotation phase; Z12 s2: the hand-off narrowed to 12 bits, two fractional bits; the rotator's columns change the hand-off's rotator and the offset's estimate too);\n\
+         # ppm start / word start: the model's defaults (rotation phase rounded) with the tracker started through the float conversion of the CFO to ppm, and from the CFO word times the register fs/fc (every other integer column starts from the word);\n\
          # wide = every width far beyond need (W28 s8 T24 U40 C20 F8, P30 L16 Q20, CORDIC N24 A24): what is left is not a width's.\n\
          # columns: {}",
         rx.iter().map(|r| r.name).collect::<Vec<_>>().join(" | ")

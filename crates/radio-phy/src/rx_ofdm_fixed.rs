@@ -458,6 +458,18 @@ const N_BITS: u32 = 11;
 const S1_BITS: u32 = 23;
 const S2_BITS: u32 = 35;
 
+/// Fractional bits of the clock-ratio register ([`clock_ratio`]).
+pub const CLOCK_RATIO_FRAC: u32 = 20;
+
+/// The channel's fs/fc as the 16-bit register of ADR 0008's decision 7:
+/// round(`sample_rate_hz`/`carrier_hz`·2^20). 3616 for 20 MHz at 5.8 GHz; ratios up to
+/// 1/16 fit (160 MHz at 2.6 GHz). `None` when the ratio is not a number, rounds to 0 or
+/// does not fit. A float helper for the MAC's side: the receiver sees the register only.
+pub fn clock_ratio(sample_rate_hz: f64, carrier_hz: f64) -> Option<u16> {
+    let v = (sample_rate_hz / carrier_hz * f64::from(1u32 << CLOCK_RATIO_FRAC)).round();
+    (v >= 1.0 && v <= f64::from(u16::MAX)).then_some(v as u16)
+}
+
 /// The timing tracker's state across the symbols of a PPDU, in integers: the float
 /// [`crate::rx_ofdm::Tracking`]'s fit measured(τ) = offset + rate·τ in its batch form. Time τ
 /// is in fifths of a symbol from the middle of the long training field (7 for SIGNAL, then
@@ -556,6 +568,28 @@ impl FixedTracking {
     /// ([`crate::rx_ofdm::Tracking::from_clock_offset`]).
     pub fn from_clock_offset(ppm: f64, fx: &FixedOfdmConfig) -> Self {
         Self::start(ppm, crate::rx_ofdm::TIMING_HINT_PPM, fx)
+    }
+
+    /// The start from the front's CFO word, in integers (ADR 0008, decision 7): `cfo_word`
+    /// in 2π/2^P per sample ([`crate::rx_front_fixed::FixedAcquisition::cfo_phase`], P the
+    /// one of `fx.front`) and `ratio` the channel's fs/fc from [`clock_ratio`], the register
+    /// the MAC writes when it tunes. Both ends derive carrier and sample clock from one
+    /// oscillator (IEEE 802.11-2020 §17.3.9.5–6), so the clock offset is
+    /// ε = word·(fs/fc)/2^P, the drift in a fifth of a symbol 16·ε samples of 2^(P−6) slope
+    /// units each: rate0 = word·`ratio`/2^(22−R), half to even, saturated to the rate's
+    /// register — one multiplication per packet, where the hand-off's stream starts. The
+    /// prior's weight is the constant of [`Self::from_clock_offset`]
+    /// ([`crate::rx_ofdm::TIMING_HINT_PPM`]).
+    pub fn from_cfo_word(cfo_word: i64, ratio: u16, fx: &FixedOfdmConfig) -> Self {
+        let r = fx.rate_frac.min(20);
+        let p = fx.front.nco_phase_bits.clamp(8, 40);
+        let limit = 1i128 << (p - 6 + r);
+        let product = i128::from(cfo_word) * i128::from(ratio);
+        let rate0 = rsh_even(product, CLOCK_RATIO_FRAC + 2 - r).clamp(-limit, limit) as i64;
+        Self {
+            rate0,
+            ..Self::from_clock_offset(0.0, fx)
+        }
     }
 
     /// A tracker that applies the drift of a clock offset of `ppm` and learns nothing.
