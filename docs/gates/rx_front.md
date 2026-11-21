@@ -1684,3 +1684,47 @@ ones do not differ. TGn B and E and other frame lengths were not run. The stream
 - The founder's decisions on ADR 0008.
 - `rxper` and `FixedOfdmConfig`'s defaults moved to the proposed hand-off, with the G2 rerun.
 - The estimate and the replay inside `RxFrontFixed` as a streaming model, then vectors.
+
+## 2026-11-21 · G2 · ADR 0008's hand-off as one function of the model
+
+Commit: the one carrying this entry, on 613d358 (ADR 0008 accepted). Command:
+`cargo test -p radio-phy --test g2_rx_front` (23 pass). First of the model follow-ups the
+ADR names; the decoder's side (its default input, `rxper`, the G2 rerun) is in
+`rx_ofdm.md` under the same date.
+
+**What was added.** `handoff_fixed(x, fft_start, cfo_phase, fx)`: decision 1's stream as one
+function, `correct_fixed(remove_dc_fixed(x, ltf_dc_offset_fixed(x, fft_start, cfo_phase)),
+cfo_phase, Y_BITS)` — the ADC's samples less the offset estimated from the two long training
+symbols, the CFO word taken out by the front's rotator, 13 bits with the ADC's LSB kept.
+`None` when the stream does not hold the two symbols or the widths are unusable. It rotates
+the whole stream from its sample 0; where the hardware's replay starts (and so the first
+sample's phase) belongs to the streaming model and is not fixed here.
+
+**Tests, written before the function** (the import failed to compile, then):
+- `handoff_fixed_worked_by_hand`: a CFO word of 0 (inside the estimate's guard, the rotator
+  at (1023, 0)): v·1023/1024 half to even at 1, 511, 512 (the tie), 513, 2047 and −2048,
+  zeros elsewhere; a word of 2¹⁸ + 2¹⁵ (half a turn between the two symbols, so the estimate
+  is the offset exactly): a stream that is the offset (100, −50) alone comes out as zeros,
+  one sample 1024 above it at index 32 as (0, −1023) and at index 192 as (−1023, 0); the two
+  symbols taken eight samples early see that sample and no longer return zeros; a stream one
+  sample short, and an invalid table, return nothing.
+- `handoff_fixed_is_the_estimate_the_subtraction_and_the_rotation`: the three steps one by
+  one on seven words (both sides of the guard's edge, ±40 ppm at 5.8 GHz, beyond half a
+  turn) and samples over the ADC's whole range, with outputs beyond 12 bits where an offset
+  was taken off.
+- `the_default_receiver_decodes_the_hand_off`: `acquire_fixed`, `handoff_fixed` and
+  `decode_ppdu_fixed` at their defaults on 54, 36 and 6 Mb/s frames (300 octets, 30 dB,
+  +33, −12.5 and −38 ppm, a DC offset of −20 dBFS at the ADC). This one passed as soon as
+  the function existed, at the old default input too (a 12-bit input clips nothing at
+  −12 dBFS): it shows the chain whole, not the width.
+
+**Mutations** (each built clean, the file restored by `cp` and `touch`; all six fail):
+no offset removed (the three tests); 12 bits out (by hand, steps); the rotation the other
+way (the three); `fft_start + 1` in the estimate (by hand, steps); the estimate with the
+word negated (steps, the chain); a short stream not refused (by hand).
+
+**Open**
+- The second history and the replay inside `RxFrontFixed`, with the phase of the replay's
+  first sample; then the hand-off's vectors.
+- The gain control's timer and hold input (`FastAttackAgc`), the tracker's start from the
+  CFO word in integers.
