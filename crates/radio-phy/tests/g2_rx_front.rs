@@ -19,11 +19,11 @@ use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{acquire, detections, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
     acquire_fixed, acquisitions_fixed, cordic_angle, correct_fixed, dc_block_fixed,
-    detections_fixed, ltf_dc_offset_fixed, nco_mix, nco_rotator, remove_dc_fixed, to_adc,
-    FixedRxConfig, ADC_FULL_SCALE, IQ,
+    detections_fixed, handoff_fixed, ltf_dc_offset_fixed, nco_mix, nco_rotator, remove_dc_fixed,
+    to_adc, FixedRxConfig, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_ofdm::RxOfdmConfig;
-use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
+use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 use std::f64::consts::PI;
 
 type C = (f64, f64);
@@ -1126,6 +1126,163 @@ fn the_ltf_estimate_takes_a_dc_offset_out_of_the_decoders_samples() {
                 let left_in = decode(&remove_dc_fixed(&adc, (0, 0)));
                 assert!(left_in.map_or(true, |d| d.psdu != psdu), "{ppm}");
             }
+        }
+    }
+}
+
+#[test]
+fn handoff_fixed_worked_by_hand() {
+    let fx = FixedRxConfig::default();
+    assert_eq!(
+        (fx.nco_phase_bits, fx.nco_lut_bits, fx.nco_amp_bits),
+        (22, 9, 11)
+    );
+    // A CFO word of zero: inside the estimate's guard, so nothing is taken off, and the
+    // rotator stands at (1023, 0): every sample is v·1023/1024 rounded half to even, in the
+    // ADC's own LSB (13 bits out). 511·1023/1024 = 510.50 → 511; 512 → 511.5 → 512 (even);
+    // 513 → 512.50 − 0.001 → 512; 2047 → 2045.001 → 2045; −2048 → −2046 exactly.
+    let mut adc = vec![(0i16, 0i16); 200];
+    adc[3] = (1, -1);
+    adc[70] = (511, -511);
+    adc[71] = (512, -512);
+    adc[72] = (513, -513);
+    adc[150] = (2047, -2048);
+    let z = handoff_fixed(&adc, 40, 0, &fx).unwrap();
+    assert_eq!(z.len(), 200);
+    assert_eq!(z[3], (1, -1));
+    assert_eq!(z[70], (511, -511));
+    assert_eq!(z[71], (512, -512));
+    assert_eq!(z[72], (512, -512));
+    assert_eq!(z[150], (2045, -2046));
+    assert!(z
+        .iter()
+        .enumerate()
+        .all(|(n, v)| [3, 70, 71, 72, 150].contains(&n) || *v == (0, 0)));
+
+    // A word of 2^18 + 2^15: half a turn over the 64 samples between the two symbols, so
+    // e = −A, d = 2A, S = 64·2A·D and the estimate is the offset exactly. A stream that is
+    // the offset (100, −50) alone comes out as nothing; one sample 1024 above it before the
+    // two symbols, at index 32 where the rotator has gone 32·(2^18 + 2^15) = two turns and a
+    // quarter backwards (·(−j)), comes out as 1024·1023/1024·(−j) = (0, −1023).
+    let word = (1i64 << 18) + (1 << 15);
+    let mut adc = vec![(100i16, -50i16); 40 + 128 + 10];
+    adc[32] = (1124, -50);
+    let z = handoff_fixed(&adc, 40, word, &fx).unwrap();
+    assert_eq!(z[32], (0, -1023));
+    assert!(z.iter().enumerate().all(|(n, v)| n == 32 || *v == (0, 0)));
+    // The same after the two symbols, at index 192: 192·(2^18 + 2^15) = thirteen turns and
+    // a half, ·(−1).
+    let mut adc = vec![(100i16, -50i16); 200];
+    adc[192] = (1124, -50);
+    let z = handoff_fixed(&adc, 40, word, &fx).unwrap();
+    assert_eq!(z[192], (-1023, 0));
+    // The two symbols are taken where the caller says: eight samples early the sample at 32
+    // is inside them and the estimate is no longer the offset.
+    let mut adc = vec![(100i16, -50i16); 200];
+    adc[32] = (1124, -50);
+    let early = handoff_fixed(&adc, 24, word, &fx).unwrap();
+    assert_ne!(early[100], (0, 0));
+
+    // No two symbols in the stream, or widths that are not usable: nothing.
+    let adc = vec![(100i16, -50i16); 167];
+    assert_eq!(handoff_fixed(&adc, 40, word, &fx), None);
+    assert!(handoff_fixed(&adc, 39, word, &fx).is_some());
+    let bad = FixedRxConfig {
+        nco_lut_bits: 1,
+        ..fx
+    };
+    assert_eq!(handoff_fixed(&adc, 39, word, &bad), None);
+    // The width is the rotator's input, whatever the front's own mixer narrows to.
+    let z20 = FixedRxConfig { z_bits: 20, ..fx };
+    let mut adc = vec![(0i16, 0i16); 200];
+    adc[150] = (2047, -2048);
+    assert_eq!(
+        handoff_fixed(&adc, 40, 0, &z20).unwrap()[150],
+        (2045, -2046)
+    );
+}
+
+#[test]
+fn handoff_fixed_is_the_estimate_the_subtraction_and_the_rotation() {
+    // The stream's definition (ADR 0008, decision 1) step by step, on samples that are
+    // nothing in particular, at the rotator's input width out.
+    let fx = FixedRxConfig::default();
+    let mut rng = Rng::new(0x0ff5);
+    for word in [0i64, 703, 705, -9_000, 48_660, -48_660, (1 << 21) + 77] {
+        let adc: Vec<(i16, i16)> = (0..400)
+            .map(|_| {
+                let mut v = || ((rng.next_u64() % 4096) as i64 - 2048) as i16;
+                (v(), v())
+            })
+            .collect();
+        let dc = ltf_dc_offset_fixed(&adc, 211, word, &fx).unwrap();
+        let by_steps = correct_fixed(&remove_dc_fixed(&adc, dc), word, Y_BITS, &fx);
+        assert_eq!(handoff_fixed(&adc, 211, word, &fx).unwrap(), by_steps);
+        assert!(
+            by_steps
+                .iter()
+                .any(|v| v.0.abs() > 2048 || v.1.abs() > 2048)
+                || dc == (0, 0)
+        );
+    }
+}
+
+#[test]
+fn the_default_receiver_decodes_the_hand_off() {
+    // The chain ADR 0008 decided, each piece at its default: the integer acquisition, the
+    // hand-off and the decoder's default input format, on a frame with a clock offset and a
+    // DC offset of −20 dBFS at the ADC.
+    let fs = 20e6;
+    let cfg = RxConfig::new(fs);
+    let fx = FixedRxConfig::default();
+    let fo = FixedOfdmConfig::default();
+    assert_eq!(fo.front, fx);
+    let tx = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << tx.data.frac_bits());
+    let mut rng = Rng::new(0x0ada);
+    let carrier = 5.8e9;
+    for (rate, ppm) in [(Rate::R54, 33.0), (Rate::R36, -12.5), (Rate::R6, -38.0)] {
+        let psdu: Vec<u8> = (0..300).map(|_| (rng.next_u64() & 0xff) as u8).collect();
+        let f: Vec<C> = build_ppdu(&psdu, rate, 0x5d, &tx)
+            .unwrap()
+            .iter()
+            .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+            .collect();
+        let mut x = vec![(0.0, 0.0); 500];
+        x.extend_from_slice(&f);
+        x.extend(vec![(0.0, 0.0); 200]);
+        let x = resample(&x, ppm);
+        let x = frequency_offset(&x, ppm * 1e-6 * carrier, fs, 2.0);
+        let p = mean_power(&f);
+        let x = awgn(&x, 30.0, p, &mut rng);
+        let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-12.0 / 20.0) / p.sqrt();
+        let dc = 10f64.powf(-20.0 / 20.0) / gain * f64::from(ADC_FULL_SCALE);
+        let x: Vec<C> = x.iter().map(|s| (s.0 - 0.8 * dc, s.1 + 0.6 * dc)).collect();
+        let adc = to_adc(&x, gain);
+        let a = acquire_fixed(&adc, &cfg, &fx).unwrap();
+        let z = handoff_fixed(&adc, a.fft_start, a.cfo_phase, &fx).unwrap();
+        // The tracker is started from the CFO word and the channel's register (ADR 0008,
+        // decision 7): no floating point between the ADC and the PSDU.
+        let ratio = clock_ratio(fs, carrier).unwrap();
+        let start = FixedTracking::from_cfo_word(a.cfo_phase, ratio, &fo);
+        let d = decode_ppdu_fixed(&z, a.fft_start, &RxOfdmConfig::default(), &fo, start).unwrap();
+        assert_eq!(d.psdu, psdu, "{rate:?} {ppm}");
+        // The sign is the clock's: a transmitter fast by ε has moved the last symbol's
+        // window ε·(112 + 80·i) samples late (i symbols after SIGNAL; 0.31 of a sample
+        // early at the end of the 6 Mb/s frame), and the start from the word knows it from
+        // the first symbol on.
+        let i = d.timing.len() - 1;
+        let late = ppm * 1e-6 * (112 + 80 * i) as f64;
+        assert!(
+            (d.timing[i] - late).abs() < 0.03,
+            "{rate:?} {ppm}: {} against {late}",
+            d.timing[i]
+        );
+        if rate == Rate::R6 {
+            assert!(i == 101 && late < -0.3, "{i} {late}");
+            let wrong = FixedTracking::from_cfo_word(-a.cfo_phase, ratio, &fo);
+            let w = decode_ppdu_fixed(&z, a.fft_start, &RxOfdmConfig::default(), &fo, wrong);
+            assert!(w.map_or(true, |w| (w.timing[i] - late).abs() > 0.1));
         }
     }
 }

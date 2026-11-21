@@ -18,14 +18,14 @@ use radio_phy::channel::{awgn, fft, mean_power, Rng, Sample};
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
-use radio_phy::rx_front_fixed::{FixedRxConfig, IQ};
+use radio_phy::rx_front_fixed::{FixedRxConfig, IQ, Y_BITS};
 use radio_phy::rx_ofdm::{
     decode_ppdu, decode_ppdu_from, equalise, estimate_channel, soft_bits, RxOfdmConfig, Tracking,
 };
 use radio_phy::rx_ofdm_fixed::{
-    decode_ppdu_fixed, estimate_channel_fixed, fft64_fixed, scale_constant, symbol_soft_fixed,
-    threshold_constant, to_fixed, tracker_constants, FixedOfdmConfig, FixedTracking,
-    TrackerConstants,
+    clock_ratio, decode_ppdu_fixed, estimate_channel_fixed, fft64_fixed, scale_constant,
+    symbol_soft_fixed, threshold_constant, to_fixed, tracker_constants, FixedOfdmConfig,
+    FixedTracking, TrackerConstants,
 };
 
 /// The integer tracker with nothing known about the clock.
@@ -530,16 +530,16 @@ fn wide_words_with_a_slope_on_unequal_pilots_and_with_the_loops_off() {
 
 #[test]
 fn samples_outside_the_input_width_saturate() {
-    // A stream that overdrives the 12-bit input gives exactly what the same stream clamped
-    // to 12 bits gives; and the FFT's own word clamps what does not fit it.
+    // A stream that overdrives the 13-bit input gives exactly what the same stream clamped
+    // to 13 bits gives; and the FFT's own word clamps what does not fit it.
     let fx = FixedOfdmConfig::default();
     let cfg = six_bits();
     let mut rng = Rng::new(0x0f1d);
     let x = at_level(&frame(&psdu(40, &mut rng), Rate::R36), -6.0);
-    let hot = to_fixed(&x, 2048.0, 16);
+    let hot = to_fixed(&x, 4096.0, 16);
     let clamped: Vec<IQ> = hot
         .iter()
-        .map(|v| (v.0.clamp(-2048, 2047), v.1.clamp(-2048, 2047)))
+        .map(|v| (v.0.clamp(-4096, 4095), v.1.clamp(-4096, 4095)))
         .collect();
     assert!(hot != clamped, "nothing was overdriven");
     let a = all_soft(&hot, 188, Rate::R36, &cfg, &fx, unknown(&fx));
@@ -674,12 +674,14 @@ fn the_default_words_bit_for_bit() {
     }
     assert_eq!(
         got,
+        // Since ADR 0008 with the input at 13 bits and one fractional bit (the earlier values are in
+        // `docs/gates/rx_ofdm.md`, 2026-11-21).
         [
-            797_987_032_209_841_876u64,
-            2_722_506_916_840_601_925,
-            2_803_077_607_927_797_426,
-            16_026_798_777_574_690_161,
-            12_466_612_513_770_086_848
+            5_260_962_740_838_614_106u64,
+            7_941_093_826_470_765_633,
+            3_171_262_636_499_517_186,
+            4_732_824_824_092_512_215,
+            7_729_731_060_040_634_013
         ],
         "{got:?}"
     );
@@ -954,7 +956,8 @@ fn the_tracker_in_the_receiver_is_the_float_one() {
     // on ±π (a pilot the noise has all but cancelled) reads +π in one receiver and −π in the
     // other when their predictions differ in the last digits. The measurement then differs by
     // a turn times the pair's coefficient. Such a symbol ends the frame's comparison and is
-    // counted; this run has one (6 Mb/s, 6 dB, −40 ppm, symbol 38).
+    // counted. With two fractional bits in the FFT word this run had one (6 Mb/s, 6 dB,
+    // −40 ppm, symbol 38); with ADR 0008's one it has none, and that branch is not taken.
     use radio_phy::channel::resample;
     let fx = FixedOfdmConfig::default();
     let cfg = RxOfdmConfig::default();
@@ -1010,8 +1013,11 @@ fn the_tracker_in_the_receiver_is_the_float_one() {
                     break;
                 }
                 let drift = (ti.timing(&fx) - tf.timing()).abs();
+                // One fractional bit in the FFT word (ADR 0008's hand-off): the largest
+                // difference is 4.0e-4, in one symbol of a 6 Mb/s frame at 6 dB, and at
+                // most 1.6e-4 in every other (9.6e-5 with two fractional bits).
                 assert!(
-                    slope < 2e-4,
+                    slope < 5e-4,
                     "{rate:?} {ppm} ppm symbol {i}: measured {} against {}",
                     ti.measured as f64 * unit,
                     tf.measured
@@ -1034,6 +1040,7 @@ fn the_tracker_in_the_receiver_is_the_float_one() {
         }
     }
     assert!(wraps <= 1, "{wraps} frames ended by a pair at ±π");
+    assert!(worst_slope > 5e-5, "{worst_slope}");
     assert!(compared > 2000, "{compared}");
     println!(
         "{compared} symbols, {wraps} ended by a pair at ±π; largest difference: measured slope \
@@ -1240,4 +1247,185 @@ fn the_window_moves_beyond_half_a_sample_only() {
         .unwrap();
         assert_eq!((t.theta, t.shift), (theta, shift), "rate {rate0}");
     }
+}
+
+#[test]
+fn the_default_input_is_the_hand_off_of_adr_0008() {
+    // ADR 0008, decision 1: the decoder is handed the rotator's 13 bits (the ADC's LSB kept)
+    // with one fractional bit in the FFT word.
+    let fx = FixedOfdmConfig::default();
+    assert_eq!((fx.in_bits, fx.in_shift), (Y_BITS, 1));
+    assert_eq!(fx.in_bits + fx.in_shift, 14);
+    assert!(fx.is_valid());
+
+    // The thirteenth bit is used: a frame whose mean power is the 12-bit full scale squared
+    // passes at 54 Mb/s with the default input, and not when the input saturates at 12 bits
+    // (a sixth of its components would).
+    let mut rng = Rng::new(0x13b1);
+    let p = psdu(200, &mut rng);
+    let mut x = vec![(0.0, 0.0); 192];
+    x.extend(frame(&p, Rate::R54));
+    let k = (1.0 / mean_power(&x[192..])).sqrt();
+    let z = to_fixed(&x, 2048.0 * k, 13);
+    assert!(z.iter().any(|v| v.0.abs() > 2048 || v.1.abs() > 2048));
+    let cfg = RxOfdmConfig::default();
+    let d = decode_ppdu_fixed(&z, 192 + 160 + 32, &cfg, &fx, unknown(&fx)).unwrap();
+    assert_eq!(d.psdu, p);
+    let twelve = FixedOfdmConfig { in_bits: 12, ..fx };
+    let d = decode_ppdu_fixed(&z, 192 + 160 + 32, &cfg, &twelve, unknown(&twelve));
+    assert!(d.map_or(true, |d| d.psdu != p));
+}
+
+#[test]
+fn the_tracker_starts_from_the_cfo_word_by_hand() {
+    // ADR 0008, decision 7. The register: fs/fc with 20 fractional bits in 16.
+    // 2^20·20/5800 = 3615.78, 2^20·20/2412 = 8694.66, 2^20·2/903 = 2322.43.
+    assert_eq!(clock_ratio(20e6, 5.8e9), Some(3616));
+    assert_eq!(clock_ratio(20e6, 2.412e9), Some(8695));
+    assert_eq!(clock_ratio(2e6, 903e6), Some(2322));
+    // The largest: 65535.5/2^20 rounds to 65536 and is refused, as are no ratio at all and
+    // values that are not numbers.
+    assert_eq!(clock_ratio(65_535.0, 1_048_576.0), Some(65_535));
+    assert_eq!(clock_ratio(65_535.5, 1_048_576.0), None);
+    assert_eq!(clock_ratio(0.4, 1_048_576.0), None);
+    assert_eq!(clock_ratio(0.5, 1_048_576.0), Some(1));
+    assert_eq!(clock_ratio(1.0, 1_048_576.0), Some(1));
+    assert_eq!(clock_ratio(160e6, 2.6e9), Some(64_528));
+    assert_eq!(clock_ratio(160e6, 2.56e9), None);
+    assert_eq!(clock_ratio(20e6, 0.0), None);
+    assert_eq!(clock_ratio(-20e6, 5.8e9), None);
+    assert_eq!(clock_ratio(f64::NAN, 5.8e9), None);
+    assert_eq!(clock_ratio(20e6, f64::INFINITY), None);
+
+    // The rate: a clock offset ε = word·(fs/fc)/2^P drifts 16·ε samples in a fifth of a
+    // symbol, 2^(P−6) units of slope each, with R fractional bits: word·ratio/2^(22−R)
+    // whatever P is. R = 10: word·ratio/4096, half to even.
+    let fx = FixedOfdmConfig::default();
+    assert_eq!(fx.rate_frac, 10);
+    let rate = |word: i64, ratio: u16| FixedTracking::from_cfo_word(word, ratio, &fx).rate0;
+    assert_eq!(rate(4096, 3616), 3616);
+    assert_eq!(rate(-4096, 3616), -3616);
+    assert_eq!(rate(1, 2048), 0);
+    assert_eq!(rate(3, 2048), 2);
+    assert_eq!(rate(5, 2048), 2);
+    assert_eq!(rate(-1, 2048), 0);
+    assert_eq!(rate(-3, 2048), -2);
+    assert_eq!(rate(1, 2049), 1);
+    // 232 kHz at 20 MHz is the word 48 654 (40 ppm at 5.8 GHz): 48654·3616/4096 = 42952.4,
+    // against 40·16·10⁻⁶·2^16·2^10 = 42949.7 from the offset itself.
+    assert_eq!(rate(48_654, 3616), 42_952);
+    assert_eq!(FixedTracking::from_clock_offset(40.0, &fx).rate0, 42_950);
+    // Other R: 2^(22−R) is 4 at R = 20 and 2^22 at R = 0.
+    let at = |r: u32, word: i64| {
+        let fx = FixedOfdmConfig { rate_frac: r, ..fx };
+        FixedTracking::from_cfo_word(word, 3616, &fx).rate0
+    };
+    assert_eq!(at(20, 3), 2712);
+    assert_eq!(at(0, 48_654), 42);
+    assert_eq!(at(0, 579), 0);
+    assert_eq!(at(0, 580), 1);
+    // A word of the accumulator's whole range and the largest ratio stay inside the rate's
+    // signed register of P − 6 + R = 26 bits (below 2^25); a word no accumulator holds
+    // saturates at its ends, whether or not its product fits 64 bits.
+    assert_eq!(rate((1 << 21) - 1, u16::MAX), 33_553_904);
+    assert_eq!(rate(-(1 << 21), u16::MAX), -33_553_920);
+    assert_eq!(rate(i64::MAX, u16::MAX), (1 << 25) - 1);
+    assert_eq!(rate(i64::MIN, u16::MAX), -(1 << 25));
+    assert_eq!(rate(1 << 50, u16::MAX), (1 << 25) - 1);
+    assert_eq!(rate(-(1 << 50), u16::MAX), -(1 << 25));
+    // At P = 30 the register is 34 bits and a word of 30 bits passes whole:
+    // (2^29 − 1)·65535/4096 = 8 589 803 504.0002.
+    let p30 = FixedOfdmConfig {
+        front: FixedRxConfig {
+            nco_phase_bits: 30,
+            ..fx.front
+        },
+        ..fx
+    };
+    assert!(p30.is_valid());
+    let rate30 = |word: i64| FixedTracking::from_cfo_word(word, u16::MAX, &p30).rate0;
+    assert_eq!(rate30((1 << 29) - 1), 8_589_803_504);
+    assert_eq!(rate30(i64::MAX), (1 << 33) - 1);
+    assert_eq!(rate30(i64::MIN), -(1 << 33));
+    // Widths `is_valid` refuses are not a panic: R is taken as at most 20 and P as 8 to 40.
+    let odd = |r: u32, p: u32| {
+        let fx = FixedOfdmConfig {
+            rate_frac: r,
+            front: FixedRxConfig {
+                nco_phase_bits: p,
+                ..fx.front
+            },
+            ..fx
+        };
+        FixedTracking::from_cfo_word(3, 3616, &fx).rate0
+    };
+    assert_eq!(odd(30, 22), 2712);
+    assert_eq!(odd(u32::MAX, 22), 2712);
+    assert_eq!(odd(20, 3), 2712);
+    assert_eq!(odd(20, 60), 2712);
+
+    // Everything else is the start from a clock offset known to 2 ppm: at a word of 0 the
+    // two are one tracker, and the weight is that start's constant:
+    // 25·(0.016/(2π/64·80·10⁻⁶·2))² = 25·1018.59² = 25 938 2xx.
+    assert_eq!(
+        FixedTracking::from_cfo_word(0, 3616, &fx),
+        FixedTracking::from_clock_offset(0.0, &fx)
+    );
+    assert_eq!(
+        FixedTracking::from_cfo_word(777, 3616, &fx).weight,
+        25_938_223
+    );
+    assert_eq!(
+        FixedTracking::from_clock_offset(1.0, &fx).weight,
+        25_938_223
+    );
+}
+
+#[test]
+fn the_start_from_the_cfo_word_is_the_start_from_the_offset() {
+    // Against the float conversion the tools used until now: ppm = word·fs/2^P/fc·10⁶, then
+    // `from_clock_offset`. The two rates differ by their two roundings (half a unit each)
+    // and by the register's rounding of fs/fc (half of 2^−20), which the word multiplies:
+    // 1 + |word|·2^(R−23).
+    let mut rng = Rng::new(0x0cf0);
+    let mut closest = 0f64;
+    for (fs, fc) in [
+        (20e6, 5.8e9),
+        (20e6, 2.412e9),
+        (20e6, 5.18e9),
+        (20e6, 7.115e9),
+        (2e6, 903e6),
+    ] {
+        let ratio = clock_ratio(fs, fc).unwrap();
+        for (r, p) in [(10u32, 22u32), (6, 22), (20, 22), (10, 30)] {
+            let fx = FixedOfdmConfig {
+                rate_frac: r,
+                front: FixedRxConfig {
+                    nco_phase_bits: p,
+                    ..FixedRxConfig::default()
+                },
+                ..FixedOfdmConfig::default()
+            };
+            assert!(fx.is_valid());
+            for _ in 0..200 {
+                // Up to ±60 ppm of the carrier.
+                let ppm_true = (rng.uniform() * 2.0 - 1.0) * 60.0;
+                let word = (ppm_true * 1e-6 * fc / fs * 2f64.powi(p as i32)).round() as i64;
+                let ppm = word as f64 * fs / 2f64.powi(p as i32) / fc * 1e6;
+                let a = FixedTracking::from_cfo_word(word, ratio, &fx);
+                let b = FixedTracking::from_clock_offset(ppm, &fx);
+                let bound = 1.0 + word.abs() as f64 * 2f64.powi(r as i32 - 23);
+                let d = (a.rate0 - b.rate0).abs() as f64;
+                assert!(
+                    d <= bound,
+                    "{fs} {fc} R {r} P {p} word {word}: {d} > {bound}"
+                );
+                closest = closest.max(d / bound);
+                assert_eq!((a.weight, a.delta, a.shift), (b.weight, b.delta, b.shift));
+            }
+        }
+    }
+    // The bound is not slack: some draw comes within a third of it.
+    assert!(closest > 0.67, "{closest}");
+    println!("largest difference over its bound: {closest:.2}");
 }

@@ -364,6 +364,31 @@ pub fn remove_dc_fixed(x: &[(i16, i16)], dc: IQ) -> Vec<IQ> {
         .collect()
 }
 
+/// The stream the decoder is handed (ADR 0008, decision 1): the ADC's samples `x` less the
+/// offset [`ltf_dc_offset_fixed`] finds in the two long training symbols at `fft_start`
+/// ([`remove_dc_fixed`]), with the CFO word `cfo_phase` taken out by the front's rotator
+/// ([`correct_fixed`]) and narrowed to [`Y_BITS`]: the ADC's LSB is kept, and
+/// `rx_ofdm_fixed`'s default input is this width. The whole stream is rotated from its
+/// sample 0 with the one offset of this packet; `None` when the stream does not hold the two
+/// symbols or the configuration is invalid.
+///
+/// Where the hardware's replay starts, and so the phase its first sample is rotated by, is
+/// the streaming model's to fix (`RxFrontFixed`'s second history, before the hand-off's RTL).
+pub fn handoff_fixed(
+    x: &[(i16, i16)],
+    fft_start: usize,
+    cfo_phase: i64,
+    fx: &FixedRxConfig,
+) -> Option<Vec<IQ>> {
+    let dc = ltf_dc_offset_fixed(x, fft_start, cfo_phase, fx)?;
+    Some(correct_fixed(
+        &remove_dc_fixed(x, dc),
+        cfo_phase,
+        Y_BITS,
+        fx,
+    ))
+}
+
 pub(crate) fn rotate_with(phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     let l = fx.nco_lut_bits;
     let p = fx.nco_phase_bits;

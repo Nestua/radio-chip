@@ -1,15 +1,19 @@
-# rxper fixedw: float front (acquire, correct) + rx_ofdm::decode_ppdu_from, carrier 5.8 GHz
+# rxper fixedw: 12-bit ADC, integer front (acquire_fixed), hand-off of ADR 0008 (handoff_fixed) + rx_ofdm_fixed::decode_ppdu_fixed against the float decoder on the same samples, carrier 5.8 GHz
 # cordic wide: not a usable set of widths, left out
 
-## widths of the integer data path: frames lost of 2000 (rounded up), 1000 octets, the same frames for every column,
-# 12-bit samples at -12 dBFS, eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.
-# default = W16 s2 T12 U16 C10 F4, rotator L9 Q11 (truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says (round: half a table address added to the rotation phase);
-# wide = every width far beyond need (W28 s8 T24 U40 C20 F8, L16 Q20, CORDIC N24 A24): what is left is not a width's.
-# columns: float | wide | front wide | data wide | L11 Q14 | C14 | F8 | default | round | round L8 | R6 | R8 | M8 | M12 | K8 | K12 | V4 | W14 s0 | W14 s2 | W15 s2 | W16 s0 | W16 s4 | W18 s4 | T8 | T10 | T14 | U10 | U12 | U14 | U20 | C6 | C8 | F0 | L7 | L8 | L11 | Q8 | Q9 | N10 | N12
-AWGN  6 Mb/s  3.5 dB   |  190  190  190  189  191  190  190  190  189  190  190  190  190  190  191  190  190  189  192  190  189  191  189  185  189  189  188  190  189  189  190  190  190  185  191  192  191  189  192  190  of 2000
-AWGN 54 Mb/s 20.0 dB   |  184  184  184  188  185  188  188  188  189  192  188  188  188  188  188  188  188  188  190  188  188  191  189  190  189  188  187  188  190  188  205  188  188  218  190  184  199  186  188  190  of 2000
-AWGN 54 Mb/s 35.0 dB   |    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0  of 2000
-TGn D 18 Mb/s 15.5 dB  |  215  215  215  215  215  215  215  215  213  215  215  215  215  215  215  215  215  214  215  215  214  215  215  215  215  215  223  215  216  215  215  215  215  218  216  215  217  217  216  215  of 2000
-TGn D 54 Mb/s 26.5 dB  |  188  188  190  193  190  194  194  194  188  191  194  194  194  194  194  194  194  192  200  194  192  199  193  200  189  191  270  195  194  194  205  195  194  203  194  191  200  196  194  194  of 2000
-TGn E 54 Mb/s 26.5 dB  |  130  130  132  129  131  130  130  130  130  135  130  130  130  130  130  130  130  135  170  130  135  169  130  133  130  128  254  143  131  128  142  131  130  152  130  133  135  130  131  130  of 2000
-TGn E 54 Mb/s 45.0 dB  |    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0   33    0    0   33    0    0    0    0   36    0    0    0    0    0    0    0    0    0    0    0    0    0  of 2000
+## widths of the integer receiver: frames lost of 2000, 1000 octets, the same frames for every column,
+# the frame at -12 dBFS at the 12-bit ADC, the integer acquisition for every column, the decoders handed ADR 0008's stream
+# (the ADC's samples less the offset estimated from the long training symbols, rotated; in floating point for the float column),
+# eight-bit soft values with a clip of 3, clock offset uniform in ±40 ppm.
+# default = hand-off Z13 s1, W16 T12 U16 C10 F4, rotator L9 Q11 (the data path's truncating), CORDIC N16, tracker R10 M16 K16 V10; each other column changes what its name says
+# (round: half a table address added to the data path's rotation phase; Z12 s2: the hand-off narrowed to 12 bits, two fractional bits; the rotator's columns change the hand-off's rotator and the offset's estimate too);
+# ppm start / word start: the model's defaults (rotation phase rounded) with the tracker started through the float conversion of the CFO to ppm, and from the CFO word times the register fs/fc (every other integer column starts from the word; word start and round are one configuration);
+# wide = every width far beyond need (W28 s8 T24 U40 C20 F8, P30 L16 Q20, CORDIC N24 A24) behind the acquisition, which is the default front's for every column (its CFO word shifted to P30): what is left is not one of those widths'.
+# columns: float | ppm start | word start | wide | front wide | data wide | L11 Q14 | C14 | F8 | default | round | round L8 | R6 | R8 | M8 | M12 | K8 | K12 | V4 | Z12 s2 | W14 s0 | W14 s1 | W15 s1 | W16 s0 | W16 s2 | W16 s3 | W18 s4 | T8 | T10 | T14 | U10 | U12 | U14 | U20 | C6 | C8 | F0 | L7 | L8 | L11 | Q8 | Q9 | N10 | N12
+AWGN  6 Mb/s  3.5 dB   |  217  220  220  218  218  221  218  221  221  221  220  220  221  221  221  221  220  221  221  221  218  221  221  218  221  221  221  217  219  221  222  222  221  221  221  221  221  218  223  215  220  220  220  221  of 2000
+AWGN 54 Mb/s 20.0 dB   |  181  191  191  182  181  194  184  191  191  191  191  206  190  191  191  191  191  191  191  191  192  191  191  192  189  192  191  198  191  186  190  195  193  193  218  190  191  246  206  184  215  202  191  193  of 2000
+AWGN 54 Mb/s 35.0 dB   |    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0  of 2000
+TGn D 18 Mb/s 15.5 dB  |  182  181  181  182  182  182  181  182  182  182  181  182  182  182  182  182  182  182  182  183  182  182  182  182  182  182  182  182  182  182  180  182  182  183  182  182  182  180  181  181  182  182  181  182  of 2000
+TGn D 54 Mb/s 26.5 dB  |  220  221  221  217  217  221  221  224  224  224  221  228  224  224  224  224  224  224  224  216  221  224  224  221  220  223  221  228  223  221  280  220  222  223  227  223  224  248  229  220  225  225  223  223  of 2000
+TGn E 54 Mb/s 26.5 dB  |  144  143  143  146  143  148  144  145  145  145  143  145  145  145  145  145  145  145  145  146  145  145  145  145  144  148  148  155  145  143  250  150  148  147  157  148  145  177  154  142  148  145  143  144  of 2000
+TGn E 54 Mb/s 45.0 dB  |    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0    0   41    1    0    0    0    0    0    0    0    0    0    0    0    0  of 2000
