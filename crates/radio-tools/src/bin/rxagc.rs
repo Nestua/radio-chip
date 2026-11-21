@@ -28,17 +28,17 @@ use std::process::ExitCode;
 
 use radio_phy::channel::{
     agc_transient, awgn, fractional_delay, frequency_offset, mean_power, resample, tgn_taps,
-    Doppler, FastAttackAgc, GainDc, Multipath, Rng, TgnModel,
+    AgcTrace, Doppler, FastAttackAgc, GainDc, GainState, Multipath, Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
-use radio_phy::ppdu::{build_ppdu, Rate};
+use radio_phy::ppdu::{build_ppdu, data_symbols, Rate};
 use radio_phy::rx_front::{acquire, correct, dc_block, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
-    acquire_fixed, correct_fixed, dc_block_fixed, ltf_dc_offset_fixed, remove_dc_fixed, to_adc,
-    FixedRxConfig, ADC_FULL_SCALE, IQ,
+    acquire_fixed, acquisitions_fixed, correct_fixed, dc_block_fixed, handoff_fixed,
+    ltf_dc_offset_fixed, remove_dc_fixed, to_adc, FixedRxConfig, ADC_FULL_SCALE, IQ,
 };
-use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
+use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, RxOfdmError, Tracking};
+use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
 
@@ -112,6 +112,9 @@ struct Point {
     /// The gain is held from this many samples after the packet's first sample instead of
     /// from the first lock inside the packet (never before that lock).
     hold_after: Option<usize>,
+    /// The frame's first 320 samples (its two training fields and nothing after them) are
+    /// also sent at the stream's start, 280 to 330 samples before the frame itself.
+    burst: bool,
 }
 
 /// A receiver chain on the ADC's samples.
@@ -191,22 +194,34 @@ struct Outcome {
     changes: usize,
 }
 
-fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outcome {
-    let mut rng = Rng::new(mix(pt.scene, number));
-    let full = f64::from(ADC_FULL_SCALE);
-    let cfg_float = RxConfig {
-        dc_shift: None,
-        ..RxConfig::new(FS)
-    };
-    let fx = FixedRxConfig::default();
-    let ofdm = RxOfdmConfig::default();
+/// One frame of a point as the gain control meets it.
+struct Stream {
+    psdu: Vec<u8>,
+    /// The channel's samples: the frame behind `lead` samples of noise, 200 after it.
+    x: Vec<C>,
+    /// The same at the antenna's level (the point's noise level at the largest gain).
+    xs: Vec<C>,
+    dc: GainDc,
+    lead: usize,
+    /// One past the frame's last sample.
+    end: usize,
+    /// Mean power of the frame's span in `xs`.
+    span_power: f64,
+    /// The generator after the frame's own draws: what follows belongs to the gain control.
+    rng: Rng,
+}
 
+fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
+    let mut rng = Rng::new(mix(pt.scene, number));
     let psdu: Vec<u8> = (0..OCTETS).map(|_| (rng.next_u64() & 0xff) as u8).collect();
     let f = frame(&psdu, pt.rate);
     let lead = 600 + (rng.uniform() * 50.0) as usize;
     let mut x = vec![(0.0, 0.0); lead];
     x.extend_from_slice(&f);
     x.extend(vec![(0.0, 0.0); 200]);
+    if pt.burst {
+        x[..320].copy_from_slice(&f[..320]);
+    }
     let x = match pt.ch {
         Channel::Awgn => fractional_delay(&x, rng.uniform()),
         Channel::Tgn(m) => {
@@ -237,6 +252,38 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
         seed: rng.next_u64(),
         before_gain: (a * th0.cos(), a * th0.sin()),
     };
+    let span_power = mean_power(span) * k * k;
+    Stream {
+        psdu,
+        x,
+        xs,
+        dc,
+        lead,
+        end,
+        span_power,
+        rng,
+    }
+}
+
+fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outcome {
+    let Stream {
+        psdu,
+        x,
+        xs,
+        dc,
+        lead,
+        end,
+        span_power,
+        mut rng,
+    } = stream(pt, agc, number);
+    let full = f64::from(ADC_FULL_SCALE);
+    let cfg_float = RxConfig {
+        dc_shift: None,
+        ..RxConfig::new(FS)
+    };
+    let fx = FixedRxConfig::default();
+    let ofdm = RxOfdmConfig::default();
+    let span = &x[lead.min(end)..end];
     // The control's detectors see the offset with the signal.
     let mut t = agc.run_dc(&xs, Some(&dc));
     // The gain is held from the first lock inside the packet (assumed: a hold driven by the
@@ -254,7 +301,7 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
     let g = 10f64.powf(settled / 20.0);
     let at_settled: Vec<C> = xs.iter().map(|s| (s.0 * g, s.1 * g)).collect();
     let adc_agc = to_adc(&agc_transient(&at_settled, &states), full);
-    let level = mean_power(span) * k * k * g * g;
+    let level = span_power * g * g;
 
     let adc_known = columns.iter().any(|c| c.known).then(|| {
         let gain = full * (10f64.powf(KNOWN_DBFS / 10.0) / mean_power(span)).sqrt();
@@ -366,6 +413,346 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
         held,
         level,
         changes,
+    }
+}
+
+/// Who keeps the gain still in a column of `loop` (ADR 0008, decision 2).
+#[derive(Clone, Copy)]
+struct Keeper {
+    name: &'static str,
+    /// The control's own timer: samples a lock is kept ([`FastAttackAgc::lock_hold`]).
+    lock_hold: usize,
+    /// Whether the timer also keeps a lock taken at the largest gain
+    /// ([`FastAttackAgc::lock_hold_at_max`]).
+    at_max: bool,
+    /// How the hold is driven.
+    hold: Hold,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Hold {
+    /// None: the control is free all through.
+    Free,
+    /// From the control's first lock inside the packet to the stream's end: the assumption
+    /// of every other command, which knows where the packet is.
+    FromLock,
+    /// The front's: raised this many samples after it declares an acquisition, dropped at
+    /// the end SIGNAL's length gives, or where SIGNAL is known to have failed.
+    Front { delay: usize },
+}
+
+/// What one keeper did with one frame.
+#[derive(Clone, Copy, Default)]
+struct Kept {
+    ok: bool,
+    /// Acquisitions the front declared and held on before the frame was decided.
+    tried: usize,
+    /// Holds dropped because SIGNAL did not decode.
+    dropped: usize,
+    /// The gain changed after the packet's short training field (160 samples) and before
+    /// its end, in the stream the last acquisition tried saw.
+    moved: bool,
+}
+
+/// The ADC's samples for a trace of the gain control. As [`AgcTrace::gain_states_dc`], but
+/// the phase jump of a change is drawn from `seed` and the change's own sample, so that a
+/// stream with a later change added is the same stream up to that change (the loop below
+/// runs the control again after every decision of the front).
+fn adc_of(xs: &[C], t: &AgcTrace, dc: &GainDc, seed: u64) -> Vec<(i16, i16)> {
+    let settled = t.changes.last().map_or(0.0, |c| c.1);
+    let mut phase = 0.0;
+    let mut phases = vec![0.0];
+    for c in t.changes.iter().skip(1) {
+        let u = Rng::new(mix(seed, c.0 as u64)).uniform();
+        phase += (2.0 * u - 1.0) * JUMP_DEG.to_radians();
+        phases.push(phase);
+    }
+    let mut states: Vec<GainState> = t
+        .changes
+        .windows(2)
+        .zip(&phases)
+        .map(|(w, ph)| GainState {
+            until: w[1].0,
+            gain_db: w[0].1 - settled,
+            phase: ph - phase,
+            dc: dc.at(w[0].1),
+        })
+        .collect();
+    states.push(GainState {
+        until: usize::MAX,
+        gain_db: 0.0,
+        phase: 0.0,
+        dc: dc.at(settled),
+    });
+    let g = 10f64.powf(settled / 20.0);
+    let at_settled: Vec<C> = xs.iter().map(|s| (s.0 * g, s.1 * g)).collect();
+    to_adc(
+        &agc_transient(&at_settled, &states),
+        f64::from(ADC_FULL_SCALE),
+    )
+}
+
+/// Samples from the FFT window of T1 to the end of SIGNAL's symbol, and the decoder's
+/// latency after it that the hold's release waits for when SIGNAL fails (ADR 0008,
+/// decision 3: SIGNAL is known 9 µs after its last sample at the latest).
+const SIGNAL_END: usize = 128 + 80;
+const SIGNAL_LATENCY: usize = 180;
+
+/// One frame through the closed loop of one keeper: the gain control (with its timer), the
+/// ADC, the integer front, ADR 0008's hand-off and the integer decoder; the front's hold
+/// fed back into the control. All integer from the ADC on.
+fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
+    let agc = FastAttackAgc {
+        lock_hold: k.lock_hold,
+        lock_hold_at_max: k.at_max,
+        ..*agc
+    };
+    let cfg = RxConfig::new(FS);
+    let fx = FixedRxConfig::default();
+    let fo = FixedOfdmConfig::default();
+    let ofdm = RxOfdmConfig::default();
+    let ratio = clock_ratio(FS, CARRIER_HZ).unwrap_or(0);
+    let mut out = Kept::default();
+    let decode = |adc: &[(i16, i16)], fft_start: usize, word: i64| {
+        let z = handoff_fixed(adc, fft_start, word, &fx).unwrap_or_default();
+        let start = FixedTracking::from_cfo_word(word, ratio, &fo);
+        decode_ppdu_fixed(&z, fft_start, &ofdm, &fo, start)
+    };
+    let moved = |t: &AgcTrace| {
+        t.changes
+            .iter()
+            .any(|c| c.0 > st.lead + 160 && c.0 < st.end)
+    };
+
+    let Hold::Front { delay } = k.hold else {
+        let free = agc.run_held(&st.xs, Some(&st.dc), &[]);
+        let t = match (k.hold, free.locks.iter().find(|l| **l > st.lead)) {
+            (Hold::FromLock, Some(&lock)) => {
+                agc.run_held(&st.xs, Some(&st.dc), &[(lock, usize::MAX)])
+            }
+            _ => free,
+        };
+        let adc = adc_of(&st.xs, &t, &st.dc, jumps);
+        if let Some(a) = acquire_fixed(&adc, &cfg, &fx) {
+            out.tried = 1;
+            out.ok = decode(&adc, a.fft_start, a.cfo_phase).is_ok_and(|d| d.psdu == st.psdu);
+            out.moved = moved(&t);
+        }
+        return out;
+    };
+
+    let mut holds: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0usize;
+    // A frame of 1000 octets and its lead hold a handful of acquisitions at most.
+    for _ in 0..16 {
+        let t = agc.run_held(&st.xs, Some(&st.dc), &holds);
+        let adc = adc_of(&st.xs, &t, &st.dc, jumps);
+        // The front searches again once its hold is dropped.
+        let Some(a) = acquisitions_fixed(&adc, &cfg, &fx)
+            .into_iter()
+            .find(|a| a.detected_at >= from)
+        else {
+            break;
+        };
+        out.tried += 1;
+        let raised = a.decided_at + delay;
+        // The stream as it is while the hold lasts; where it ends is the decoder's to say.
+        holds.push((raised, usize::MAX));
+        let t = agc.run_held(&st.xs, Some(&st.dc), &holds);
+        let adc = adc_of(&st.xs, &t, &st.dc, jumps);
+        out.moved = moved(&t);
+        let dropped = match decode(&adc, a.fft_start, a.cfo_phase) {
+            Ok(d) => {
+                if d.psdu == st.psdu {
+                    out.ok = true;
+                    break;
+                }
+                // A SIGNAL that decoded: held for the length it gives.
+                a.fft_start + SIGNAL_END + 80 * data_symbols(d.signal.rate, d.signal.length)
+            }
+            Err(
+                RxOfdmError::SignalParity | RxOfdmError::SignalRate(_) | RxOfdmError::SignalLength,
+            ) => {
+                out.dropped += 1;
+                a.fft_start + SIGNAL_END + SIGNAL_LATENCY
+            }
+            // SIGNAL passed and the stream ends inside the frame it announces, or its data
+            // do not descramble: held to the stream's end.
+            Err(_) => break,
+        };
+        // A hold that would act only after its own end is not raised at all.
+        if dropped <= raised {
+            holds.pop();
+        } else if let Some(h) = holds.last_mut() {
+            h.1 = dropped;
+        }
+        from = dropped;
+    }
+    out
+}
+
+/// `loop`'s row: per keeper the frames lost, the acquisitions tried, the holds dropped on a
+/// failed SIGNAL and the frames whose gain moved after the short training field.
+#[derive(Clone)]
+struct LoopTally {
+    frames: usize,
+    lost: Vec<usize>,
+    only: Vec<(usize, usize)>,
+    tried: Vec<usize>,
+    dropped: Vec<usize>,
+    moved: Vec<usize>,
+}
+
+fn run_loop(pt: &Point, keepers: &[Keeper], frames: usize) -> LoopTally {
+    let agc = FastAttackAgc {
+        power_samples: 16,
+        unlock_on_overload: true,
+        ..FastAttackAgc::ad9361_reset(2)
+    };
+    let n = threads();
+    let zero = LoopTally {
+        frames: 0,
+        lost: vec![0; keepers.len()],
+        only: vec![(0, 0); keepers.len()],
+        tried: vec![0; keepers.len()],
+        dropped: vec![0; keepers.len()],
+        moved: vec![0; keepers.len()],
+    };
+    let parts = par(|th| {
+        let mut t = zero.clone();
+        for number in (th..frames).step_by(n) {
+            let mut st = stream(pt, &agc, number as u64);
+            let jumps = st.rng.next_u64();
+            let r: Vec<Kept> = keepers.iter().map(|k| keep(&st, &agc, k, jumps)).collect();
+            let reference = r.first().is_none_or(|k| k.ok);
+            for (c, k) in r.iter().enumerate() {
+                t.lost[c] += usize::from(!k.ok);
+                t.only[c].0 += usize::from(!k.ok && reference);
+                t.only[c].1 += usize::from(k.ok && !reference);
+                t.tried[c] += k.tried;
+                t.dropped[c] += k.dropped;
+                t.moved[c] += usize::from(k.moved);
+            }
+            t.frames += 1;
+        }
+        t
+    });
+    parts.into_iter().fold(zero, |mut a, t| {
+        for c in 0..a.lost.len() {
+            a.lost[c] += t.lost[c];
+            a.only[c].0 += t.only[c].0;
+            a.only[c].1 += t.only[c].1;
+            a.tried[c] += t.tried[c];
+            a.dropped[c] += t.dropped[c];
+            a.moved[c] += t.moved[c];
+        }
+        a.frames += t.frames;
+        a
+    })
+}
+
+/// Decision 2 of ADR 0008 as a closed loop: the control's timer and the front's own hold
+/// against the hold the earlier commands assumed.
+fn hold_loop(frames: usize) {
+    let keeper = |name: &'static str, lock_hold: usize, at_max: bool, hold: Hold| Keeper {
+        name,
+        lock_hold,
+        at_max,
+        hold,
+    };
+    let front = Hold::Front { delay: 0 };
+    let keepers = [
+        keeper("from the lock", 0, true, Hold::FromLock),
+        keeper("timer + front", 512, true, front),
+        keeper("timer<max + front", 512, false, front),
+        keeper("front alone", 0, true, front),
+        keeper("timer<max alone", 512, false, Hold::Free),
+        keeper("nothing", 0, true, Hold::Free),
+        keeper("t<max + front +40", 512, false, Hold::Front { delay: 40 }),
+        keeper("t<max + front +400", 512, false, Hold::Front { delay: 400 }),
+    ];
+    const IDLE: f64 = -30.0;
+    println!(
+        "# rxagc loop: ADR 0008, decision 2, as a closed loop. {frames} frames of {OCTETS} octets per row, the\n\
+         # frames of `hold` (the same scenes); noise at {IDLE} dBFS at the largest gain, no DC offset; clock\n\
+         # offset uniform in ±40 ppm, carrier 5.8 GHz. Gain control: the AD9361's reset values with 16\n\
+         # samples of power and the overload exit on (as every command). Receiver, all in integers:\n\
+         # acquire (RxFrontFixed), hand-off (handoff_fixed), decode_ppdu_fixed at their defaults, the\n\
+         # tracker started from the CFO word. Phase jump per gain change uniform in ±{JUMP_DEG}°.\n\
+         # Who keeps the gain still:\n\
+         #   from the lock    = held from the control's first lock inside the packet to the stream's end\n\
+         #                      (the tool knows where the packet is: the assumption until now);\n\
+         #   timer + front    = the control keeps every lock 512 samples; the front raises a hold where it\n\
+         #                      declares an acquisition and drops it at the end SIGNAL's length gives, or\n\
+         #                      {SIGNAL_LATENCY} samples after SIGNAL's symbol when SIGNAL fails; it then searches again;\n\
+         #   timer<max + front = the same, the timer keeping only a lock taken below the largest gain\n\
+         #                      (a lock on noise is left at the first overload);\n\
+         #   front alone      = the hold without any timer;  timer<max alone = that timer and no hold;\n\
+         #   nothing          = neither;\n\
+         #   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and\n\
+         #                      20 µs) late; a hold that would act after its own end is not raised.\n\
+         # A released control returns to the largest gain and searches (an assumption).\n\
+         # Rows 'burst': the frame's two training fields alone (320 samples, nothing after them) are\n\
+         # sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise. The\n\
+         # columns without the front's hold try the stream's first acquisition only and lose every\n\
+         # such frame by construction; only the columns with the front's hold search again.\n\
+         # Each cell: frames lost, +a−b against 'from the lock' (lost by this column alone, by that one\n\
+         # alone), then acquisitions tried / holds dropped on a failed SIGNAL / frames whose gain\n\
+         # changed after the short training field (in the stream of the last acquisition tried)."
+    );
+    println!(
+        "# {:<22} {:>6} {}",
+        "point",
+        "frames",
+        keepers
+            .iter()
+            .map(|k| format!("{:>28}", k.name))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let d = Channel::Tgn(TgnModel::D);
+    let points: [(&str, Channel, Rate, f64); 12] = [
+        ("AWGN 54 Mb/s 25 dB", Channel::Awgn, Rate::R54, 25.0),
+        ("AWGN 54 Mb/s 30 dB", Channel::Awgn, Rate::R54, 30.0),
+        ("AWGN 54 Mb/s 40 dB", Channel::Awgn, Rate::R54, 40.0),
+        ("AWGN 54 Mb/s 60 dB", Channel::Awgn, Rate::R54, 60.0),
+        ("AWGN 6 Mb/s 30 dB", Channel::Awgn, Rate::R6, 30.0),
+        ("AWGN 6 Mb/s 60 dB", Channel::Awgn, Rate::R6, 60.0),
+        ("TGn D 54 Mb/s 40 dB", d, Rate::R54, 40.0),
+        ("TGn D 54 Mb/s 60 dB", d, Rate::R54, 60.0),
+        ("TGn D 6 Mb/s 30 dB", d, Rate::R6, 30.0),
+        ("AWGN 6 Mb/s 5 dB", Channel::Awgn, Rate::R6, 5.0),
+        ("burst, AWGN 54 Mb/s 30 dB", Channel::Awgn, Rate::R54, 30.0),
+        ("burst, AWGN 6 Mb/s 30 dB", Channel::Awgn, Rate::R6, 30.0),
+    ];
+    for (pi, (name, ch, rate, snr)) in points.into_iter().enumerate() {
+        let pt = Point {
+            scene: 8000 + pi as u64,
+            rate,
+            snr_db: snr,
+            ch,
+            idle_dbfs: IDLE,
+            per_index_dbfs: f64::NEG_INFINITY,
+            before_dbfs: f64::NEG_INFINITY,
+            ppm_band: None,
+            hold_after: None,
+            burst: name.starts_with("burst"),
+        };
+        let t = run_loop(&pt, &keepers, frames);
+        println!(
+            "  {name:<22} {:>6} {}",
+            t.frames,
+            (0..keepers.len())
+                .map(|c| format!(
+                    "{:>28}",
+                    format!(
+                        "{} +{}−{} {}/{}/{}",
+                        t.lost[c], t.only[c].0, t.only[c].1, t.tried[c], t.dropped[c], t.moved[c]
+                    )
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
 }
 
@@ -570,6 +957,7 @@ fn per(frames: usize) {
                     before_dbfs: none(),
                     ppm_band: None,
                     hold_after: None,
+                    burst: false,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 for (c, curve) in curves.iter_mut().enumerate() {
@@ -625,6 +1013,7 @@ fn per(frames: usize) {
                     before_dbfs: none(),
                     ppm_band: None,
                     hold_after: None,
+                    burst: false,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!(
@@ -690,6 +1079,7 @@ fn level(frames: usize) {
                 before_dbfs: none(),
                 ppm_band: None,
                 hold_after: None,
+                burst: false,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(&format!("{idle:>5.0} dBFS"), &t, reference));
@@ -752,6 +1142,7 @@ fn dc(frames: usize) {
                     before_dbfs: before,
                     ppm_band: None,
                     hold_after: None,
+                    burst: false,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!("{}", row_line(&format!("{name}, {snr} dB"), &t, reference));
@@ -804,6 +1195,7 @@ fn pole(frames: usize) {
             before_dbfs: none(),
             ppm_band: None,
             hold_after: None,
+            burst: false,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(&format!("{snr} dB"), &t, reference));
@@ -836,6 +1228,7 @@ fn pole(frames: usize) {
             before_dbfs: none(),
             ppm_band: None,
             hold_after: None,
+            burst: false,
         };
         let t = run(&pt, &columns, reference, frames);
         println!("{}", row_line(name, &t, reference));
@@ -899,6 +1292,7 @@ fn cfo(frames: usize) {
                 before_dbfs: none(),
                 ppm_band: Some((lo, hi)),
                 hold_after: None,
+                burst: false,
             };
             let t = run(&pt, &columns, reference, frames);
             println!(
@@ -977,6 +1371,7 @@ fn cand(frames: usize) {
                 before_dbfs: before,
                 ppm_band: None,
                 hold_after: None,
+                burst: false,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(case, &t, reference));
@@ -1005,6 +1400,7 @@ fn cand(frames: usize) {
                     before_dbfs: none(),
                     ppm_band: None,
                     hold_after: None,
+                    burst: false,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!(
@@ -1074,6 +1470,7 @@ fn hold(frames: usize) {
                 before_dbfs: none(),
                 ppm_band: None,
                 hold_after,
+                burst: false,
             };
             let t = run(&pt, &columns, reference, frames);
             println!("{}", row_line(&format!("{name}, {what}"), &t, reference));
@@ -1246,6 +1643,7 @@ fn edge(frames: usize) {
                     before_dbfs: before,
                     ppm_band: band,
                     hold_after: None,
+                    burst: false,
                 };
                 let t = run(&pt, &columns, reference, frames);
                 println!("{}", row_line(&format!("{name}, {case}"), &t, reference));
@@ -1266,9 +1664,10 @@ fn main() -> ExitCode {
         "cfo" => cfo(n.unwrap_or(2000)),
         "cand" => cand(n.unwrap_or(2000)),
         "hold" => hold(n.unwrap_or(2000)),
+        "loop" => hold_loop(n.unwrap_or(2000)),
         "edge" => edge(n.unwrap_or(2000)),
         _ => {
-            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold|edge [frames]");
+            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold|edge|loop [frames]");
             return ExitCode::from(2);
         }
     }

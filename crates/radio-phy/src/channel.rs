@@ -338,6 +338,10 @@ pub struct FastAttackAgc {
     /// (ADR 0008, decision 2, step 1; 0: the control as published). The power comparison
     /// goes on counting meanwhile; an overload seen then is not remembered.
     pub lock_hold: usize,
+    /// Whether [`Self::lock_hold`] also keeps a lock taken at the largest gain (a lock on
+    /// noise, or on a packet too weak to overload): if not, such a lock is left at once
+    /// when a detector says so, and only a lock below the largest gain is kept.
+    pub lock_hold_at_max: bool,
 }
 
 /// What [`FastAttackAgc::run`] did.
@@ -384,6 +388,7 @@ impl FastAttackAgc {
             unlock_on_overload: false,
             unlock_to_max: true,
             lock_hold: 0,
+            lock_hold_at_max: true,
         }
     }
 
@@ -544,7 +549,13 @@ impl FastAttackAgc {
                         *stood += 1;
                         unlock |= *stood >= self.exit_count.max(1);
                     }
-                    if unlock && n >= since.saturating_add(self.lock_hold) {
+                    // The gain does not change while locked: `gain` is the lock's.
+                    let kept = if self.lock_hold_at_max || gain < self.max_gain_db {
+                        self.lock_hold
+                    } else {
+                        0
+                    };
+                    if unlock && n >= since.saturating_add(kept) {
                         t.unlocks.push(n);
                         if self.unlock_to_max {
                             next = self.max_gain_db;

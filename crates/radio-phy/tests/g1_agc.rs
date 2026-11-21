@@ -34,6 +34,7 @@ fn agc() -> FastAttackAgc {
         unlock_on_overload: true,
         unlock_to_max: true,
         lock_hold: 0,
+        lock_hold_at_max: true,
     }
 }
 
@@ -704,4 +705,39 @@ fn a_hold_freezes_the_gain_and_its_release_starts_the_search_again() {
     x.extend(level(-80.0, 200));
     x.extend(level(-30.0, 200));
     assert_eq!(agc().run_held(&x, None, &[]), agc().run(&x));
+}
+
+#[test]
+fn a_lock_at_the_largest_gain_may_be_left_unkept() {
+    // Silence at −120 dB is −50 dBFS at the gain of 70: measured over 10 … 25, the lock
+    // change of +40 has nowhere to go, locked from 26 at the largest gain. A packet at
+    // −50 dB from sample 40 is a peak of 10 there.
+    let mut x = level(-120.0, 40);
+    x.extend(level(-50.0, 260));
+    let kept = FastAttackAgc {
+        lock_hold: 100,
+        ..agc()
+    };
+    // Kept like any lock, 26 … 125, the control sits through 86 samples of overload and
+    // leaves at 126.
+    let t = kept.run(&x);
+    assert_eq!((t.locks[0], t.unlocks.clone()), (26, vec![126]));
+    assert_eq!(t.changes[1], (128, 65.0));
+    // With the timer for locks below the largest gain only it leaves at the packet's first
+    // sample, as with no timer, and the first case follows from 41: 65 from 42.
+    let below = FastAttackAgc {
+        lock_hold_at_max: false,
+        ..kept
+    };
+    let t = below.run(&x);
+    assert_eq!(t, agc().run(&x));
+    assert_eq!(t.unlocks, [40]);
+    assert_eq!(t.changes[1], (42, 65.0));
+    // That packet's own lock, 45 samples after 41 at a gain of 40, is below the largest
+    // gain and kept: a spike at 100 (a peak of 1.2) does not unlock it, and does with no
+    // timer.
+    x[100] = (0.012, 0.0);
+    assert_eq!(below.run(&x).unlocks, [40]);
+    assert_eq!(agc().run(&x).unlocks, [40, 100]);
+    assert_eq!(below.run(&x).locks, [26, 86]);
 }
