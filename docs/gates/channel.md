@@ -436,7 +436,7 @@ at a gain change).
 ## 2026-11-21 · G0 + G1 · the gain control's lock timer and hold input (ADR 0008, decision 2)
 
 Commit: the one carrying this entry. Command: `cargo test -p radio-phy --test g1_agc`
-(18 pass).
+(19 pass).
 
 **G0 — what is defined here, none of it published for the AD9361** (whether its
 fast-attack machine has such a timer, and how its hold pin acts, is to be read from its
@@ -446,12 +446,14 @@ documents and tried at R1):
   and its exit is taken at the first sample allowed; an overload seen while kept is not
   remembered. 0 (the reset value here): the control as published.
 - `lock_hold_at_max`: whether the timer also keeps a lock taken at the largest gain. With
-  it off only a lock below the largest gain is kept — ADR 0008's decision 2 as amended.
+  it off only a lock below the largest gain is kept. (ADR 0008's decision 2 ended, after
+  the measurement, with no timer at all: both fields are the simulator's, to show why.)
 - `run_held(x, dc, holds)`: each window (a, b) keeps samples a … b − 1 at the gain of
   sample a; no detector is looked at and nothing is counted. At the end of sample b − 1
   the control is released as by an unlock: a lock is left there (recorded at b − 1), the
   gain is the largest from b if `unlock_to_max`, and the search starts at b with nothing
-  kept from before. Windows may overlap; an empty one does nothing. `run_dc` is `run_held`
+  kept from before. A window that ends with the stream leaves the lock at the last sample;
+  one that runs beyond it leaves nothing. Windows may overlap; an empty one does nothing. `run_dc` is `run_held`
   without windows.
 
 **G1 — tests, written before the code** (the fields and the function did not exist; the
@@ -472,7 +474,16 @@ locked from 45 at a gain of 40):
   the flag off it leaves at the packet's first sample as with no timer, and the packet's
   own lock, below the largest gain, is kept against a spike.
 
-**Mutations** (17, clean build each, restored by `cp` + `touch`; every one fails its
+- `the_timer_and_the_hold_at_their_edges` (after the review, `rx_front.md`): a lock kept
+  without end; an overload on the first sample of a lock that is not kept; a hold ending
+  with the stream, one sample before and one after; silence after a hold from sample 0
+  locked 26 samples after the release; an offset before the gain that overloads at the
+  largest gain acts from the release's own sample.
+
+**Mutations** (17 and, after the review, 6 more: a wrapping addition of the timer, an
+unkept lock kept one sample, the offset not refreshed at the release, no release for a
+window from sample 0, the release at the stream's end not recorded, or recorded for a hold
+that runs beyond it; clean build each, restored by `cp` + `touch`; every one fails its
 test): kept one sample longer and one less; the timer ignored; a window one longer and
 starting one late; the first window only; the release not an unlock, recorded one late,
 always to the largest gain, the state kept over the hold, the peak detectors reset after
