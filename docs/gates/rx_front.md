@@ -3330,3 +3330,70 @@ hold on this part. Not run: the open ASIC flow.
 - The energy's upper bits: a bench of `rx_search` alone driven over the full range of the
   correlator's output, or the widths narrowed to the taps' bound (38 bits), or a formal
   property (G4). The founder's choice at the review of this PR.
+
+## 2026-11-22 · G0 + G3 · R0-08d part d, step 3a: the CORDIC's arbiter (`cordic_arb`)
+
+The first piece of the decision engine: the front has one CORDIC, the latch and the decision
+both need it, and until now it sat inside `rx_latch` (the open item of part d step 1).
+
+**G0.** `hw/rtl/cordic_arb.sv`: the CORDIC (`cordic`, unchanged; the angles are the model's
+`cordic_angle`) behind an arbiter with one register. Requester a, the latch: a pulse, always
+taken (ADR 0006: the latch first). Requester b, the decision engine: holds its request and
+its input until `b_grant`, which is every cycle the latch does not ask; a decision that
+meets a latch asks again in the next cycle. The owner travels beside the CORDIC's stages;
+`a_valid` or `b_valid` marks the angle 18 clock edges after the edge that takes the request:
+the schedule's g + 19 (`rx_decision`: the arbiter's register 1, the CORDIC 18, cycle to
+cycle).
+
+**`rx_latch`** asks through it (`rq_valid`, `rq_re`, `rq_im`; `a_valid`, `a_angle`). Its
+contract is now D_SAMPLES·R ≥ 24: D = 3 at R = 8 with nothing to spare, as the schedule
+said; the schedule's own D = 4 has a sample. The edge was probed with the testbench's
+idle pattern at one clock a sample: D = 18 (23 clocks in the shortest span) stops on
+`CHECK_TIMING`, D = 19 (24) passes.
+
+**Gate** `make -C hw cordic_arb` (`hw/tb/tb_cordic_arb.cpp`) on `hw/vectors/cordic.txt`:
+every request must get the model's angle of its own input on its own valid, exactly 18
+edges later, and `b_grant` must be "b asks and a does not" in every cycle. Phases: a alone
+back to back; b alone back to back; both at random for 20 000 cycles, b holding its input
+while it waits; a in every cycle for 200 with b waiting, then released; a reset with
+requests in the pipeline (nothing comes out), and requests after it.
+- Seen to fail first: against a module with the ports and no output, 0 angles and 18 662
+  mismatches. The first real version then failed 7310 times: the owner was a stage short
+  of the CORDIC (an angle on the other requester's valid whenever the two alternated).
+- Result (commit below): 7476 angles for the latch, 8805 for the decision, 4139 cycles with
+  both asking, 0 mismatches.
+- The latch gate through the arbiter: five runs, 0 mismatches. The search gate: fifteen
+  runs, 0 mismatches.
+
+**Mutations** (each built from scratch in a private copy of `hw/`; mismatches in the arbiter's
+gate, and in the latch gate at D = 3, R = 8, where the decision never asks): 14, all fail
+in at least one.
+
+| Mutation | `cordic_arb` | latch |
+|---|---|---|
+| b before a | 4139 | passes |
+| b's input when both ask | 3046 | passes |
+| im from re's choice inverted | 14568 | 20013 |
+| grant under a | 3703 | passes |
+| grant never with a idle | 14085 | passes |
+| valid only for a | 8805 | passes |
+| valid not reset | 1 (after the testbench's change below) | passes |
+| owner a stage early | 7310 | stopped by `CHECK_TIMING` |
+| owner always a | 8805 | passes |
+| no arbiter register (valid) | 39874 | stopped by `CHECK_TIMING` |
+| latch: request a cycle late | — | stopped by `CHECK_TIMING` |
+| latch: im request from re | — | 20541 |
+| latch: request at every event | — | 12192 |
+| chain: the latch takes b's answers | — | stopped by `CHECK_TIMING` |
+
+- "valid not reset" passed the first testbench, whose reset came with the inputs idle: a
+  request at the inputs in the reset's own cycle is now part of it.
+- A mutant that never grants hung the first testbench (it waited for the grant without
+  a bound); the wait is four cycles now and an error after them.
+- The mutants on the decision's side pass the latch gate, as they must: nothing asks on
+  that side until step 3b.
+
+**Open**
+- The decision's side is driven by the testbench only; its first real user is step 3b.
+- `docs/gates/silicon_probe.md`'s figures for `rx_latch` include the CORDIC it no longer
+  holds; not rerun.

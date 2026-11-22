@@ -17,7 +17,8 @@ VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
 VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch search
-BLOCKS    := ram $(VEC_BLOCKS)
+# `cordic_arb` replays the CORDIC's vectors.
+BLOCKS    := ram cordic_arb $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
 GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
 # Sources and top module per block, packages first.
@@ -27,6 +28,7 @@ TOP_conv_encoder := conv_encoder
 TOP_round_sat := round_sat_bank
 TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
+TOP_cordic_arb := cordic_arb
 TOP_nco       := nco
 TOP_det       := det_chain
 TOP_latch     := latch_chain
@@ -37,12 +39,13 @@ SRC_conv_encoder := rtl/conv_encoder.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
 SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
 SRC_cordic    := $(GEN_RTL) rtl/cordic.sv
+SRC_cordic_arb := $(GEN_RTL) rtl/cordic.sv rtl/cordic_arb.sv
 SRC_nco       := $(GEN_RTL) rtl/round_sat.sv rtl/nco.sv
 SRC_det       := $(GEN_RTL) rtl/round_sat.sv rtl/dc_block.sv rtl/det_a.sv tb/det_chain.sv
 SRC_latch     := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
-                 rtl/det_a.sv rtl/cordic.sv rtl/nco.sv rtl/rx_latch.sv tb/latch_chain.sv
+                 rtl/det_a.sv rtl/cordic.sv rtl/cordic_arb.sv rtl/nco.sv rtl/rx_latch.sv tb/latch_chain.sv
 SRC_search    := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
-                 rtl/det_a.sv rtl/cordic.sv rtl/nco.sv rtl/rx_latch.sv rtl/ltf_corr.sv rtl/rx_search.sv \
+                 rtl/det_a.sv rtl/cordic.sv rtl/cordic_arb.sv rtl/nco.sv rtl/rx_latch.sv rtl/ltf_corr.sv rtl/rx_search.sv \
                  tb/search_chain.sv
 
 .PHONY: all lint vectors clean $(BLOCKS)
@@ -92,6 +95,12 @@ cordic: vectors/cordic.txt
 		$(SRC_cordic) tb/tb_cordic.cpp -o sim_cordic
 	./obj_dir/cordic/sim_cordic vectors/cordic.txt
 
+cordic_arb: vectors/cordic.txt
+	rm -rf obj_dir/cordic_arb && mkdir -p obj_dir/cordic_arb
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/cordic_arb --top-module cordic_arb \
+		$(SRC_cordic_arb) tb/tb_cordic_arb.cpp -o sim_cordic_arb
+	./obj_dir/cordic_arb/sim_cordic_arb vectors/cordic.txt +verilator+rand+reset+2
+
 nco: vectors/nco.txt
 	rm -rf obj_dir/nco && mkdir -p obj_dir/nco
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/nco --top-module nco \
@@ -105,8 +114,9 @@ det: vectors/det.txt
 	./obj_dir/det/sim_det vectors/det.txt
 
 # Three builds: D_SAMPLES = 3 at R = 8 clocks per sample (and R = 16, the 10 MHz mode), D_SAMPLES
-# = 4 at R = 6 (ADR 0006) and at R = 8 (the decision's schedule, with the CORDIC's arbiter to
-# come), and D_SAMPLES = 5 at R = 5, the only one with two latches in flight.
+# = 4 at R = 6 (ADR 0006) and at R = 8 (the decision's schedule), and D_SAMPLES = 5 at R = 5,
+# the only one with two latches in flight. With the arbiter's register the contract is
+# D_SAMPLES·R ≥ 24: the first and the third build meet it with nothing to spare.
 # Registers without a reset and the delay line start from random values (rand+reset+2).
 latch: vectors/latch.txt
 	rm -rf obj_dir/latch && mkdir -p obj_dir/latch

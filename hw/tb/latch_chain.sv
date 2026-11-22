@@ -31,6 +31,9 @@ module latch_chain
     logic signed [Y_BITS-1:0]     y_re, y_im, n_re, n_im;
     logic signed [2*DET_BITS+5:0] c_re, c_im;
     logic [3:0]                   clr;
+    logic                              rq_valid, a_valid, b_grant_unused, b_valid_unused;
+    logic signed [CORDIC_IN_BITS-1:0]  rq_re, rq_im;
+    logic signed [ANGLE_BITS-1:0]      a_angle;
 
     always_ff @(posedge clk) begin
         if (!rst_n) clr <= '0;
@@ -48,8 +51,15 @@ module latch_chain
     rx_latch #(.D_SAMPLES(D_SAMPLES)) u_latch (
         .clk, .rst_n, .y_valid, .y_re, .y_im, .c_valid, .c_re, .c_im,
         .d_valid, .event_i(event_o),
+        .rq_valid, .rq_re, .rq_im, .a_valid, .a_angle,
         .out_valid(s_valid), .out_re(n_re), .out_im(n_im), .out_step(s_step),
         .out_event(ev_s)       // gated with the search (make -C hw search)
+    );
+    // The front's CORDIC: the latch alone asks here (the decision engine: part d step 3).
+    cordic_arb u_cordic (
+        .clk, .rst_n, .a_req(rq_valid), .a_re(rq_re), .a_im(rq_im),
+        .b_req(1'b0), .b_re('0), .b_im('0), .b_grant(b_grant_unused),
+        .a_valid, .b_valid(b_valid_unused), .angle(a_angle)
     );
     nco u_nco (
         .clk, .rst_n, .in_valid(s_valid), .in_re(n_re), .in_im(n_im), .in_step(s_step),
@@ -57,7 +67,7 @@ module latch_chain
     );
 
     logic unused;
-    assign unused = &{1'b0, fire, ev_s};
+    assign unused = &{1'b0, fire, ev_s, b_grant_unused, b_valid_unused};
 endmodule
 
 `default_nettype wire
