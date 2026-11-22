@@ -2569,3 +2569,90 @@ column; "hit 4, +10 dB, 54 Mb/s" is 2000 in every column.)
    fewer frames than no release (710). Not looked into.
 
 Nothing of this is in the model: it runs 2 of 4, as decided.
+
+## 2026-11-22 · model gate + measurement · SIGNAL's check, and a release by the rate (tool only)
+
+Asked by the founder the same day: something between the hold alone and the release as it
+is, and then the rule by the rate with a threshold on SIGNAL's quality.
+
+**SIGNAL's check (model).** `rx_ofdm::signal_checked` and
+`rx_ofdm_fixed::decode_signal_checked_fixed` give, with the field, `SignalCheck`: of
+SIGNAL's 48 coded bits, how many soft values agree in sign with the decoded field encoded
+again (`agree`) and how many have the other sign (`disagree`); a soft value of 0 is in
+neither. The decoded 24 bits are encoded as they were decoded, the reserved bit included
+(§17.3.4.3: it is not refused). `decode_signal_fixed` is the same decoding without the
+check; nothing that existed changes its result.
+
+Gate: `crates/radio-phy/tests/g1_signal_check.rs`, four tests. Reference: the
+transmitter's SIGNAL (`signal_bits`, `encode`, held to Annex I.1 Tables I-7 and I-8 by
+`g1_annex_i1`) with coded bits chosen in the test turned over (one to four, the code's
+free distance being 10) or erased: the counts must be those numbers, for every rate and
+four lengths each; the reserved bit set; a failed field has no check; the integer decoder
+reports 48 and 0 at 30 dB for every rate and its plain form the same field. Seen to fail
+first with a count that was always 0 (all four tests). Mutants, all nine failing the gate:
+the sign the other way; an erasure counted; the tail not encoded; the soft values read
+backwards; the reserved bit taken as 0; every other coded bit only; the integer decoder
+reporting a fixed check; the two counts swapped; `agree` as 48 less `disagree`.
+Command: `cargo test -p radio-phy --test g1_signal_check` — 4 passed.
+
+**What the two counts are worth** (`rxagc release`, 2000 frames per row, the column
+"front + release"; the report's second table):
+- `disagree` does not tell a noise SIGNAL behind a true preamble from a true one: there
+  the symbol at SIGNAL's place is near silence against the channel estimate, the 4-bit
+  soft values are mostly 0, and the count is 1 to 5 (seen at 100 frames with the first
+  form of the check, which had this count alone).
+- `agree` does. The frame's own SIGNAL: 48 in every one of 2000 in AWGN at 30 dB and
+  more; 44 or more in 1999 of 2000 at 6 Mb/s 5 dB; through TGn D 40 or more in 1999 of
+  2000 at 6 Mb/s 30 dB and in all at 54 Mb/s 40 dB (one at 36 to 39). The others (SIGNALs
+  read behind a preamble alone): 16 to 35 in quiet noise (488 and 495 of them), up to 43
+  in loud noise (4 of 518 at 40 to 43, none above).
+
+**A release by the rate, in the tool only** (`reports/rx_front_agc_release.txt`, commit
+a480af1; frames lost of 2000). The rule: 2 of 4 as the model has it; once SIGNAL of the
+open stream has named 6, 9 or 12 Mb/s with `agree` ≥ 40, 24 of 32 from then on
+("patient"); and a declaration under a hold that is up and patient, with nothing released,
+leaves it patient until its own SIGNAL's verdict ("inherited").
+
+| Row | hold alone | 2 of 4 (the model) | by rate, no threshold | by rate, agree ≥ 40 | **the same, inherited** |
+|---|---|---|---|---|---|
+| preamble alone, then 54 Mb/s | 477 | 1 | 175 | 1 | **1** |
+| the same in loud noise | 508 | 2 | 3 | 2 | **2** |
+| preamble alone, then 6 Mb/s | 3 | 0 | 1 | 0 | **0** |
+| under −25 dB, 54 Mb/s | 2000 | 2 | 2 | 2 | **2** |
+| under −25 dB, 6 Mb/s | 43 | 1 | 2 | 2 | **2** |
+| under −10 dB, 6 Mb/s | 0 | 9 | 69 | 69 | **8** |
+| hit 4, +20 dB, 6 Mb/s | 91 | 94 | 91 | 91 | **91** |
+| hit 8, +20 dB, 6 Mb/s | 710 | 1010 | 711 | 711 | **711** |
+| hit 8, +10 dB, 6 Mb/s | 21 | 54 | 21 | 21 | **21** |
+| hit 16, +10 dB, 6 Mb/s | 383 | 766 | 384 | 384 | **384** |
+| TGn D 54 Mb/s 40 dB | 2 | 4 | 4 | 4 | **4** |
+
+(The other rows are the same in every column. Thresholds of 24, 32 and 44 are in the
+report: 94, 2 and 1 in the first row; 40 and 44 agree in every row.)
+
+1. **With the threshold the rule has both ends:** what 2 of 4 gains after a preamble and
+   for a stronger frame at 54 Mb/s, and what the hold alone keeps of the 6 Mb/s frames a
+   burst hits. The 175 of the rule without a threshold were noise SIGNALs naming a slow
+   rate; none has 40 agreeing bits in quiet noise.
+2. **Without the inheritance one row is worse than both** (69): the weaker frame's true
+   SIGNAL makes the hold patient, the frame 10 dB above it clips too little for 24 of 32,
+   and the front's declaration of that frame put the rule back to 2 of 4 — which then
+   released in the middle of the frame. Inherited: 8, with the model's 9 and the hold
+   alone's 0.
+3. With "no release at all" as the patient rule, inherited: 43 in "under −25 dB, 6 Mb/s"
+   (the hold alone's), 4 in the loud preamble row. 24 of 32 is the better patient rule.
+4. The gain moves inside far fewer frames: at 6 Mb/s 30 dB in 2 of 2000 against 5, through
+   TGn D in 1 against 14.
+
+**What this is not.** In the tool, not in the model; one seed per row; the same scenes the
+rule was shaped on (the inheritance was added after the 2000-frame run showed row 6, and
+run again on the same frames). The slow rates are 6, 9 and 12 Mb/s by judgement; 18 Mb/s
+and above were not tried as slow. The burst is white noise; the weaker frame has the
+frame's rate. A noise SIGNAL in loud noise reached 43 agreeing bits: at a threshold of 40
+four of 518 would be believed there (and cost nothing in that row). No independent review
+yet: it belongs with the change to the model.
+
+**Open**
+- Whether the rule goes into `RxHandoffFixed` and ADR 0008 (the founder).
+- If it does: `signal()` has to be told the rate and the check, and the gate needs scenes
+  the rule has not seen (other rates under, an interferer that is a frame, TGn channels).
