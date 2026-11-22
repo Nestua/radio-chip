@@ -221,7 +221,7 @@ module rx_decide
         .out_valid(z_v), .out_re(z_re), .out_im(z_im)
     );
     ltf_corr1 u_corr (
-        .clk, .rst_n(rst_n && !acc_valid),
+        .clk, .rst_n,
         .in_valid(z_v), .in_corr(correlated(mz)), .in_re(z_re), .in_im(z_im),
         .out_valid(c_v), .out_re(c_re), .out_im(c_im)
     );

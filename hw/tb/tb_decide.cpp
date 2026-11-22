@@ -16,9 +16,9 @@
 //
 // Samples come every R clocks, with one more idle clock after every 5th and two after every
 // 13th (idle inputs carry garbage); D flush samples follow a segment. Before each segment the
-// chain is reset in the middle of a decision (the segment up to its first acceptance and 12 to
-// 40 samples more, a few clocks, a one-clock reset): nothing of it may reach the run that
-// follows. The RTL's own checks ($error) abort the run. Exit code 0 = passed.
+// chain is reset four times in the middle of a decision (the segment up to its first
+// acceptance and up to 49 samples and 7 clocks more, a one-clock reset): nothing of it may
+// reach the run that follows. The RTL's own checks ($error) abort the run. Exit code 0 = passed.
 
 #include <cstdint>
 #include <cstdio>
@@ -203,14 +203,15 @@ struct Gate {
         dut.rst_n = 1;
     }
 
-    // A reset in the middle of a decision: the grid, the sums, the rotation or the tail,
-    // by how far past the acceptance the segment is fed.
+    // A reset in the middle of a decision: the grid, the sums, the rotation, the tail or the
+    // registered result waiting for its sample, by how far past the acceptance the segment
+    // is fed (0 to 49 samples and 0 to 7 clocks, a different place each time).
     void reset_in_flight(const Segment& s) {
         size_t a = 0;
         while (a < s.s.size() && s.s[a].acc < 0) ++a;
-        const size_t upto = a + D + 3 + 9 * (in_flight_resets % 5);
+        const size_t upto = a + D + 3 + (in_flight_resets * 7) % 50;
         if (upto >= s.s.size()) return;
-        const int more = static_cast<int>(in_flight_resets % 7);
+        const int more = static_cast<int>(in_flight_resets % 8);
         ++in_flight_resets;
         junk = true;
         reset(1);
@@ -222,7 +223,7 @@ struct Gate {
 
     void run(const Segment& s) {
         seg = &s;
-        reset_in_flight(s);
+        for (int k = 0; k < 4; ++k) reset_in_flight(s);
         junk = true;
         reset(1);
         junk = false;

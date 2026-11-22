@@ -1480,6 +1480,12 @@ struct DecideCover {
     fine_waits: usize,
     /// Decisions whose result's cycle is given.
     timed: usize,
+    /// Decisions on silence: the energy of the rotated samples is zero.
+    zero_energy: usize,
+    /// A decision with T1 exactly 160 samples into the stream (the first that has its
+    /// coarse window), and a candidate at 159 (the last that has not).
+    t1_at_160: usize,
+    t1_at_159: usize,
 }
 
 /// One decision segment (see [`decide_vectors`]).
@@ -1524,6 +1530,9 @@ fn decide_segment(
             c.rejected += usize::from(t.sums.is_some_and(|m| m.fine.is_none()));
             c.no_coarse_window += usize::from(t.t1.is_some() && t.sums.is_none());
             c.grid_moved += usize::from(t.t1.is_some_and(|v| v != a.imax));
+            c.zero_energy += usize::from(t.sums.is_some_and(|m| m.energy == 0));
+            c.t1_at_160 += usize::from(t.t1 == Some(160) && t.sums.is_some());
+            c.t1_at_159 += usize::from(t.t1 == Some(159) && t.sums.is_none());
             if let Some(r) = run {
                 if r.sums != t.sums {
                     return Err(io::Error::other(format!(
@@ -1560,11 +1569,14 @@ fn decide_segment(
 /// what the model did not make; `done` the result's cycle after the strobe by
 /// `rx_decision::run_schedule` on the testbench's clock pattern at R = 8, D = 4); after the
 /// sample an acquisition is applied at, `Q <T1> <cfo> <coarse> <fine>` (the three phase
-/// words of `FixedAcquisition`). Segments, for w = 12, 16 and 8: the four frames; two
+/// words of `FixedAcquisition`). Segments, for w = 12, 16, 8 and 4: the four frames; two
 /// frames under a weak tone; a frame under a strong one; a tone alone (rejected candidates);
 /// frames under a tone of their own power; a stream that begins 40 samples into a frame
-/// (T1 less than 160 samples in: no decision). Under the tones the stream's own latches
-/// meet a decision's requests of the CORDIC (at w = 12 with this clock pattern).
+/// (T1 less than 160 samples in: no decision), and streams cut to put T1 at sample 160 and
+/// at 159; a tone burst and then silence (candidates of zero energy). For w = 4, where the
+/// fine sum's branch of the schedule is the longer one, a subset. Under the tones the
+/// stream's own latches meet a decision's requests of the CORDIC (at w = 12 with this clock
+/// pattern).
 fn decide_vectors(out: &mut impl Write) -> io::Result<()> {
     let fx = FixedRxConfig::default();
     writeln!(
@@ -1618,11 +1630,41 @@ fn decide_vectors(out: &mut impl Write) -> io::Result<()> {
         "frame_under_strong_tone",
         "tone_10dB_from_0",
     ];
+    // A tone burst, then silence: candidates of zero energy (every position keeps 7/8 of
+    // nothing; the rules hold on 0 ≥ 0 and the energy test alone rejects).
+    let mut silence = tone_burst_scene(900, &[(150, 120)], 0x5EA2_0001);
+    for v in silence.iter_mut().skip(270) {
+        *v = (0, 0);
+    }
+    // Streams that begin 32 and 33 samples into a frame: T1 at sample 160, the first with a
+    // coarse window in the stream, and at 159.
+    let cut_at = |cut: usize, seed: u64| {
+        let mut rng = Rng::new(seed);
+        let mut x: Vec<(f64, f64)> = frame[cut..].to_vec();
+        x.extend(vec![(0.0, 0.0); 300]);
+        to_adc(&awgn(&x, 30.0, p, &mut rng), 0.1 * full / p.sqrt())
+    };
     let mut total = DecideCover::default();
-    for w in [12usize, 16, 8] {
+    for w in [12usize, 16, 8, 4] {
         let mut c = DecideCover::default();
         for (label, x) in latch.iter().filter(|(l, _)| wanted.contains(&l.as_str())) {
-            decide_segment(out, label, x, w, &mut c)?;
+            // At w = 4 (a back-off of 600 ns, where the fine sum's branch of the schedule is
+            // the longer one) two frames and the tones.
+            if w != 4 || !label.starts_with("frame_") || label.contains("awgn") {
+                decide_segment(out, label, x, w, &mut c)?;
+            }
+        }
+        decide_segment(out, "burst_then_silence", &silence, w, &mut c)?;
+        for (label, cut) in [("t1_at_160", 32usize), ("t1_at_159", 33)] {
+            let want = |c: &DecideCover| if cut == 32 { c.t1_at_160 } else { c.t1_at_159 };
+            let scene = (0..200u64).find_map(|k| {
+                let x = cut_at(cut, 0xDEC1_1000 + k);
+                let mut probe = DecideCover::default();
+                decide_segment(&mut io::sink(), label, &x, w, &mut probe).ok()?;
+                (want(&probe) > 0).then_some(x)
+            });
+            let x = scene.ok_or_else(|| io::Error::other(format!("w = {w}: no scene {label}")))?;
+            decide_segment(out, label, &x, w, &mut c)?;
         }
         decide_segment(out, "stream_cut_into_a_frame", &cut, w, &mut c)?;
         decide_segment(out, "frames_under_own_power_tone", &under_tone, w, &mut c)?;
@@ -1632,6 +1674,9 @@ fn decide_vectors(out: &mut impl Write) -> io::Result<()> {
             (c.acquisitions, "an acquisition"),
             (c.no_coarse_window, "a first symbol too early"),
             (c.rejected, "a rejected candidate"),
+            (c.zero_energy, "a candidate of zero energy"),
+            (c.t1_at_160, "a decision with T1 at sample 160"),
+            (c.t1_at_159, "a candidate with T1 at sample 159"),
         ]
         .iter()
         .filter_map(|&(n, what)| (n == 0).then_some(what))

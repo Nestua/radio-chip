@@ -150,9 +150,10 @@ search: vectors/search.txt
 		done; \
 	done
 
-# The front with its loop closed. Builds as the search's; the run at D = 4, R = 8 also holds
+# The front with its loop closed. Builds as the search's and W = 4 (where the fine sum's
+# branch of the schedule is the longer one); the run at D = 4, R = 8 also holds
 # each result's cycle to the schedule model's (rvec gave it this testbench's clock pattern).
-DECIDE_BUILDS := 4.12 4.16 4.8 3.12 5.12
+DECIDE_BUILDS := 4.12 4.16 4.8 4.4 3.12 5.12
 decide: vectors/decide.txt
 	rm -rf obj_dir/decide && mkdir -p obj_dir/decide
 	set -e; for b in $(DECIDE_BUILDS); do d=$${b%.*}; w=$${b#*.}; \
