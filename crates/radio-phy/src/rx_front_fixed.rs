@@ -132,23 +132,23 @@ fn narrow(v: i64, from: u32, to: u32) -> i64 {
     }
 }
 
-fn narrow_iq(v: IQ, from: u32, to: u32) -> IQ {
+pub(crate) fn narrow_iq(v: IQ, from: u32, to: u32) -> IQ {
     (narrow(v.0, from, to), narrow(v.1, from, to))
 }
 
-fn imul(a: IQ, b: IQ) -> IQ {
+pub(crate) fn imul(a: IQ, b: IQ) -> IQ {
     (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
 }
 
-fn iconj(a: IQ) -> IQ {
+pub(crate) fn iconj(a: IQ) -> IQ {
     (a.0, -a.1)
 }
 
-fn iadd(a: IQ, b: IQ) -> IQ {
+pub(crate) fn iadd(a: IQ, b: IQ) -> IQ {
     (a.0 + b.0, a.1 + b.1)
 }
 
-fn iabs2(a: IQ) -> i128 {
+pub(crate) fn iabs2(a: IQ) -> i128 {
     i128::from(a.0) * i128::from(a.0) + i128::from(a.1) * i128::from(a.1)
 }
 
@@ -264,7 +264,7 @@ pub fn nco_mix(y: IQ, phase: i64, fx: &FixedRxConfig) -> Option<IQ> {
         .then(|| nco_mix_with(y, phase, fx, &nco_table(fx)))
 }
 
-fn nco_mix_with(y: IQ, phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
+pub(crate) fn nco_mix_with(y: IQ, phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     let prod = imul(y, rotate_with(phase, fx, table));
     narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits)
 }
@@ -709,6 +709,14 @@ pub struct RxFrontFixed {
     trace: SampleTrace,
 }
 
+/// An angle (2π/2^A) as a P-bit phase per sample of a lag-`lag` correlation, rounded.
+pub(crate) fn phase_per_sample(angle: i64, lag: u32, fx: &FixedRxConfig) -> i64 {
+    let up = fx.nco_phase_bits - fx.angle_bits;
+    let v = i128::from(angle) << up;
+    let s = lag.trailing_zeros();
+    ((v + (1i128 << (s - 1))) >> s) as i64
+}
+
 /// The intermediate values of one sample of [`RxFrontFixed`] (what the RTL gates compare).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SampleTrace {
@@ -726,6 +734,27 @@ pub struct SampleTrace {
     pub corr: Option<IQ>,
     /// Whether detector A's run counter produced an event at this sample (step 1).
     pub event: bool,
+    /// The search's energy metric completed at this sample: the sum of GI − B squared
+    /// correlator outputs from position n + 1 − [`PAIR_LEN`] − (GI − B) on. `None` before
+    /// the first one.
+    pub energy: Option<i128>,
+    /// The candidate accepted at this sample, whose decision is applied
+    /// `decision_latency` samples later.
+    pub accepted: Option<Accepted>,
+}
+
+/// What the search hands the decision when it accepts a candidate (the inputs of the
+/// decision besides the memories; `rx_decision`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Accepted {
+    /// Position of the running maximum of the energy metric.
+    pub imax: usize,
+    /// That maximum.
+    pub emax: i128,
+    /// The search's deadline at the acceptance: positions at or beyond it are not taken.
+    pub deadline: usize,
+    /// The detection that opened the search.
+    pub opened_by: usize,
 }
 
 impl RxFrontFixed {
@@ -770,12 +799,9 @@ impl RxFrontFixed {
         (start..start + len).fold((0, 0), |a, k| iadd(a, imul(v(k), iconj(v(k + lag)))))
     }
 
-    /// An angle (2π/2^A) as a P-bit phase per sample of a lag-`lag` correlation, rounded.
+    /// See [`phase_per_sample`].
     fn per_sample(&self, angle: i64, lag: u32) -> i64 {
-        let up = self.fx.nco_phase_bits - self.fx.angle_bits;
-        let v = i128::from(angle) << up;
-        let s = lag.trailing_zeros();
-        ((v + (1i128 << (s - 1))) >> s) as i64
+        phase_per_sample(angle, lag, &self.fx)
     }
 
     /// Processes the next ADC sample; returns the acquisition decided at it, if any.
@@ -843,6 +869,8 @@ impl RxFrontFixed {
             z: zv,
             corr: None,
             event,
+            energy: None,
+            accepted: None,
         };
         self.phase = (self.phase + self.step).rem_euclid(1i64 << fx.nco_phase_bits);
 
@@ -875,6 +903,7 @@ impl RxFrontFixed {
         let j = (i + 1).checked_sub(self.w)?;
         let e: i128 = (j..j + self.w).map(|p| self.pair.get(p)).sum();
         self.energy.put(j, e);
+        self.trace.energy = Some(e);
         let mut s = self.search?;
         if j < s.first {
             return None;
@@ -886,8 +915,14 @@ impl RxFrontFixed {
         if s.best.is_none_or(|(_, emax)| e > emax) {
             s.best = Some((j, e));
         }
-        if let Some((imax, _)) = s.best {
+        if let Some((imax, emax)) = s.best {
             if self.pending.is_none() && j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
+                self.trace.accepted = Some(Accepted {
+                    imax,
+                    emax,
+                    deadline: s.deadline,
+                    opened_by: s.opened_by,
+                });
                 self.pending = Some(Pending {
                     due: n + self.cfg.decision_latency.min(MAX_DECISION_LATENCY),
                     result: self.decide(&s, imax, n),
