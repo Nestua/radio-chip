@@ -129,21 +129,21 @@ Slack (MET) :             1.823ns  (required time - arrival time)
   Destination:            pair_reg[39]/D
   Data Path Delay:        3.967ns  (logic 2.928ns (73.807%)  route 1.039ns (26.193%))
   Logic Levels:           11  (CARRY8=4 DSP_A_B_DATA=1 DSP_ALU=1 DSP_M_DATA=1 DSP_MULTIPLIER=1 DSP_OUTPUT=1 DSP_PREADD_DATA=1 LUT2=1)
-# Added 2026-11-22: rx_decide with nco and ltf_corr1 (part d step 3b), the same part, Vivado
-# 2024.2, build server, sources at 84c9ac6; the script with set_input_delay 0.5 ns on every input.
+# Added 2026-11-22: rx_decide with nco and ltf_corr1 (part d steps 3b, 3c), the same part, Vivado
+# 2024.2, build server, sources at 973018b; the script with set_input_delay 0.5 ns on every input.
 == rx_decide (with nco, ltf_corr1), inputs timed (set_input_delay 0.5 ns on every input)
     WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
     -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
-      0.122        0.000                      0                13139        0.040        0.000                      0                13139        2.363        0.000                       0                  3186  
-| CLB LUTs                   | 1844 |     0 |          0 |    117120 |  1.57 |
-| CLB Registers              | 3063 |     0 |          0 |    234240 |  1.31 |
-| CARRY8                     |  167 |     0 |          0 |     14640 |  1.14 |
-| CLB Registers                              | 3063 |     0 |          0 |    234240 |  1.31 |
+      0.244        0.000                      0                13139        0.024        0.000                      0                13139        2.363        0.000                       0                  3187  
+| CLB LUTs                   | 1913 |     0 |          0 |    117120 |  1.63 |
+| CLB Registers              | 3064 |     0 |          0 |    234240 |  1.31 |
+| CARRY8                     |  175 |     0 |          0 |     14640 |  1.20 |
+| CLB Registers                              | 3064 |     0 |          0 |    234240 |  1.31 |
 | Block RAM Tile    |    2 |     0 |          0 |       144 |  1.39 |
 | DSPs           |   68 |     0 |          0 |      1248 |  5.45 |
-| CARRY8   |  167 |                 CLB |
-Slack (MET) :             0.122ns  (required time - arrival time)
-  Source:                 u_corr/g0_b4__2_psdsp_22/C
-  Destination:            u_corr/g_re_reg/DSP_OUTPUT_INST/ALU_OUT[31]
-  Data Path Delay:        6.118ns  (logic 4.376ns (71.524%)  route 1.742ns (28.476%))
-  Logic Levels:           11  (DSP_A_B_DATA=2 DSP_ALU=4 DSP_C_DATA=2 DSP_OUTPUT=3)
+| CARRY8   |  175 |                 CLB |
+Slack (MET) :             0.244ns  (required time - arrival time)
+  Source:                 u_corr/q_im_reg[0]_i_1_psdsp_20/C
+  Destination:            u_corr/g_im_reg/DSP_OUTPUT_INST/ALU_OUT[46]
+  Data Path Delay:        5.997ns  (logic 4.310ns (71.869%)  route 1.687ns (28.131%))
+  Logic Levels:           11  (DSP_A_B_DATA=1 DSP_ALU=4 DSP_C_DATA=3 DSP_OUTPUT=3)

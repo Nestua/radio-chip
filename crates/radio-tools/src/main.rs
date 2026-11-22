@@ -1742,7 +1742,8 @@ fn decide_vectors(out: &mut impl Write) -> io::Result<()> {
         let mut c = DecideCover::default();
         for (label, x) in latch.iter().filter(|(l, _)| wanted.contains(&l.as_str())) {
             // At w = 4 (a back-off of 600 ns, where the fine sum's branch of the schedule is
-            // the longer one) two frames and the tones.
+            // the longer one) the two AWGN frames, the two frames under a weak tone and the
+            // tone alone (the other three `frame_` scenes are left out).
             if w != 4 || !label.starts_with("frame_") || label.contains("awgn") {
                 decide_segment(out, label, x, w, &mut c)?;
             }
