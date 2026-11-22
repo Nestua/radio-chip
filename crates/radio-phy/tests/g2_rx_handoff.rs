@@ -1262,3 +1262,107 @@ fn rail_samples_before_the_declaration_count_in_the_window() {
     assert_eq!(log.acquired, plain.acquired);
     assert_eq!(log.holds(), []);
 }
+
+#[test]
+fn the_release_acts_anywhere_under_the_hold_and_for_any_window() {
+    // Review of 2026-11-22: the release late in a packet, after the verdict, a sample beyond
+    // the rails, and windows of 0, 1, 16, 63, 64 and more.
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    let r = (HI, 0);
+
+    // A long frame with its verdict: 1000 octets at 6 Mb/s, 16 + 8000 + 6 bits in symbols
+    // of 24, 335 data symbols. The release 1000 and 20 000 samples after the verdict.
+    let symbols = (16usize + 8000 + 6).div_ceil(24);
+    assert_eq!(symbols, 335);
+    let (adc, _) = scene(&[(Rate::R6, 1000)], 700, 900, 12.5, 31);
+    let v = verdict_at(180, Some(symbols));
+    let plain = run(&adc, fx, pace, |_| usize::MAX, &v);
+    assert_eq!(plain.acquired.len(), 1);
+    let a = plain.acquired[0];
+    let said = a.fft_start + SIGNAL_END + 180;
+    let end = a.fft_start + SIGNAL_END + 80 * symbols + B;
+    assert_eq!(plain.holds(), [(a.decided_at, end)]);
+    for p in [said + 1000, said + 20_000, end - 2] {
+        let x = with(&adc, &[(p, r), (p + 1, (0, LO))]);
+        let log = run(&x, fx, pace, |_| usize::MAX, &v);
+        assert_eq!(log.acquired, plain.acquired, "at {p}");
+        assert_eq!(log.holds(), [(a.decided_at, p + 1)], "at {p}");
+        assert_eq!(log.beats.len(), plain.beats.len(), "at {p}");
+        assert_eq!(log.beats.last(), plain.beats.last(), "at {p}");
+    }
+    // Under the watchdog's hold, with no verdict, 20 000 samples in.
+    let p = a.decided_at + 20_000;
+    let x = with(&adc, &[(p, r), (p + 3, r)]);
+    let log = run(&x, fx, pace, |_| usize::MAX, |_, _| None);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(log.holds(), [(a.decided_at, p + 3)]);
+
+    // A sample beyond the rails (the input is 16 bits wide) is a rail sample.
+    let (adc, _) = scene(&[SHORT], 700, 3000, 12.5, 21);
+    let go =
+        |adc: &[(i16, i16)], pace: HandoffConfig| run(adc, fx, pace, |_| usize::MAX, |_, _| None);
+    let plain = go(&adc, pace);
+    let a = plain.acquired[0];
+    let kept = [(a.decided_at, adc.len())];
+    let p = a.decided_at + 100;
+    for far in [(i16::MAX, 0), (0, i16::MIN), (HI + 1, 0), (0, LO - 1)] {
+        let x = with(&adc, &[(p, far), (p + 2, far)]);
+        assert_eq!(go(&x, pace).holds(), [(a.decided_at, p + 2)], "{far:?}");
+    }
+
+    // Windows. (window, count, distance between two rail samples, released?)
+    let two = |d: usize| with(&adc, &[(p, r), (p + d, r)]);
+    for (window, count, d, released) in [
+        (16, 2, 15, true),
+        (16, 2, 16, false),
+        (63, 2, 62, true),
+        (63, 2, 63, false),
+        (64, 2, 63, true),
+        (64, 2, 64, false),
+        // A window above 64 is 64.
+        (65, 2, 64, false),
+        (1000, 2, 63, true),
+        (usize::MAX, 2, 64, false),
+        // A window of one sees the newest sample alone.
+        (1, 2, 1, false),
+        // A window of none sees nothing.
+        (0, 1, 1, false),
+        (0, 2, 1, false),
+    ] {
+        let cfg = HandoffConfig {
+            clip_window: window,
+            clip_count: count,
+            ..pace
+        };
+        let want = if released {
+            vec![(a.decided_at, p + d)]
+        } else {
+            kept.to_vec()
+        };
+        assert_eq!(
+            go(&two(d), cfg).holds(),
+            want,
+            "window {window} count {count} at {d}"
+        );
+    }
+    // One of one: down with the first rail sample.
+    let one = HandoffConfig {
+        clip_window: 1,
+        clip_count: 1,
+        ..pace
+    };
+    assert_eq!(go(&with(&adc, &[(p, r)]), one).holds(), [(a.decided_at, p)]);
+    // Sixty-four of sixty-four: down with the 64th in a row, not the 63rd.
+    let all = HandoffConfig {
+        clip_window: 64,
+        clip_count: 64,
+        ..pace
+    };
+    let row = |n: usize| -> Vec<Swap> { (0..n).map(|k| (p + k, r)).collect() };
+    assert_eq!(go(&with(&adc, &row(63)), all).holds(), kept);
+    assert_eq!(
+        go(&with(&adc, &row(64)), all).holds(),
+        [(a.decided_at, p + 63)]
+    );
+}

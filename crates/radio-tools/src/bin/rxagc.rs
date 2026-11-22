@@ -129,13 +129,15 @@ enum Burst {
     /// the stream (after the timer of the control's first lock on noise has run out), and
     /// the frame itself a SIFS (320 samples) after its last sample.
     Frame,
-    /// A weaker frame of the same rate and length (zeros), `db` below the frame, 650 samples
-    /// into the stream; the frame itself begins [`UNDER_AT`] samples into it, in its data.
+    /// A weaker frame of the same rate and length (zeros), `db` below the frame, 600 to 650
+    /// samples into the stream; the frame itself begins [`UNDER_AT`] samples into it, in its
+    /// data.
     Under {
         db: f64,
     },
-    /// White noise `db` above the frame's mean power over `len` samples, [`HIT_AT`] samples
-    /// into the frame (in its data): an interferer's burst.
+    /// White noise added to the frame over `len` samples, [`HIT_AT`] samples into it (in its
+    /// data), nominally `db` above the frame's mean power (one draw of `len` samples: a few
+    /// dB either way for a short one), before the channel: an interferer's burst.
     Hit {
         len: usize,
         db: f64,
@@ -156,8 +158,8 @@ enum Chain {
     /// with `in_bits = out_bits` and this `in_shift`.
     Int { out_bits: u32, in_shift: u32 },
     /// The receiver as ADR 0008 has it, in a closed loop with the gain control ([`keep`]
-    /// with the front's hold alone): the column's other fields do not apply, nor does the
-    /// row's assumed hold.
+    /// with the front's hold and its release, no timer): the column's other fields do not
+    /// apply, nor does the row's assumed hold.
     Stream,
 }
 
@@ -251,6 +253,7 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
     let f = frame(&psdu, pt.rate);
     let mut lead = 600 + (rng.uniform() * 50.0) as usize;
     let mut x = vec![(0.0, 0.0); lead];
+    let mut under = None;
     match pt.burst {
         Burst::None => {}
         Burst::Preamble => x[..320].copy_from_slice(&f[..320]),
@@ -261,7 +264,8 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
             lead = x.len();
         }
         Burst::Under { .. } => {
-            x.truncate(650);
+            // The weaker frame takes the frame's place and the frame moves into it.
+            under = Some(lead);
             x.extend(vec![(0.0, 0.0); UNDER_AT]);
             lead = x.len();
         }
@@ -273,15 +277,13 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
         Burst::Under { db } => {
             let a = 10f64.powf(-db / 20.0);
             let weak = frame(&[0u8; OCTETS], pt.rate);
-            if x.len() < 650 + weak.len() + 200 {
-                x.resize(650 + weak.len() + 200, (0.0, 0.0));
-            }
-            for (o, w) in x[650..].iter_mut().zip(&weak) {
+            // The frame ends UNDER_AT samples after the weaker one: `x` holds both.
+            for (o, w) in x[under.unwrap_or(0)..].iter_mut().zip(&weak) {
                 *o = (o.0 + a * w.0, o.1 + a * w.1);
             }
         }
         Burst::Hit { len, db } => {
-            // Its own generator: the frame's draws are those of the row without the burst.
+            // Its own generator: the frame's own draws do not depend on the burst.
             let mut hit = Rng::new(mix(mix(pt.scene, number), 0x6869_7421));
             let at = lead + HIT_AT;
             let noise = awgn(&x[at..at + len], -db, mean_power(&f), &mut hit);
@@ -751,6 +753,10 @@ fn hold_loop(frames: usize) {
             clip_release: true,
             ..keeper("front + release", 0, true, front)
         },
+        Keeper {
+            clip_release: true,
+            ..keeper("front + release +40", 0, true, Hold::Front { delay: 40 })
+        },
     ];
     const IDLE: f64 = -30.0;
     const LOUD: f64 = -5.0;
@@ -784,7 +790,9 @@ fn hold_loop(frames: usize) {
          #                      both its edges: the control stays held that long past the hold's end;\n\
          #   front + release  = decision 2 as amended 2026-11-22, the model's default: front alone, and the front\n\
          #                      gives up its hold when {clip_count} of the last {clip_window} ADC samples sit on a rail\n\
-         #                      (RxHandoffFixed; the stream goes on, only a new declaration raises the hold again).\n\
+         #                      (RxHandoffFixed; the stream goes on, only a new declaration raises the hold again);\n\
+         #   front + release +40 = the same with the hold acting 40 samples (2 µs) later, its release with it.\n\
+         # The release is off in every column but the last two.\n\
          # A released control returns to the largest gain and searches (an assumption).\n\
          # Rows 'preamble +': the frame's two training fields alone (320 samples, nothing after them)\n\
          # are sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise.\n\
@@ -794,9 +802,11 @@ fn hold_loop(frames: usize) {
          # control locks on it below the largest gain.\n\
          # Rows 'DC per index -20': an offset of -20 dBFS at every gain, its direction per gain index; rows 'DC before\n\
          # gain -10': an offset of -10 dBFS at the largest gain that falls with the gain, one direction (channel::GainDc).\n\
-         # Rows 'under −D dB': a weaker frame of the same rate and length, D dB below the frame, is being received\n\
-         # (650 samples into the stream) when the frame begins {UNDER_AT} samples into it; the frame is the one counted.\n\
-         # Rows 'hit L +D dB': white noise D dB above the frame's power over L samples, {HIT_AT} samples into the frame.\n\
+         # Rows 'under -D dB': a weaker frame of the same rate and length, D dB below the frame, is being received\n\
+         # (from 600 to 650 samples into the stream) when the frame begins {UNDER_AT} samples into it; the frame is the\n\
+         # one counted, and its SNR is the row's.\n\
+         # Rows 'hit L +D dB': white noise added to the frame over L samples, {HIT_AT} samples into it, nominally D dB above\n\
+         # the frame's mean power (one draw: a few dB either way at L = 4), before the channel's delay and clock offset.\n\
          # Each cell: frames lost, +a−b against 'from the lock' (lost by this column alone, by that one\n\
          # alone), then acquisitions declared / streams stopped on a failed SIGNAL / streams ended by a new\n\
          # declaration or an overrun of the history / frames whose gain changed after the short training\n\

@@ -16,6 +16,10 @@ by ADR 0009 (the count for one to eight chains, the sample interface).
    every frame that follows another after a SIFS; one that spares a lock at the largest
    gain (the first amendment) does the same as soon as noise or interference locks the
    control below the largest gain. The hold alone costs 0 to 4 frames of 2000 at 54 Mb/s.
+   **Amended 2026-11-22 (the founder, on the loop a sample at a time; `rx_front.md` of
+   2026-11-21 and 2026-11-22): the front gives up its hold when 2 of the last 4 ADC samples
+   sit on a rail.** A hold raised on a burst that has already ended froze the largest gain
+   and lost a quarter of the frames that followed it.
 3. **Latency:** the budget below; everything behind the hand-off takes one sample per clock.
 4. **Folding: option C** — the search correlator folded over R, the decision's over 4, the
    detector's arithmetic serial; ADR 0006's R = 6 fallback given up; the folded search
@@ -218,6 +222,34 @@ the declaration — and 1 to 3 of 2000 after a SIFS, at either noise level. The 
 on the radio is the hold alone: no timer inside its gain control. A hold acting 2 µs late
 costs nothing more, 20 µs late 5 to 14 of 2000 (measured with the first amendment's timer;
 without a timer it was not run).
+
+**Amendment, 2026-11-22 (`rxagc loop` a sample at a time through the streaming model,
+`reports/rx_front_agc_loop.txt`; journal `rx_front.md`, 2026-11-21 and 2026-11-22): the
+front gives up its hold on a clipping ADC.**
+
+- *The rule.* The front keeps the last four ADC samples' rail flags (a sample is on a rail
+  when I or Q is at −2048 or 2047), whatever its hold is. When two of the four are set the
+  hold goes down, with the sample that makes it two. The stream to the decoder is not
+  touched: it runs on to its end mark or to an abort. Only a new declaration raises the
+  hold again. In the model: `RxHandoffFixed`, `HandoffConfig::clip_window` and
+  `clip_count` (4 and 2; a count of 0 is the hold of the first amendment).
+- *Why.* The hold is raised at the declaration, some 275 samples after T1's window
+  began. When what was declared has ended by then (a preamble with nothing after it, a
+  frame cut off) the control has already left its lock and stands at the largest gain: the
+  hold freezes that gain, and when SIGNAL then passes on noise (one stream in four) it
+  stays up. The frame that follows arrives at the largest gain and clips. The same holds
+  for a stronger frame that begins while a weaker one is being read. An ADC that clips two
+  samples in four is not receiving what the hold was raised for.
+- *What it costs.* A frame at 6 Mb/s survives a few clipped samples under a still gain;
+  with the release the gain moves and its phase with it. The loop's rows with an
+  interferer's burst inside the frame measure this (the journal has the numbers); the rows
+  without one do not change but for single frames.
+- *What it is not.* The numbers 4 and 2 were chosen on one scene (others tried were
+  worse, at 200 frames). A released control is assumed to return to the largest gain and
+  search. The rule looks at the ADC's own rails: a radio that clips before its ADC, or
+  whose ADC is not driven to its rails by an overload, needs its own flag.
+- *Requirement on the radio:* the hold may be dropped in the middle of a packet, and the
+  control must then act as after any release.
 
 ## Decision 3 — the latency budget
 

@@ -1028,10 +1028,12 @@ pub struct HandoffConfig {
     /// Sample periods from the declaration to the first beat: the DC estimate's 128 reads,
     /// multiplication and division (≈ 160 clocks, 20 periods).
     pub start_delay: usize,
-    /// The ADC samples the release looks back over, the newest included (at most 64).
+    /// The ADC samples the release looks back over, the newest included. A number above 64
+    /// is 64; 0 sees no sample.
     pub clip_window: usize,
     /// The hold is given up when this many samples of the window sit on a rail of the ADC
-    /// (I or Q at −[`ADC_FULL_SCALE`] or [`ADC_FULL_SCALE`] − 1). 0: never.
+    /// (I or Q at or beyond −[`ADC_FULL_SCALE`] or [`ADC_FULL_SCALE`] − 1). 0, or a count
+    /// above the window: never.
     pub clip_count: usize,
 }
 
@@ -1129,7 +1131,8 @@ struct Replay {
 /// The hold lasts to the frame's last sample: [`RxHandoffFixed::signal`] tells it the
 /// length; without it the watchdog ends it at the longest PPDU. The stream runs
 /// [`HANDOFF_TAIL`] samples further and closes with an end mark. A new acquisition while a
-/// packet is open ends it with an abort mark and opens its own (the hold stays up); a reader
+/// packet is open ends it with an abort mark and opens its own (the hold stays up, unless
+/// the release takes it in the same period); a reader
 /// that falls [`ADC_HISTORY`] samples behind loses the stream and the hold. The hold is
 /// also given up, and the stream left as it is, when `clip_count` of the last `clip_window`
 /// ADC samples sit on a rail: the gain it keeps is not the gain of what is arriving (a
