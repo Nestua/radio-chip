@@ -132,23 +132,23 @@ fn narrow(v: i64, from: u32, to: u32) -> i64 {
     }
 }
 
-fn narrow_iq(v: IQ, from: u32, to: u32) -> IQ {
+pub(crate) fn narrow_iq(v: IQ, from: u32, to: u32) -> IQ {
     (narrow(v.0, from, to), narrow(v.1, from, to))
 }
 
-fn imul(a: IQ, b: IQ) -> IQ {
+pub(crate) fn imul(a: IQ, b: IQ) -> IQ {
     (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
 }
 
-fn iconj(a: IQ) -> IQ {
+pub(crate) fn iconj(a: IQ) -> IQ {
     (a.0, -a.1)
 }
 
-fn iadd(a: IQ, b: IQ) -> IQ {
+pub(crate) fn iadd(a: IQ, b: IQ) -> IQ {
     (a.0 + b.0, a.1 + b.1)
 }
 
-fn iabs2(a: IQ) -> i128 {
+pub(crate) fn iabs2(a: IQ) -> i128 {
     i128::from(a.0) * i128::from(a.0) + i128::from(a.1) * i128::from(a.1)
 }
 
@@ -264,7 +264,7 @@ pub fn nco_mix(y: IQ, phase: i64, fx: &FixedRxConfig) -> Option<IQ> {
         .then(|| nco_mix_with(y, phase, fx, &nco_table(fx)))
 }
 
-fn nco_mix_with(y: IQ, phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
+pub(crate) fn nco_mix_with(y: IQ, phase: i64, fx: &FixedRxConfig, table: &[IQ]) -> IQ {
     let prod = imul(y, rotate_with(phase, fx, table));
     narrow_iq(prod, Y_BITS + fx.nco_amp_bits - 1, fx.z_bits)
 }
@@ -709,6 +709,22 @@ pub struct RxFrontFixed {
     trace: SampleTrace,
 }
 
+/// Whether a candidate's sums confirm a long training field: there is energy, and both
+/// conf/(E_L·rx) ≥ 1/2 and coh/(2·E_L·rx) ≥ 1/4 of the float rules, i.e. 2·x ≥ E_L·rx for
+/// each (`tap_energy` is E_L, the taps' energy).
+pub(crate) fn confirmed(sums: &DecisionSums, tap_energy: i128) -> bool {
+    let rhs = tap_energy * sums.energy;
+    sums.energy > 0 && 2 * sums.confirmation >= rhs && 2 * sums.coherence >= rhs
+}
+
+/// An angle (2π/2^A) as a P-bit phase per sample of a lag-`lag` correlation, rounded.
+pub(crate) fn phase_per_sample(angle: i64, lag: u32, fx: &FixedRxConfig) -> i64 {
+    let up = fx.nco_phase_bits - fx.angle_bits;
+    let v = i128::from(angle) << up;
+    let s = lag.trailing_zeros();
+    ((v + (1i128 << (s - 1))) >> s) as i64
+}
+
 /// The intermediate values of one sample of [`RxFrontFixed`] (what the RTL gates compare).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SampleTrace {
@@ -726,6 +742,46 @@ pub struct SampleTrace {
     pub corr: Option<IQ>,
     /// Whether detector A's run counter produced an event at this sample (step 1).
     pub event: bool,
+    /// The search's energy metric completed at this sample: the sum of GI − B squared
+    /// correlator outputs from position n + 1 − [`PAIR_LEN`] − (GI − B) on. `None` before
+    /// the first one.
+    pub energy: Option<i128>,
+    /// The candidate accepted at this sample, whose decision is applied
+    /// `decision_latency` samples later.
+    pub accepted: Option<Accepted>,
+    /// The sums of that candidate's decision, as far as the decision got.
+    pub sums: Option<DecisionSums>,
+}
+
+/// The sums a decision is taken from (what the RTL of the decision engine is compared on,
+/// besides the acquisition).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionSums {
+    /// The final coarse sum: 96 lag-16 products of the history narrowed to E bits.
+    pub coarse: IQ,
+    /// Σ |c1(o)|² + |c2(o)|² over the GI − B offsets, c1 and c2 the correlations of the
+    /// rotated history with the long symbol at T1 + o and 64 later.
+    pub confirmation: i128,
+    /// Σ |c1(o) + c2(o)|².
+    pub coherence: i128,
+    /// The energy of the 128 rotated samples from T1 on.
+    pub energy: i128,
+    /// The fine sum (88 lag-64 products), of a confirmed candidate.
+    pub fine: Option<IQ>,
+}
+
+/// What the search hands the decision when it accepts a candidate (the inputs of the
+/// decision besides the memories; `rx_decision`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Accepted {
+    /// Position of the running maximum of the energy metric.
+    pub imax: usize,
+    /// That maximum.
+    pub emax: i128,
+    /// The search's deadline at the acceptance: positions at or beyond it are not taken.
+    pub deadline: usize,
+    /// The detection that opened the search.
+    pub opened_by: usize,
 }
 
 impl RxFrontFixed {
@@ -770,12 +826,9 @@ impl RxFrontFixed {
         (start..start + len).fold((0, 0), |a, k| iadd(a, imul(v(k), iconj(v(k + lag)))))
     }
 
-    /// An angle (2π/2^A) as a P-bit phase per sample of a lag-`lag` correlation, rounded.
+    /// See [`phase_per_sample`].
     fn per_sample(&self, angle: i64, lag: u32) -> i64 {
-        let up = self.fx.nco_phase_bits - self.fx.angle_bits;
-        let v = i128::from(angle) << up;
-        let s = lag.trailing_zeros();
-        ((v + (1i128 << (s - 1))) >> s) as i64
+        phase_per_sample(angle, lag, &self.fx)
     }
 
     /// Processes the next ADC sample; returns the acquisition decided at it, if any.
@@ -843,6 +896,9 @@ impl RxFrontFixed {
             z: zv,
             corr: None,
             event,
+            energy: None,
+            accepted: None,
+            sums: None,
         };
         self.phase = (self.phase + self.step).rem_euclid(1i64 << fx.nco_phase_bits);
 
@@ -875,6 +931,7 @@ impl RxFrontFixed {
         let j = (i + 1).checked_sub(self.w)?;
         let e: i128 = (j..j + self.w).map(|p| self.pair.get(p)).sum();
         self.energy.put(j, e);
+        self.trace.energy = Some(e);
         let mut s = self.search?;
         if j < s.first {
             return None;
@@ -886,11 +943,20 @@ impl RxFrontFixed {
         if s.best.is_none_or(|(_, emax)| e > emax) {
             s.best = Some((j, e));
         }
-        if let Some((imax, _)) = s.best {
+        if let Some((imax, emax)) = s.best {
             if self.pending.is_none() && j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
+                self.trace.accepted = Some(Accepted {
+                    imax,
+                    emax,
+                    deadline: s.deadline,
+                    opened_by: s.opened_by,
+                });
+                let mut sums = None;
+                let result = self.decide(&s, imax, n, &mut sums);
+                self.trace.sums = sums;
                 self.pending = Some(Pending {
                     due: n + self.cfg.decision_latency.min(MAX_DECISION_LATENCY),
-                    result: self.decide(&s, imax, n),
+                    result,
                 });
                 s.best = None;
             }
@@ -903,7 +969,14 @@ impl RxFrontFixed {
         None
     }
 
-    fn decide(&self, s: &Search, imax: usize, n: usize) -> Option<FixedAcquisition> {
+    /// The decision on the candidate at `imax`; `sums` is left with the sums it got to.
+    fn decide(
+        &self,
+        s: &Search,
+        imax: usize,
+        n: usize,
+        sums: &mut Option<DecisionSums>,
+    ) -> Option<FixedAcquisition> {
         let fx = self.fx;
         let w = self.w;
         let emax = self.energy.get(imax);
@@ -939,18 +1012,23 @@ impl RxFrontFixed {
             (nc + iabs2(a) + iabs2(b), ch + iabs2(iadd(a, b)))
         });
         let rx_energy: i128 = rot[..PAIR_LEN].iter().map(|v| iabs2(*v)).sum();
-        if rx_energy <= 0 {
-            return None;
-        }
-        // Float rules: conf/(E_L·rx) ≥ 1/2 and coh/(2·E_L·rx) ≥ 1/4, i.e. both 2·x ≥ E_L·rx.
-        let rhs = self.tap_energy * rx_energy;
-        if 2 * conf < rhs || 2 * coh < rhs {
+        let mut got = DecisionSums {
+            coarse: cc,
+            confirmation: conf,
+            coherence: coh,
+            energy: rx_energy,
+            fine: None,
+        };
+        *sums = Some(got);
+        if !confirmed(&got, self.tap_energy) {
             return None;
         }
 
         // Fine CFO, lag 64, resolved against the coarse one.
         let fine_start = (sym + FINE_GUARD).checked_sub(GI2_LEN)?;
         let cf = self.lag_sum(fine_start, FINE_LEN, LTF_SYMBOL_LEN, fx.est_bits);
+        got.fine = Some(cf);
+        *sums = Some(got);
         let coarse = -self.per_sample(angle_c, STF_PERIOD as u32);
         let raw = -self.per_sample(
             cordic_with(cf.0, cf.1, &fx, &self.cordic),
@@ -1401,6 +1479,26 @@ mod tests {
     /// The RTL correlator folds tap pairs (k, 64 − k): it relies on the quantised taps keeping
     /// the LTF's Hermitian symmetry t(64 − k) = conj(t(k)) with t(0), t(32) real (the LTF is
     /// real in frequency, IEEE 802.11-2020 §17.3.3).
+    #[test]
+    fn a_candidate_is_confirmed_by_both_rules_and_some_energy() {
+        let sums = |confirmation, coherence, energy| DecisionSums {
+            coarse: (0, 0),
+            confirmation,
+            coherence,
+            energy,
+            fine: None,
+        };
+        // E_L = 10, energy 6: each sum must reach 30.
+        assert!(confirmed(&sums(30, 30, 6), 10));
+        assert!(!confirmed(&sums(29, 30, 6), 10));
+        assert!(!confirmed(&sums(30, 29, 6), 10));
+        assert!(!confirmed(&sums(1000, 29, 6), 10));
+        assert!(!confirmed(&sums(29, 1000, 6), 10));
+        // No energy: nothing to confirm, though 0 ≥ 0 twice.
+        assert!(!confirmed(&sums(0, 0, 0), 10));
+        assert!(!confirmed(&sums(5, 5, -1), 10));
+    }
+
     #[test]
     fn ltf_taps_are_hermitian() {
         // Multi-bit taps only: sign-only taps (T = 1) map 0 to +1 and are not symmetric.
