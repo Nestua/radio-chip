@@ -369,6 +369,13 @@ decision engine is written.**
   slack at L = 64. Proposed: F = 4 and L = 64; the cycle-exact schedule, with the energy
   ring's margin and `det_a`'s latency in it, is the first deliverable of part d step 3,
   before any RTL of the decision engine.
+  **Note, 2026-11-22 (the schedule as built: `radio_phy::rx_decision`, journal
+  `rx_front.md` of that date).** The history's wrapper has its own write port, so ADR
+  0006's stretch of the reads by R/(R − 1) does not apply. Counted stage by stage, cycle
+  to cycle: 8·w + 268 cycles at F = 4 against (L − D)·R − 20 — 364 of 460 at w = 12,
+  D = 4 (21 % to spare; 396, 14 %, with no back-off). F = 8 has no cycle to spare at
+  w = 12 and does not fit at w = 16: F = 4 and L = 64 stand. The stage counts of the
+  blocks not yet written are allowances.
 - **R = 6 no longer fits** by the same formula (about 460 clocks against 390 at L = 71, the
   correlations being the long pole). ADR 0006's fallback clock is given up with option C;
   if 160 MHz does not close on a board, the fallback is the unfolded decision correlator

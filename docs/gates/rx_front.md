@@ -2860,3 +2860,202 @@ believed if it also named a slow rate. The released control returns to the large
   often a stronger frame over a slow one).
 - As before: the stream's 12 of 10 000 at 24 Mb/s in AWGN above 30 dB; the `dc` row
   −10 dBFS before the gain at 25 dB.
+
+## 2026-11-22 · G0 + model gate · the decision's schedule in clocks (part d step 3, first deliverable)
+
+ADR 0008, decision 4: "the cycle-exact schedule, with the energy ring's margin and
+`det_a`'s latency in it, is the first deliverable of part d step 3, before any RTL of the
+decision engine". This entry is that schedule. No RTL, and no change to what the model
+decides.
+
+**What it is.** `radio_phy::rx_decision::run_schedule` makes every decision of
+`RxFrontFixed` again from memories *as they stand in the clock each word is read*: the
+history (512 words, one write port, two read ports) and the energy ring (81 words) are
+written a sample at a time on the clock grid, and the schedule says in which cycle each
+word is read. A word read after it was overwritten or in the cycle that overwrites it, a
+read port used twice in a cycle, or a result registered after its deadline is an error.
+The gate holds its decisions and their sums to the model's, bit for bit.
+
+**G0: the clocks.** Counts are from cycle to cycle: a block with latency k and its input
+in cycle X shows its registered output in cycle X + k. (The RTL headers count clock edges
+after the edge that takes the input, one less: `ltf_corr`'s 14 is 15 here, the CORDIC's
+17 is 18, the NCO's 3 is 4.) Cycle Y(n) is the one in which sample n of the DC blocker's
+output is at the history's write port and at detector A's input; samples are at least R
+cycles apart. With the NCO path D samples behind (ADR 0006, decision 3):
+- the acceptance at model sample n is a registered strobe in cycle
+  a = Y(n + D) + 5 (`rx_latch` and `nco`, as `tb_latch` requires) + 15 (`ltf_corr`) + 3
+  (the search: square, running sum, comparison — an allowance for step 2);
+- the result is applied at model sample n + L: the run counter of `det_a` is cleared in
+  the cycle sample n + L is in its last stage, so the result is due as a register's output
+  in cycle Y(n + L) + 4 − 1, and in any case inside that sample's R cycles (the hand-off
+  and the gain's hold start with it: a slower, serial `det_a` does not move the deadline
+  past the sample);
+- with samples exactly R apart: (L − D)·R − 23 + 3 cycles. **460 at R = 8, D = 4,
+  L = 64.** D = 4: `rx_latch`'s contract is D·R ≥ 24 with a register for the CORDIC's
+  arbiter, which D = 3 meets with nothing to spare.
+
+**G0: the schedule** (cycles after the strobe; w = GI − B, F the fold of the decision's
+correlator):
+
+| Cycles | What | Reads |
+|---|---|---|
+| 0 … w | the grid: the energies at imax … imax + w, oldest first; T1 is the last that keeps 7/8 of the maximum | ring, one a cycle |
+| w + 2 | T1 registered (the word, the comparison) | |
+| c = w + 3 … c + 95 | final coarse sum: product i from y(T1 − 160 + i) and y(T1 − 144 + i) at E bits, one a cycle on one complex multiplier | ports 0 and 1 |
+| c + 99 | the sum registered (the words 1, narrowed 1, the product 1, the accumulator 1), the CORDIC asked; a latch asking in the same cycle goes first and the decision asks again in the next | |
+| g + 1; g + 19; g + 20 | the sum at the CORDIC's input (g: the cycle of the grant; the arbiter's register); the coarse angle; the step | |
+| r = g + 20 … | y(T1 + m), m = 0 … 126 + w, through a second NCO into the decision's correlator, one a cycle; after each sample that completes a window to be correlated (m = 63 … 62 + w, 127 … 126 + w) the stream waits F − 1 cycles | port 0 |
+| f = c + 96 … f + 175 | fine sum on the same multiplier: product i from y(T1 − 28 + i) in cycle f + 2i and y(T1 + 36 + i) in the next | port 1 |
+| f + 179; + 19; + 2 | the fine sum registered and the CORDIC asked; its angle; the resolved CFO | |
+| last read + 5 | the last sample out of the NCO, at the correlator (memory 1, NCO 4) | |
+| + F + 7 | its correlation (`ltf_corr`'s stages with F in place of 8) | |
+| + 3 + 1 + 2 | the squares, the sums, the two comparisons | |
+| + 1 | **the result registered** | |
+
+Without a wait at the CORDIC: **8·w + 268 cycles at F = 4** (the fine sum's branch ends at
+w + 300 and is the longer one only below w = 5). Words read: port 0 96 + 127 + w, port 1
+96 + 176, the ring w + 1.
+
+| | w = 8 (back-off 400 ns) | **w = 12 (200 ns, the default)** | w = 16 (none) |
+|---|---|---|---|
+| cycles, F = 4 | 332 | **364** | 396 |
+| spare of 460 | 128 (28 %) | **96 (21 %)** | 64 (14 %) |
+| cycles, F = 8 | 396 | 460: none to spare | 524: does not fit |
+| history words to spare (of 512), at least | 138 | 130 | 121 |
+| ring words to spare (of 81) | 9 | 5 | 1 |
+
+A latch that asks for the CORDIC in the cycle the coarse sum does costs one cycle; one
+that meets the fine sum costs nothing above w = 4 (that branch has 52 cycles to spare at
+w = 12). On a grid of exactly 8 cycles a sample the stream's own latches (5 cycles after
+their sample) can only meet a decision's requests when w is a multiple of 8.
+
+**Which counts are whose.** The stages of blocks that exist are theirs: the memory (1),
+`cordic` (18), `nco` (4), and the correlator's are `ltf_corr`'s (F + 7). The others are
+allowances for RTL not yet written, none through synthesis: the search's 3, the
+multiplier's 3 with its accumulator (`nco`'s product alone, from flip-flops, routed with
+0.9 ns to spare), the arbiter's 1, the squares' 3, the sums' 1, the comparisons' 2. A
+stage more in any of them is a cycle more; 96 cycles are what absorbs that at w = 12.
+
+**What the schedule found against the ADRs' estimates.**
+1. **The write does not take a read slot.** ADR 0006's formula stretched every read by
+   R/(R − 1) for the history's write. The wrapper as built and gated (`ram_1w2r`,
+   `memory.md`) has its own write port: a read is only illegal at the address being
+   written, and the decision reads words at least 60 samples old. ADR 0008's "about 406
+   clocks, 13 % of slack" by that formula is 364 of 460, 21 %.
+2. **The rotation is 127 + w samples, not 128 + w.** The model rotates one more
+   (`rot` has 128 + w entries) and no sum reads it.
+3. **Two tests of the model are always true at an acceptance** and need no hardware: the
+   grid's `p < deadline` (the acceptance is at a position j < deadline with
+   imax + w ≤ j − 63) and `kc + HISTORY > n` (n − kc ≤ 349 + 2·w). The model keeps both.
+   Of the `checked_sub` cases only T1 < 160 (a stream that begins inside a frame) can
+   happen; the hardware needs a saturating sample count for it.
+4. **The ring is read oldest first.** At w = 16 it has one word to spare; read newest
+   first (the order the model's search runs in) the oldest energy is gone before its
+   turn.
+5. **F = 8 (16 multipliers in place of 32) has no cycle to spare at w = 12 and does not
+   fit at w = 16.** ADR 0008's choice of F = 4 stands on the count as well as on its
+   formula.
+6. A decision that ends early (no coarse window in the stream, a failed rule) is given
+   its whole schedule here; the RTL may answer sooner.
+7. **ADR 0008 counted D = 5 and a budget of 464;** with `det_a` as it is the budget is
+   460 at D = 4 and 452 at D = 5. A serial `det_a` (R0-08c, then ADR 0008's option C)
+   needs D = 5 if its event comes more than 12 cycles after its sample (the latch's
+   contract D·R ≥ that latency + 20).
+
+**Gate.** `crates/radio-phy/tests/g2_rx_decision.rs`, eight tests, and four unit tests
+(`rx_decision::tests`, `rx_front_fixed::tests`). It is a model gate, as `g2_rx_handoff`
+is: no reference from outside the project. References: the decisions and their sums are
+`RxFrontFixed::push`'s (`SampleTrace::accepted`, `sums`, new; `decide` is gated by
+`g2_rx_front`); the cycle counts, the budget and the memories' margins are worked by hand
+from the table above; the trace's energy is checked against the sum of the squared
+correlator outputs of the same trace, and an acceptance's deadline against the events.
+- `the_schedule_makes_the_models_decisions`: twelve scenes (frames at 30, 6 and 2 dB; a
+  strong short-training fragment and a noise burst before a weaker frame; frames under a
+  tone of their own power; no back-off, with and without failed candidates and under the
+  tone; back-offs of 400 and 50 ns; frames whose second long symbol is negated; a stream
+  cut 40 samples into a frame): every acquisition and the five sums of every decision.
+- `each_way_out_of_a_decision_is_taken` (no coarse window in the stream; both rules
+  failed; the confirmation alone; accepted — no scene fails the coherence alone, and the
+  rules' comparison has its own unit test), `a_decision_ends_at_the_clock_the_schedule_says`
+  (the counts above, the words read on each port),
+  `the_latch_goes_first_at_the_cordic_and_costs_a_clock` (a latch every 4 samples at each
+  of its 32 phases; the stream's own latches under a tone, met without back-off and not
+  with the default; w = 4, where the fine sum's wait counts; no cycle to spare and one
+  wait: late; a latch in every cycle: late),
+  `the_memories_hold_what_the_schedule_reads` (the margins; one word fewer and the read is
+  stale, in the memory named; a read in the cycle that overwrites),
+  `idle_clocks_between_samples_only_add_slack` (the strobe's cycle and the budget with
+  the testbenches' idle pattern), `what_does_not_fit_is_refused` (F = 8 with one wait;
+  R = 6; D = 17; L = 51; a serial detector's deadline; a decision that ends early),
+  `the_models_trace_names_the_energy_and_the_accepted_maximum`.
+
+Seen to fail first: against a module that returned no decision and a length of 0, five of
+the first six tests failed and the sixth passed on nothing (it now requires decisions).
+The first real model then failed the hand count by 3 cycles: the hand count had the
+rotation's last sample correlated, the model had one sample more rotated than any sum
+reads (finding 2).
+Command: `cargo test -p radio-phy --test g2_rx_decision` — 8 passed;
+`cargo test -p radio-phy --lib` — 5 passed.
+
+**Mutations** (each applied to `rx_decision.rs`, the gate and the unit tests run, the
+file restored with `cp` and `touch`): 61, of which 59 fail. They cover the grid (order,
+first or last, the rule, the reads' cycles and port), each sum's window, lag, port and
+read cycles, the rotation's start, waits and phase, the CORDIC's priority and each stage
+count, the stream's own latches a cycle either way or left out, the strobe and the
+deadline, the memory's rule in the overwriting cycle, the ports' check, and each field of
+the result. The two that pass: the ring written in the strobe's cycle instead of the one
+before (the margin does not depend on it: nothing to observe), and a fallback for a
+decision with a coarse window and no fine one, which cannot happen (removed). Seven more
+on the model's side (`confirmed`, the trace's energy and maximum): all fail.
+
+**Independent review (fresh agent in its own worktree; the code, the ADRs and the RTL
+headers, not the conclusions).** The schedule is sound in structure: a simulation of its
+own (memories of 512 and 81 words addressed modulo their depth, reads at the cycles of
+the table) agreed with `run_schedule` and the model in 126 configurations (three scenes,
+w from 1 to 16, D = 3 to 5, with and without idle clocks): every word, sum, acquisition,
+end, wait, budget and least depth. `scripts/check.sh` green on the change, the vectors
+regenerated without a difference. It confirmed that `ram_1w2r` has no write slot to wait
+for (finding 1), that the rotation's last sample and the two tests of finding 3 are
+dead, the ring's and the history's margins, and the deadline against `det_a` as built.
+Found and corrected:
+- *the counts mixed two conventions.* The first version took `ltf_corr`'s 14, the
+  CORDIC's 17 and the NCO's 3 as cycles; they are edges after the taking edge, one less.
+  With that, one register for the arbiter and a stage more for the multiplier (its
+  judgement from `nco`'s routed slack) the count went from 359 of 461 to 364 of 460, and
+  "F = 8 fits by 6 cycles" to "none to spare". Every count is from cycle to cycle now and
+  the module says so;
+- *the read cycles were not tied to the result's:* a read could be moved by hundreds of
+  cycles and the reported end stayed. Every time is now taken from the memories' own
+  record of the reads;
+- *the stream's own latches never met a decision* in the gate (their cycle and the
+  decision's are 4 apart modulo 8 at w = 12): the tone scene without back-off, where
+  they do;
+- the ring had no port and its reads no cycle that mattered; the error did not say
+  which memory; the history's bound in the test was one short at w = 7 and 15 (a scene
+  at w = 15 added); the deadline let a slow detector push the result past its sample; a
+  comment said no scene fails one rule alone (the confirmation alone does); the trace's
+  deadline was not checked.
+Of its 121 mutants 32 passed the first gate; the corrected one fails all it listed as
+not equivalent but the ring's write cycle (above).
+Noted by it and left: `hw/Makefile`'s latch gate does not run D = 4 at R = 8;
+`DecisionTiming` does not check the latch's contract; the file is named `g2_` and is not
+a fixed-point budget.
+Not checked by it: synthesis or timing of any stage; the macro's access time; R other
+than 8 beyond the probes; `FixedRxConfig` off its defaults; whether three stages are
+enough for the search.
+
+**What this is not.** Not RTL and not a proof of timing: the allowances are stage counts,
+and the squares (54 bits), the comparisons (about 60) and a 12 × 12 complex product behind
+a memory's output have not been synthesised. One clock (R = 8) and samples never closer
+than R. The schedule of the hand-off (the DC estimate, the replay, when the decoder's
+verdict may arrive) is not in it.
+
+**Open (for the RTL of steps 2 and 3)**
+- Detection events delayed into the search's timeline, tagged as the latch's results
+  are: where `opened_by` and the deadline live.
+- A saturating sample count for T1 < 160; the w correlations of the first symbol kept
+  64 samples for the coherent sum (about 16 × 54 bits); a reset in the middle of a
+  decision (the memories keep their contents).
+- L above 63 + w is not lossless in the model, and by the reviewer's probe the ring has
+  no word to spare at L = 80.
+- The latch gate at D = 4, R = 8; the hand-off's own schedule and the verdict's.

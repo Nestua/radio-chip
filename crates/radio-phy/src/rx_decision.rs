@@ -492,10 +492,8 @@ pub fn run_schedule(
                 cf = iadd(cf, imul(est(v0), iconj(est(v1))));
             }
         }
-        // (A stream that begins inside a frame has no fine window and no result: the
-        // branch then ends where it would have.)
-        let fine_end = history.last(1).max(coarse_end + 2 * FINE_LEN);
-        let fine_ask = fine_end + MEM + MAC;
+        // (With a coarse window in the stream there is a fine one: T1 ≥ 160.)
+        let fine_ask = history.last(1) + MEM + MAC;
         let fine_granted = granted(fine_ask, deadline, &asked)?;
         let coarse = -step;
         let raw = -phase_per_sample(
