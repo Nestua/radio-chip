@@ -240,10 +240,19 @@ front gives up its hold on a clipping ADC.**
   stays up. The frame that follows arrives at the largest gain and clips. The same holds
   for a stronger frame that begins while a weaker one is being read. An ADC that clips two
   samples in four is not receiving what the hold was raised for.
-- *What it costs.* A frame at 6 Mb/s survives a few clipped samples under a still gain;
-  with the release the gain moves and its phase with it. The loop's rows with an
-  interferer's burst inside the frame measure this (the journal has the numbers); the rows
-  without one do not change but for single frames.
+- *What it gains* (frames lost of 2000, the hold alone against the release): after a
+  preamble alone at 54 Mb/s 477 against 1 (508 against 2 in loud noise, 375 and 472
+  against 5 and 4 with an offset); a frame that begins inside one 25 dB weaker, at
+  54 Mb/s, 2000 against 2.
+- *What it costs.* A frame at 6 Mb/s often survives a few clipped samples under a still
+  gain; with the release the gain moves and its phase with it. White noise over 8 samples
+  inside the frame, 20 dB above it: 1010 lost against 710; over 16 samples at +10 dB: 766
+  against 383; over 8 at +10 dB: 54 against 21. At 54 Mb/s such a burst loses the frame
+  either way. The rows with no burst, no preamble before and no frame under do not change
+  but for single frames.
+- *A release acting 2 µs late* costs nothing in the burst rows and loses 188 to 279 of
+  2000 where a stronger frame begins inside a weaker one: the release has to be as fast
+  as the control's overload detector for what it is for.
 - *What it is not.* The numbers 4 and 2 were chosen on one scene (others tried were
   worse, at 200 frames). A released control is assumed to return to the largest gain and
   search. The rule looks at the ADC's own rails: a radio that clips before its ADC, or
@@ -427,8 +436,9 @@ RTL; the defaults stand until then.
   keeps its vectors' values and gets new RTL, a new testbench timing and new mutation
   records; `det_a` gets new vectors with its retune; the latch's gate is rerun at the new D.
 - **Requirements on the radio, to check at R1:** the gain still from the end of the STF, a
-  lock kept for 25.6 µs and a hold on a pin (decision 2); its noise at the largest gain at
-  or above −48 dBFS at the ADC with the 13-bit hand-off; its own offset correction leaving
+  hold on a pin that may be dropped inside a packet and no timer in the gain control
+  (decision 2 as amended; the lock kept for 25.6 µs is withdrawn); its noise at the
+  largest gain at or above −48 dBFS at the ADC with the 13-bit hand-off; its own offset correction leaving
   less than the noise at the largest gain in front of the gain control's detectors
   (10 dB above it already costs frames); its receive latency and turn-around inside the
   9 µs of decision 3.
@@ -449,6 +459,8 @@ RTL; the defaults stand until then.
 - Power from simulated switching.
 - The macros' sizes and timing at 160 MHz (`memory.md` checked their ports only).
 - The radio's pins, its hold, its latencies (decisions 2, 3, 6).
+- The release's two numbers against captures: how often a stronger frame arrives over a
+  weaker one, and how often a burst that is not a frame clips the ADC (R1).
 - TGn B and E, frames other than 1000 octets, the upper edge of the level: not measured.
 
 ## The review of the first draft (fresh agent, 2026-11-21)
