@@ -304,6 +304,18 @@ impl<'a, T: Copy> Memory<'a, T> {
     fn reads(&self, port: u8) -> usize {
         self.used.iter().filter(|u| u.0 == port).count()
     }
+
+    /// The cycle of the latest read on `port` so far (0 before any).
+    fn last(&self, port: u8) -> usize {
+        let on_port = self.used.iter().filter(|u| u.0 == port);
+        on_port.map(|u| u.1).max().unwrap_or(0)
+    }
+}
+
+/// Whether the energy `e` at position `p` may be the grid: it keeps 7/8 of the maximum
+/// and lies before the search's deadline.
+fn keeps(e: i128, p: usize, acc: &Accepted) -> bool {
+    p < acc.deadline && e >= acc.emax - (acc.emax >> 3)
 }
 
 /// The first cycle from `ask` on in which no latch asks for the CORDIC, if it comes
@@ -408,18 +420,15 @@ pub fn run_schedule(
 
         // The grid: the latest start within GI − B of the maximum keeping 7/8 of it. The
         // oldest energy is read first: it is the first to be overwritten.
-        let keep = acc.emax - (acc.emax >> 3);
         let mut sym = None;
-        let mut read = a;
         for k in 0..=w {
-            read = a + k;
-            let e = ring.read(0, acc.imax + k, read)?;
-            if acc.imax + k < acc.deadline && e >= keep {
+            let e = ring.read(0, acc.imax + k, a + k)?;
+            if keeps(e, acc.imax + k, &acc) {
                 sym = Some(acc.imax + k);
             }
         }
         // T1 registered: the last word, its comparison.
-        let grid = read + MEM + 1;
+        let grid = ring.last(0) + MEM + 1;
 
         let mut run = DecisionRun {
             accepted_at: n,
@@ -443,12 +452,11 @@ pub fn run_schedule(
         // The final coarse sum, both ports, one product a cycle.
         let mut cc = (0, 0);
         for i in 0..COARSE_LEN {
-            read = grid + 1 + i;
-            let v0 = history.read(0, kc + i, read)?;
-            let v1 = history.read(1, kc + STF_PERIOD + i, read)?;
+            let v0 = history.read(0, kc + i, grid + 1 + i)?;
+            let v1 = history.read(1, kc + STF_PERIOD + i, grid + 1 + i)?;
             cc = iadd(cc, imul(est(v0), iconj(est(v1))));
         }
-        let coarse_end = read;
+        let coarse_end = history.last(0).max(history.last(1));
         let coarse_ask = coarse_end + MEM + MAC;
         let coarse_granted = granted(coarse_ask, deadline, &asked)?;
         let angle_c = cordic_with(cc.0, cc.1, fx, &cordic);
@@ -460,12 +468,11 @@ pub fn run_schedule(
         let first = rotation_start(coarse_granted);
         let mut rot = Vec::with_capacity(PAIR_LEN + w);
         for m in 0..PAIR_LEN + w - 1 {
-            read = first + rotation_read(m, w, fold);
-            let v = history.read(0, sym + m, read)?;
+            let v = history.read(0, sym + m, first + rotation_read(m, w, fold))?;
             let ph = (i128::from(step) * m as i128).rem_euclid(1i128 << fx.nco_phase_bits) as i64;
             rot.push(nco_mix_with(v, ph, fx, &nco));
         }
-        let rotation_end = read;
+        let rotation_end = history.last(0);
         let xc = |o: usize| {
             (0..LTF_SYMBOL_LEN).fold((0, 0), |s, k| iadd(s, imul(rot[o + k], iconj(taps[k]))))
         };
@@ -478,17 +485,17 @@ pub fn run_schedule(
         // The fine sum on port 1 behind the coarse one, two reads a product.
         let fine_start = (sym + FINE_GUARD).checked_sub(GI2_LEN);
         let mut cf = (0, 0);
-        read = coarse_end + 2 * FINE_LEN;
         if let Some(fs) = fine_start {
             for i in 0..FINE_LEN {
-                read = coarse_end + 1 + 2 * i;
-                let v0 = history.read(1, fs + i, read)?;
-                read += 1;
-                let v1 = history.read(1, fs + LTF_SYMBOL_LEN + i, read)?;
+                let v0 = history.read(1, fs + i, coarse_end + 1 + 2 * i)?;
+                let v1 = history.read(1, fs + LTF_SYMBOL_LEN + i, coarse_end + 2 + 2 * i)?;
                 cf = iadd(cf, imul(est(v0), iconj(est(v1))));
             }
         }
-        let fine_ask = read + MEM + MAC;
+        // (A stream that begins inside a frame has no fine window and no result: the
+        // branch then ends where it would have.)
+        let fine_end = history.last(1).max(coarse_end + 2 * FINE_LEN);
+        let fine_ask = fine_end + MEM + MAC;
         let fine_granted = granted(fine_ask, deadline, &asked)?;
         let coarse = -step;
         let raw = -phase_per_sample(
@@ -540,6 +547,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_grid_keeps_seven_eighths_of_the_maximum_before_the_deadline() {
+        let acc = Accepted {
+            imax: 100,
+            emax: 800,
+            deadline: 110,
+            opened_by: 0,
+        };
+        // 800 − 800 / 8 = 700 is kept, 699 is not.
+        assert!(keeps(700, 105, &acc) && keeps(800, 100, &acc));
+        assert!(!keeps(699, 105, &acc));
+        assert!(keeps(700, 109, &acc) && !keeps(800, 110, &acc));
+        // The shift floors: 7 − 0 = 7.
+        let small = Accepted { emax: 7, ..acc };
+        assert!(keeps(7, 100, &small) && !keeps(6, 100, &small));
+    }
+
+    #[test]
     fn a_port_gives_one_word_a_cycle() {
         let written: Vec<usize> = (1..=40).collect();
         let data = vec![(0i64, 0i64); 40];
@@ -556,6 +580,7 @@ mod tests {
             })
         );
         assert_eq!((m.reads(0), m.reads(1)), (2, 1));
+        assert_eq!((m.last(0), m.last(1), m.last(2)), (42, 41, 0));
     }
 
     #[test]
