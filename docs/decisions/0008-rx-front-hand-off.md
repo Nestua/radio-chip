@@ -19,7 +19,11 @@ by ADR 0009 (the count for one to eight chains, the sample interface).
    **Amended 2026-11-22 (the founder, on the loop a sample at a time; `rx_front.md` of
    2026-11-21 and 2026-11-22): the front gives up its hold when 2 of the last 4 ADC samples
    sit on a rail.** A hold raised on a burst that has already ended froze the largest gain
-   and lost a quarter of the frames that followed it.
+   and lost a quarter of the frames that followed it. **Amended again the same day (the
+   founder, on the measurement of what that release costs): by the rate.** Once SIGNAL
+   has decoded to 6, 9 or 12 Mb/s with at least 40 of its 48 coded bits agreeing, the
+   rule is 24 of the last 32; a declaration under a hold that is up and so patient stays
+   patient until its own verdict.
 3. **Latency:** the budget below; everything behind the hand-off takes one sample per clock.
 4. **Folding: option C** — the search correlator folded over R, the decision's over 4, the
    detector's arithmetic serial; ADR 0006's R = 6 fallback given up; the folded search
@@ -259,6 +263,41 @@ front gives up its hold on a clipping ADC.**
   whose ADC is not driven to its rails by an overload, needs its own flag.
 - *Requirement on the radio:* the hold may be dropped in the middle of a packet, and the
   control must then act as after any release.
+
+**Fourth amendment, 2026-11-22 (`rxagc release` and `loop`,
+`reports/rx_front_agc_release.txt`, `rx_front_agc_loop.txt`; journal `rx_front.md`, the
+entries of that date): the release by the rate.**
+
+- *Why.* The third amendment's release is paid for by the frames at 6 Mb/s that a
+  clipping burst hits: they often survive the burst under a still gain and are lost when
+  the gain moves (8 samples 20 dB above the frame: 1010 of 2000 lost against 710). A
+  frame at 54 Mb/s is lost by such a burst either way. So what there is to lose depends
+  on the rate, and after SIGNAL the receiver knows the rate.
+- *The rule.* The decoder gives the front, with SIGNAL's length, one more bit: *patient*.
+  It is set when SIGNAL decoded to 6, 9 or 12 Mb/s and at least 40 of its 48 coded bits
+  agree in sign with the decoded field encoded again (`rx_ofdm::SignalCheck`,
+  `SignalVerdict::of`; a soft value of 0 agrees with nothing). From a verdict that says
+  patient the hold is given up by 24 of the last 32 ADC samples on a rail instead of 2 of
+  4; a verdict that does not say so leaves or restores 2 of 4. A declaration that comes
+  while the hold is up and patient keeps it patient until its own verdict; any other
+  declaration starts with 2 of 4.
+- *Why the agreeing bits.* A quarter of all noise passes SIGNAL's parity and rate
+  patterns, three eighths of it naming a slow rate. Behind a preamble with no data the
+  symbol at SIGNAL's place is near silence: its soft values are mostly 0 and few
+  *disagree* (1 to 5), but only 16 to 35 of 48 *agree*, where a true SIGNAL has 44 or
+  more down to 5 dB (40 or more through TGn D but for one in 2000). Without the threshold
+  the rule lost 175 of 2000 after a preamble alone.
+- *Why the inheritance.* A stronger frame over a patient one that clips too little for
+  24 of 32 is declared by the front; putting 2 of 4 back at that declaration released in
+  the middle of that frame (69 of 2000 lost where the hold alone lost none and 2 of 4
+  nine). Inherited: 8.
+- *What it is not.* The slow rates are three by judgement (the modulations that survive
+  clipped samples in these runs); the threshold, 24 and 32 were chosen on the scenes of
+  the journal and tried on ten more. The patient rule is slower by construction: a
+  stronger frame that clips less than three samples in four over a patient frame is not
+  re-gained until the front declares it and its own SIGNAL is read.
+- *Interfaces.* Decoder to front: the verdict's tag, the number of data symbols, the
+  patient bit. Nothing new towards the radio.
 
 ## Decision 3 — the latency budget
 

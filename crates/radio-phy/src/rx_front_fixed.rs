@@ -1173,7 +1173,13 @@ struct Replay {
 /// also given up, and the stream left as it is, when `clip_count` of the last `clip_window`
 /// ADC samples sit on a rail: the gain it keeps is not the gain of what is arriving (a
 /// declaration on a burst that has ended, a stronger packet over the one being read). Only a
-/// new acquisition raises it again. Every packet
+/// new acquisition raises it again. Once the decoder's verdict says the frame is one that
+/// survives a few clipped samples ([`SignalVerdict::patient`]) the rule is
+/// `patient_count` of `patient_window` instead, so that a short burst does not move the
+/// gain under the frame; a verdict that does not say so puts the first rule back. A new
+/// acquisition under a hold that is up and patient stays patient until its own verdict: the
+/// gain has not moved, and going back to the quick rule in the middle of what is arriving
+/// would release there. Every packet
 /// opened ends in one mark, also one whose first sample was never taken; a mark that finds
 /// the one before it still waiting for the reader is not sent. A new acquisition and an
 /// overrun in the same period give the acquisition's mark. A packet whose last sample was
@@ -1218,7 +1224,8 @@ impl RxHandoffFixed {
     }
 
     /// The decoder's verdict on SIGNAL of the packet tagged `packet` (the tag of its first
-    /// beat): its number of data symbols, or `None` when it did not decode. The first
+    /// beat): its number of data symbols and whether the hold is patient from now on, or
+    /// `None` when it did not decode. The first
     /// verdict for a packet counts; one for a packet that is not the open one is ignored.
     /// The hold covers the samples to the back-off after the last symbol's window: it is
     /// down at once if the first sample after them has been pushed, or SIGNAL failed.
