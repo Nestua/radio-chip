@@ -13,7 +13,7 @@
 //! in units of 2π/2^A, NCO phases and CFO in units of 2π/2^P per sample (fs·2^−P Hz).
 
 use crate::fixed::{requantize, Overflow, QFormat, Rounding};
-use crate::ppdu::{data_symbols, Rate};
+use crate::ppdu::{data_symbols, Rate, MAX_PSDU_LEN};
 use crate::rx_front::{
     backoff_samples, long_training_symbol, Pending, Ring, RxConfig, AUTOCORR_LEN,
     COARSE_END_BEFORE_T1, COARSE_LEN, FINE_GUARD, FINE_LEN, GI2_LEN, GI_LEN, HISTORY, LATCH_LAG,
@@ -1033,7 +1033,8 @@ pub struct HandoffConfig {
     /// The ADC samples the release looks back over, the newest included. A number above 64
     /// is 64; 0 sees no sample.
     pub clip_window: usize,
-    /// The hold is given up when this many samples of the window sit on a rail of the ADC
+    /// The hold, while it is not patient, is given up when this many samples of the window
+    /// sit on a rail of the ADC
     /// (I or Q at or beyond −[`ADC_FULL_SCALE`] or [`ADC_FULL_SCALE`] − 1). 0, or a count
     /// above the window: never.
     pub clip_count: usize,
@@ -1063,7 +1064,9 @@ impl SignalVerdict {
     /// bits agree.
     pub fn of(signal: Signal, check: SignalCheck, pace: &HandoffConfig) -> Self {
         Self {
-            data_symbols: data_symbols(signal.rate, signal.length),
+            // A decoded length is at most 4095; a larger one is the watchdog's.
+            data_symbols: data_symbols(signal.rate, signal.length.min(MAX_PSDU_LEN))
+                .min(MAX_DATA_SYMBOLS),
             patient: matches!(signal.rate, Rate::R6 | Rate::R9 | Rate::R12)
                 && check.agree >= pace.patient_agree,
         }
@@ -1194,7 +1197,8 @@ pub struct RxHandoffFixed {
     x: Ring<(i16, i16)>,
     replay: Option<Replay>,
     hold: bool,
-    /// Whether the hold is given up by the patient rule.
+    /// Whether the hold is given up by the patient rule. It means something only while
+    /// the hold is up: every raising of the hold sets it, and nothing reads it otherwise.
     patient: bool,
     /// Which of the last 64 ADC samples sat on a rail, the newest in bit 0.
     rails: u64,
@@ -1259,7 +1263,6 @@ impl RxHandoffFixed {
     fn close(&mut self, mark: HandoffEnd) {
         self.replay = None;
         self.hold = false;
-        self.patient = false;
         self.mark.get_or_insert(mark);
     }
 

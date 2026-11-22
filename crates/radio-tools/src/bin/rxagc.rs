@@ -280,7 +280,8 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
         Burst::Under { db, weak } => {
             let a = 10f64.powf(-db / 20.0);
             let weak = frame(&[0u8; OCTETS], weak.unwrap_or(pt.rate));
-            // The frame ends UNDER_AT samples after the weaker one: `x` holds both.
+            // A weaker frame of the frame's rate ends UNDER_AT samples before the frame
+            // does; a slower one is cut off where the stream ends.
             for (o, w) in x[under.unwrap_or(0)..].iter_mut().zip(&weak) {
                 *o = (o.0 + a * w.0, o.1 + a * w.1);
             }
@@ -951,7 +952,7 @@ fn hold_loop(frames: usize, trials: bool) {
          # samples of power and the overload exit on (as every command), stepped with the receiver (FastAttackAgc::start).\n\
          # Receiver, all in integers, in every column: each ADC sample through the streaming front (RxHandoffFixed: 8 beats\n\
          # a period, the replay 20 periods after the declaration), the decoder as its reader: it sees the beats alone, gives\n\
-         # SIGNAL's verdict (decode_signal_fixed on the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods\n\
+         # SIGNAL's verdict (decode_signal_checked_fixed on the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods\n\
          # after the beat that completes them and decodes a stream (decode_ppdu_fixed, the tracker started from the CFO\n\
          # word) when its end mark comes. The front searches all through; a frame is received if any stream decodes to it.\n\
          # Phase jump per gain change uniform in ±{JUMP_DEG}°.\n\
@@ -985,7 +986,8 @@ fn hold_loop(frames: usize, trials: bool) {
          # control locks on it below the largest gain.\n\
          # Rows 'DC per index -20': an offset of -20 dBFS at every gain, its direction per gain index; rows 'DC before\n\
          # gain -10': an offset of -10 dBFS at the largest gain that falls with the gain, one direction (channel::GainDc).\n\
-         # Rows 'under -D dB': a weaker frame of the same rate and length (rows '6 Mb/s under': at 6 Mb/s), D dB below\n\
+         # Rows 'under -D dB': a weaker frame of the same rate and length (rows '6 Mb/s under': 1000 octets at\n\
+         # 6 Mb/s, which outlasts the stream), D dB below\n\
          # the frame, is being received\n\
          # (from 600 to 650 samples into the stream) when the frame begins {UNDER_AT} samples into it; the frame is the\n\
          # one counted, and its SNR is the row's.\n\
@@ -1001,7 +1003,7 @@ fn hold_loop(frames: usize, trials: bool) {
             "# rxagc release: the rows of `loop` named below, the same frames, with other columns. Releases tried in\n\
              # this tool only (not in the model, not in ADR 0008), each in place of the model's, on front alone:\n\
              #   C of W           = the hold stops acting on the control once C of the last W ADC samples sit on a rail,\n\
-             #                      until the front declares again ('2 of 4' is the model's: the column front + release);\n\
+             #                      until the front declares again ('2 of 4' is the column front + release);\n\
              #   2/4; slow: X     = 2 of 4, until the decoder's verdict on SIGNAL of the open stream names 6, 9 or\n\
              #                      12 Mb/s; from then on X (none: no release; C/W: that rule);\n\
              #   slow X, agree>=N = the same, the rate believed only when N or more of SIGNAL's 48 coded bits agree\n\
@@ -2196,7 +2198,7 @@ fn main() -> ExitCode {
         "release" => hold_loop(n.unwrap_or(2000), true),
         "edge" => edge(n.unwrap_or(2000)),
         _ => {
-            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold|edge|loop [frames]");
+            eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold|edge|loop|release [frames]");
             return ExitCode::from(2);
         }
     }

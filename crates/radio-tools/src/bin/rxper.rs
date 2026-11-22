@@ -884,7 +884,7 @@ fn streams(frames: usize) {
          # whole: acquire_fixed, handoff_fixed of the buffer rotated from its first sample, decode_ppdu_fixed;\n\
          # slice: the same with the rotation started at T1's window, the replay's phase;\n\
          # stream: every sample through RxHandoffFixed (8 beats a period, replay 20 periods after the declaration), the decoder as its reader: it takes every beat at once, gives SIGNAL's verdict\n\
-         #   (decode_signal_fixed on the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods after the beat that completes them and decodes when the end mark comes; it sees the beats alone.\n\
+         #   (decode_signal_checked_fixed on the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods after the beat that completes them and decodes when the end mark comes; it sees the beats alone.\n\
          # w/s: frames lost by whole alone / by slice alone. s/s: frames lost by the stream alone / by the slice alone. again: frames in which the front declared more than once.\n\
          # aborted, stopped: frames with a stream ended by a new declaration, by a failed SIGNAL. (The reader always has room: no stream can be lost to it here.)\n\
          # columns: whole | slice | stream | w/s | s/s | again | aborted | stopped"
