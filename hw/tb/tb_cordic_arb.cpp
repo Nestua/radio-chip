@@ -52,7 +52,7 @@ struct Pending {
 struct Gate {
     Vcordic_arb dut;
     long cycle = 0, mismatches = 0;
-    long a_done = 0, b_done = 0, b_waits = 0, both = 0;
+    long a_done = 0, b_done = 0, both = 0;
     std::deque<Pending> q;
     uint32_t lcg = 0x1234567u;
     bool quiet = false;
@@ -91,7 +91,6 @@ struct Gate {
         if (a) q.push_back({cycle, false, av->angle});
         if (b && !a) q.push_back({cycle, true, bv->angle});
         both += a && b;
-        b_waits += a && b;
         if (quiet) {
             after_reset += dut.a_valid + dut.b_valid;
             return grant;

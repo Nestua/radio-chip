@@ -6,11 +6,14 @@
 //   a  the latch (rx_latch): a_req is a one-cycle pulse with its input and is always taken.
 //   b  the decision engine: holds b_req and its input until the cycle b_grant is 1, which is
 //      every cycle a does not ask (b_grant = b_req and not a_req, combinational). A decision
-//      that meets a latch asks again in the next cycle: one cycle lost.
+//      that meets a latch asks again in the next cycle: one cycle lost. A latch in every
+//      cycle would keep b waiting without end; the stream's latches are DET_RUN samples
+//      apart at least.
 // The chosen input is registered (the arbiter's stage) and goes through the CORDIC; the
 // owner travels beside it. a_valid or b_valid marks `angle` CORDIC_ITERS + 2 = 18 clock edges
 // after the edge that takes the request (cycle to cycle, g + 19: rx_decision's ARB + CORDIC).
-// Never stalls; requests may come back to back.
+// Never stalls; requests may come back to back. Both requesters share this reset: a request
+// in a reset cycle is dropped, whatever b_grant shows in it.
 
 `default_nettype none
 

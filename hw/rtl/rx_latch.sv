@@ -1,7 +1,7 @@
 // Provisional CFO latch and the delayed NCO path of the receiver front (ADR 0006, decisions 2
 // and 3). Golden model: radio_phy::rx_front_fixed::RxFrontFixed::push, step 1 (the latch at a
 // detection event) and step 2 (the step in effect at each sample, SampleTrace.step). Gate G3:
-// make -C hw latch (with dc_block, det_a and nco, hw/tb/latch_chain.sv).
+// make -C hw latch (with dc_block, det_a, cordic_arb and nco, hw/tb/latch_chain.sv).
 //
 // The latch. At an event at sample n ≥ GATE − 1 = LATCH_LAG + STF_PERIOD + COARSE_LEN − 1 = 135,
 // the model takes the angle of Σ x(k)·conj(x(k+16)) over the COARSE_LEN products whose later
@@ -23,10 +23,12 @@
 // a_valid with a_angle, in the order of its requests.
 //
 // Contract: a latch result must be back before its sample is emitted. From the sample's x edge
-// the result is usable CORDIC_ITERS + 8 = 24 clocks later (det_a to stage 4: 5, the arbiter's
-// register: 1, the CORDIC: 17, the FIFO write: 1), and the sample is emitted D_SAMPLES sample
-// periods after it, so with R clocks per sample D_SAMPLES·R ≥ 24: 3 at R = 8 (nothing to
-// spare), 4 at R = 6, 5 at R = 5; the decision's schedule runs D_SAMPLES = 4 at R = 8.
+// the result is usable CORDIC_ITERS + 8 = 24 clocks later (x to det_a's input: 1; det_a's
+// event, in whose cycle the request is made: 4; the arbiter's register: 1; the CORDIC: 17;
+// the FIFO write: 1), and the sample is emitted D_SAMPLES samples after it: the D_SAMPLES
+// sample periods in between must add up to 24 clocks, so with R clocks per sample at least,
+// D_SAMPLES·R ≥ 24: 3 at R = 8 and 4 at R = 6 (both with nothing to spare), 5 at R = 5; the
+// decision's schedule runs D_SAMPLES = 4 at R = 8.
 // CHECK_TIMING = 1 stops simulation when the contract is broken; hardware has no
 // such guard: a late result is applied one sample late, and one that arrives after its
 // sample was emitted blocks later latches until the 8-bit tag comes round. Pick D_SAMPLES

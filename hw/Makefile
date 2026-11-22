@@ -116,7 +116,7 @@ det: vectors/det.txt
 # Three builds: D_SAMPLES = 3 at R = 8 clocks per sample (and R = 16, the 10 MHz mode), D_SAMPLES
 # = 4 at R = 6 (ADR 0006) and at R = 8 (the decision's schedule), and D_SAMPLES = 5 at R = 5,
 # the only one with two latches in flight. With the arbiter's register the contract is
-# D_SAMPLES·R ≥ 24: the first and the third build meet it with nothing to spare.
+# D_SAMPLES·R ≥ 24: D = 3 at R = 8 and D = 4 at R = 6 meet it with nothing to spare.
 # Registers without a reset and the delay line start from random values (rand+reset+2).
 latch: vectors/latch.txt
 	rm -rf obj_dir/latch && mkdir -p obj_dir/latch

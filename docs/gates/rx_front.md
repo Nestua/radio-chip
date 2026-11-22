@@ -2928,6 +2928,8 @@ A latch that asks for the CORDIC in the cycle the coarse sum does costs one cycl
 that meets the fine sum costs nothing above w = 4 (that branch has 52 cycles to spare at
 w = 12). On a grid of exactly 8 cycles a sample the stream's own latches (5 cycles after
 their sample) can only meet a decision's requests when w is a multiple of 8.
+*(Corrected 2026-11-22, step 3a's review: the latch asks 4 cycles after its sample, and
+meets a decision's requests when w is 7 more than a multiple of 8; see that entry.)*
 
 **Which counts are whose.** The stages of blocks that exist are theirs: the memory (1),
 `cordic` (18), `nco` (4), and the correlator's are `ltf_corr`'s (F + 7). The others are
@@ -3346,8 +3348,9 @@ the schedule's g + 19 (`rx_decision`: the arbiter's register 1, the CORDIC 18, c
 cycle).
 
 **`rx_latch`** asks through it (`rq_valid`, `rq_re`, `rq_im`; `a_valid`, `a_angle`). Its
-contract is now D_SAMPLES·R ≥ 24: D = 3 at R = 8 with nothing to spare, as the schedule
-said; the schedule's own D = 4 has a sample. The edge was probed with the testbench's
+contract is now D_SAMPLES·R ≥ 24 (the sample periods between a sample and its emission
+must add up to 24 clocks): D = 3 at R = 8 and D = 4 at R = 6 with nothing to spare; the
+schedule's own D = 4 at R = 8 has a sample. The edge was probed with the testbench's
 idle pattern at one clock a sample: D = 18 (23 clocks in the shortest span) stops on
 `CHECK_TIMING`, D = 19 (24) passes.
 
@@ -3360,7 +3363,7 @@ requests in the pipeline (nothing comes out), and requests after it.
 - Seen to fail first: against a module with the ports and no output, 0 angles and 18 662
   mismatches. The first real version then failed 7310 times: the owner was a stage short
   of the CORDIC (an angle on the other requester's valid whenever the two alternated).
-- Result (commit below): 7476 angles for the latch, 8805 for the decision, 4139 cycles with
+- Result (commit 8569271 and its review fixes, squashed into the PR of this entry): 7476 angles for the latch, 8805 for the decision, 4139 cycles with
   both asking, 0 mismatches.
 - The latch gate through the arbiter: five runs, 0 mismatches. The search gate: fifteen
   runs, 0 mismatches.
@@ -3393,7 +3396,32 @@ in at least one.
 - The mutants on the decision's side pass the latch gate, as they must: nothing asks on
   that side until step 3b.
 
+**Pre-PR review (fresh agent in its own worktree; the code, `rx_decision` and the ADRs).**
+The arbiter agrees with the schedule on the decision's side (who wins, one cycle a
+collision, the angle in g + 19), and the contract's 24 is exact (its probes: 23 clocks stop,
+24 pass, at one and at two clocks a sample). Found and corrected:
+- *the schedule model had the latch ask a cycle late.* `rx_decision` put the stream's own
+  latches 5 cycles after their sample; `rx_latch` asks in the event's own cycle, 4 after
+  (as it has since step 1: its request is combinational on the event). No decision's value
+  depends on it, but which decisions wait a cycle does, and step 3b will be held to those
+  cycles. The model follows the RTL as built: `own` is `det_latency` cycles after the
+  sample. In its gate the stream's latches now meet a decision's requests at a back-off of
+  50 ns (w = 15: 8 coarse and 9 fine waits in the tone scene) and at neither 0 nor 200 ns;
+  the first version had them meet without back-off. `cargo test -p radio-phy --test
+  g2_rx_decision`: 8 passed.
+- The texts: `rx_latch`'s count of the 24 mixed two conventions; D = 4 at R = 6 has no
+  clock to spare either (the header and the Makefile said otherwise); ADR 0006's "≈ 23
+  clocks" has a dated note; the arbiter's header now says that a latch in every cycle
+  starves the decision and that both sides share the reset.
+Its mutants: owner from the decision's request 4139, owner a stage late 8246, the CORDIC's
+valid chain not reset 1160; two on the reset's own cycle pass (`b_grant` gated with the
+reset; the decision alone taken during a reset): the contract above, not a gate.
+Not checked by it: synthesis (the path from the event through the request to `b_grant`
+and the input's multiplexer); a reset longer than a clock.
+
 **Open**
+- A request of the decision in a reset cycle is not defined beyond "dropped": step 3b's
+  engine shares the reset.
 - The decision's side is driven by the testbench only; its first real user is step 3b.
 - `docs/gates/silicon_probe.md`'s figures for `rx_latch` include the CORDIC it no longer
   holds; not rerun.

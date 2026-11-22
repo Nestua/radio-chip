@@ -352,9 +352,11 @@ fn the_latch_goes_first_at_the_cordic_and_costs_a_clock() {
         .count();
     assert!((1..=fits.len()).contains(&late), "{late}");
     // The stream's own latches: under a tone the detector's events go on while decisions
-    // are made. An event's latch asks 5 cycles after its sample; with no back-off both of
-    // a decision's requests fall in that cycle of a sample (23 + 19 + 99 and 23 + 19 + 96
-    // + 179 are 5 more than a multiple of 8), with the default back-off neither does.
+    // are made. An event's latch asks 4 cycles after its sample, in the event's own cycle
+    // (`rx_latch` as built; the first version of this gate had 5, and the pre-PR review of
+    // the arbiter found it). A decision's requests come 23 + w + 102 and 23 + w + 278 cycles
+    // after a sample's: 4 more than a multiple of 8 at w = 15 (a back-off of 50 ns), where
+    // both meet the latch; with no back-off and with the default neither does.
     let tone = tone_scene(0x5c);
     let own = |backoff: f64| {
         let runs = run(&tone, &with_backoff(backoff), &t);
@@ -367,10 +369,10 @@ fn the_latch_goes_first_at_the_cordic_and_costs_a_clock() {
             runs.iter().map(|r| r.fine_wait).sum::<usize>(),
         )
     };
-    let (met, missed) = (own(0.0), own(200.0));
-    println!("own latches met: {met:?} without back-off, {missed:?} with 200 ns");
+    let (met, missed, none) = (own(50.0), own(200.0), own(0.0));
+    println!("own latches met: {met:?} at 50 ns, {missed:?} at 200 ns, {none:?} without back-off");
     assert!(met.0 > 0 && met.1 > 0, "{met:?}");
-    assert_eq!(missed, (0, 0));
+    assert_eq!((missed, none), ((0, 0), (0, 0)));
     // Below w = 5 the fine sum's branch is the longer one, and its wait is the one that
     // counts (back-off 600 ns, w = 4).
     let narrow = with_backoff(600.0);
