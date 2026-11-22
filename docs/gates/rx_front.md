@@ -3118,3 +3118,160 @@ D samples and 20 clocks earlier than that); no strobe: not acquired.
   that its ring has dropped: the open item of the schedule's entry.) The maximum is
   therefore always exactly 63 + w old at an acceptance, which is what keeps e(imax) in the
   81 words.
+
+**Changed besides.** The generated package gains the search's constants (`SEARCH_OFFSET`,
+`SEARCH_LEN`, `SEARCH_W`, `DECISION_LATENCY`, `HISTORY`, `GI_LEN`, `LTF_SYMBOL_LEN`).
+`rvec`'s latch scenes moved into a function the search shares; `hw/vectors/latch.txt` is
+byte for byte the same. The latch gate now also runs D = 4 at R = 8, the schedule's
+default (0 mismatches; the item noted in the schedule's review).
+
+**Vectors** (`rvec search`, `hw/vectors/search.txt`): per sample x, the acquisition applied,
+the event, `searching()` after the sample, the energy completed at it and the accepted
+candidate (imax, emax, opened by), from `push_traced`; 19 segments and 22 511 samples for
+each of w = 12, 16 and 8 (a segment names its w; a build runs those of its `W`).
+- The eleven scenes of the latch gate.
+- A tone burst, then silence: equal (zero) energies after a maximum.
+- Two bursts placed, by shift and seed, so that an event falls on a search's last position
+  (the deadline moves instead of closing), and on the sample after its close.
+- Lone bursts over noise chosen by seed: an acceptance at a search's last position; a
+  maximum at its first; a larger energy just before the first.
+- A frame with a tone 10 dB above it beginning in its data, placed so that an event falls on
+  the sample the acquisition is applied at. (The latch gate's frame under a tone of +3 dB
+  does not acquire at a back-off of 400 ns.)
+- The long symbol's signs at full scale.
+`rvec` counts thirteen cases per w and refuses to write the file if one is missing: events
+before the first correlator output (65), events in an open search, acquisitions (8 / 9 / 7
+at w = 12 / 16 / 8), failed candidates (61 / 57 / 64), searches closed by their deadline
+(6), and the placed cases above (1 to 5 each), second acceptances in one search (48 / 44 /
+51).
+
+**Evidence** (`make -C hw search`: five builds, fifteen runs; commit d0fba2e)
+| Build | Runs | Compared in each | Mismatches |
+|---|---|---|---|
+| D = 4, W = 12 | R = 8, 11, 16 | 22 511 samples, 19 889 energies, 69 acceptances, 897 ring words | 0 |
+| D = 4, W = 16 | R = 8, 11, 16 | 22 511, 19 813, 66, 1122 | 0 |
+| D = 4, W = 8 | R = 8, 11, 16 | 22 511, 19 965, 71, 639 | 0 |
+| D = 3, W = 12 | R = 8, 11, 16 | as the first | 0 |
+| D = 5, W = 12 | R = 8, 11, 16 | as the first | 0 |
+
+- Seen to fail first: against a module with the ports and no output, every segment failed
+  (0 energies and 0 strobes of 19 889 and 22 511). The RTL then passed at its first run,
+  which is why the mutations below matter more than usual.
+- Exact latencies, in clock edges after sample n + D: the energy 22, the strobe 23 — the
+  schedule's Y(n + D) + 5 + 15 + 3.
+- Per sample: `searching`, the acceptance and its five fields (`acc_n`, `acc_imax` and
+  `acc_opened` modulo 512, `acc_ring` = imax mod 81, `acc_emax`).
+- After every acceptance the testbench reads the ring as the schedule does (imax … imax + w,
+  one a cycle from the strobe's cycle on) and requires the model's energies: at W = 16 the
+  ring has the one word to spare the schedule counted, with the real write clock.
+- Samples every R clocks plus an idle clock after every 5th and two after every 13th; idle
+  inputs carry garbage.
+- Before each segment a one-clock reset in the clocks in which the search takes an accepted
+  sample: 19 … 24 clocks after that sample, in turn (17 a run). The first version reset 8
+  clocks after a later sample and three reset mutations passed (`p_valid`, `e_valid`,
+  `acc_valid`); with the reset walked across those clocks they fail.
+- Registers without a reset, the squares' delay line and the ring start from random values
+  (`+verilator+rand+reset+2`).
+
+**Mutations** (each built from scratch in a private copy of `hw/`, D = 4, R = 8, both W;
+the numbers are mismatches, "stopped" a simulation check of the RTL): 59, of which 53 fail.
+| Mutation | W = 12 | W = 16 |
+|---|---|---|
+| im square from re | stopped: `acquired` without a decision | stopped: `acquired` without a decision |
+| sum never subtracts | stopped: `acquired` without a decision | stopped: `acquired` without a decision |
+| sum subtracts one square early | 20328 | 20283 |
+| first energy one square early | 40473 | 40546 |
+| first energy one square late | 40417 | 40490 |
+| energy keeps 32 bits | **passes** | **passes** |
+| energy keeps 31 bits | 38 | 50 |
+| ring one word short | stopped: ring read and written at one address | stopped: ring read and written at one address |
+| ring address not advanced at the wrap | stopped: ring read and written at one address | stopped: ring read and written at one address |
+| ring written a cycle late | 2 | 2 |
+| first position one early | 24 | 31 |
+| first position one late | 15 | 26 |
+| deadline one early | 14 | 14 |
+| deadline one late | 11 | 9 |
+| every event restarts the first position | stopped: `acquired` without a decision | stopped: `acquired` without a decision |
+| only the opening event sets the deadline | stopped: `acquired` without a decision | stopped: `acquired` without a decision |
+| the last of equal energies | 3 | 3 |
+| accepted one position early | 150 | 145 |
+| accepted one position late | 142 | 140 |
+| accepted only at the exact age | **passes** | **passes** |
+| maximum kept after an acceptance | stopped: acceptance with a decision in flight | stopped: acceptance with a decision in flight |
+| maximum kept across searches | 6 | 15 |
+| decision ends a sample early | 16 | 17 |
+| decision ends a sample late | 8 | 9 |
+| acquisition does not close | 697 | 678 |
+| every decision closes | stopped: `acquired` without a decision | 1626 |
+| an event survives the acquisition | 9 | 8 |
+| acquired flag not cleared | 96 | 184 |
+| deadline closes in spite of an event | 8 | 10 |
+| no acceptance at the last position | 2 | 1 |
+| opened_by follows every event | 68 | 66 |
+| acc_imax is the current position | 69 | 66 |
+| acc_ring is the write address | 69 | 66 |
+| acc_emax is the current energy | 66 | 63 |
+| acc_n one late | 69 | 66 |
+| maximum's position one late | 69 | 66 |
+| maximum's ring address one late | 69 | 66 |
+| state a cycle early | stopped: `acquired` without a decision | stopped: `acquired` without a decision |
+| event a cycle off the tick | **passes** | **passes** |
+| PATH_DELAY 18 | stopped: sample without its correlator output | stopped: sample without its correlator output |
+| ticks not reset | stopped: sample without its correlator output | stopped: sample without its correlator output |
+| p_valid not reset | 7188 | 7193 |
+| np not reset | stopped: `acquired` without a decision | stopped: `acquired` without a decision |
+| e not reset | 20855 | 21001 |
+| e_valid not reset | 5370 | 5409 |
+| ring address not reset | 926 | 1137 |
+| npos not reset | 138 | 132 |
+| jpos not reset | 69 | 66 |
+| open not reset | 3099 | stopped: `acquired` without a decision |
+| busy not reset | **passes** | **passes** |
+| acq_seen not reset | **passes** | **passes** |
+| best_v not reset | **passes** | **passes** |
+| out_valid not reset | 5148 | 5144 |
+| acc_valid not reset | 3 | 3 |
+| latch: event read one tag late | 102 | 104 |
+| latch: event written one tag late | 600 | 607 |
+| latch: event of the entering sample | stopped: `acquired` without a decision | stopped: `acquired` without a decision |
+| chain: the detector's event undelayed | 160 | 164 |
+| chain: acquired never | 697 | 678 |
+
+The six that pass:
+- *energy keeps 32 bits*: **a gap of the gate.** The largest energy in the vectors has 32
+  bits (31 kept: 38 and 50 mismatches). The chain cannot be driven higher: the correlator's
+  largest output over full-scale inputs is 108 486 a component (`ltf_corr`'s `matched`
+  segment), 39 bits of energy at W = 16, and in the chain the detector's events turn the NCO
+  and the match is lost. The 44 bits are the bound for K = 20-bit inputs, by argument only.
+- *accepted only at the exact age*, and the age's saturation (removed from the RTL after it
+  passed the first round): equivalent. The age is read only while a maximum is held, and a
+  maximum is accepted the sample it is 63 + W old.
+- *event a cycle off the tick*: equivalent in this chain. `rx_latch` holds `out_event` from
+  one emission to the next, so the flag is the same a cycle later.
+- *`busy`, `acq_seen`, `best_v` not reset*: not seen by the gate, and without effect after
+  a reset in operation. A stale decision in flight ends within L = 64 samples of the reset
+  (its count is at most L) and can only close a search, and no search opens in the first 64
+  samples (a detection needs 67); a stale maximum is dropped at the next opening. At
+  power-up the count is arbitrary and only the reset defines these: they stay.
+
+**Timing probe** (Vivado 2024.2, out of context, KV260 part, 6.25 ns, `tools/syn/ooc_probe.tcl`
+on the build server; excerpt appended to `docs/gates/reports/rx_front_timing_ooc.txt`):
+**+3.28 ns**, 511 LUTs (129 as the ring's memory), 407 registers, 2 DSP blocks; the worst
+path is the energy's comparison into the maximum's enable. The script constrains no input,
+so that figure does not time the squares; with an input delay of 0.5 ns on every input
+(a copy of the script on the server) the squares are the worst path at **+1.75 ns**. The
+three cycles of the schedule's allowance hold on this part. Not run: the open ASIC flow.
+
+**Not covered**
+- Energies above 32 bits (above).
+- `L` other than 64, `PATH_DELAY` other than 19, `W` other than 8, 12, 16.
+- R below 8 (the correlator's limit) and clock patterns that remove clocks.
+- `acquired` at the edges of its window: the chain gives it D samples and 20 clocks before
+  the search's sample n + L, as the detector's timeline will.
+
+**Open (for step 3)**
+- The decision engine's own sample count in the detector's timeline must agree with
+  `acc_n` (both count from reset, modulo 512): the top level's gate.
+- `acc_opened` is nine bits of the opening event's sample; `FixedAcquisition::detected_at`
+  as a full number needs a wider count at the top level if anything uses it.
+- A direct-drive gate of the energy's upper bits, or a formal property (G4).

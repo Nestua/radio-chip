@@ -94,3 +94,38 @@ Slack (MET) :             1.800ns  (required time - arrival time)
   Destination:            g_im_reg/DSP_OUTPUT_INST/ALU_OUT[38]
   Data Path Delay:        4.406ns  (logic 2.369ns (53.762%)  route 2.037ns (46.238%))
   Logic Levels:           5  (DSP_A_B_DATA=2 DSP_ALU=2 DSP_OUTPUT=1)
+# Added 2026-11-22: rx_search (part d step 2), the same script and part, Vivado 2024.2, build
+# server, sources at d0fba2e. The script constrains no input, so the first run does not time
+# the squares (port to register); the second adds an input delay on the server's copy.
+== rx_search
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+      3.278        0.000                      0                 1561        0.033        0.000                      0                 1561        2.363        0.000                       0                   552  
+| CLB LUTs                   |  511 |     0 |          0 |    117120 |  0.44 |
+| CLB Registers              |  407 |     0 |          0 |    234240 |  0.17 |
+| CARRY8                     |   26 |     0 |          0 |     14640 |  0.18 |
+| CLB Registers                              |  407 |     0 |          0 |    234240 |  0.17 |
+| Block RAM Tile |    0 |     0 |          0 |       144 |  0.00 |
+| DSPs           |    2 |     0 |          0 |      1248 |  0.16 |
+| CARRY8   |   26 |                 CLB |
+Slack (MET) :             3.278ns  (required time - arrival time)
+  Source:                 e_reg[3]/C
+  Destination:            best_e_reg[11]/CE
+  Data Path Delay:        2.846ns  (logic 0.820ns (28.813%)  route 2.026ns (71.187%))
+  Logic Levels:           5  (CARRY8=3 LUT4=2)
+== rx_search, inputs timed (set_input_delay 0.5 ns on every input: the squares' stage)
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+      1.753        0.000                      0                 1688        0.032        0.000                      0                 1688        2.363        0.000                       0                   552  
+| CLB LUTs                   |  511 |     0 |          0 |    117120 |  0.44 |
+| CLB Registers              |  407 |     0 |          0 |    234240 |  0.17 |
+| CARRY8                     |   26 |     0 |          0 |     14640 |  0.18 |
+| CLB Registers                              |  407 |     0 |          0 |    234240 |  0.17 |
+| Block RAM Tile |    0 |     0 |          0 |       144 |  0.00 |
+| DSPs           |    2 |     0 |          0 |      1248 |  0.16 |
+| CARRY8   |   26 |                 CLB |
+Slack (MET) :             1.753ns  (required time - arrival time)
+  Source:                 c_im[16]
+  Destination:            pair_reg[39]/D
+  Data Path Delay:        4.035ns  (logic 3.262ns (80.852%)  route 0.773ns (19.148%))
+  Logic Levels:           12  (CARRY8=4 DSP_A_B_DATA=1 DSP_ALU=1 DSP_M_DATA=1 DSP_MULTIPLIER=1 DSP_OUTPUT=1 DSP_PREADD_DATA=1 LUT2=2)
