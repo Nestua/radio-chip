@@ -37,6 +37,13 @@ package rx_front_rom_pkg;
     localparam int SEARCH_W         = 12;
     localparam int DECISION_LATENCY = 64;
     localparam int HISTORY          = 512;
+    // The decision: samples of the coarse and fine sums at EST_BITS; the fine sum's
+    // FINE_LEN lag-64 products from FINE_GUARD into GI2; the taps' energy E_L.
+    localparam int EST_BITS         = 12;
+    localparam int GI2_LEN          = 32;
+    localparam int FINE_GUARD       = 4;
+    localparam int FINE_LEN         = 88;
+    localparam int LTF_TAP_ENERGY   = 507834;
 
     // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().
     function automatic logic signed [7:0] ltf_tap_re(input int k);

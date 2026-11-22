@@ -584,7 +584,9 @@ fn what_does_not_fit_is_refused() {
 /// back, and its energy.
 #[test]
 fn the_models_trace_names_the_energy_and_the_accepted_maximum() {
+    let mut all_moved = 0;
     for (name, x, backoff) in scenes() {
+        let mut moved = 0;
         let cfg = with_backoff(backoff);
         let w = 16 - (backoff / 50.0) as usize;
         let mut rx = RxFrontFixed::new(cfg.clone(), FixedRxConfig::default());
@@ -618,10 +620,22 @@ fn the_models_trace_names_the_energy_and_the_accepted_maximum() {
                 assert_eq!(a.deadline, last_event + 24 + 240, "{name} {n}");
                 assert!(a.imax + w < a.deadline, "{name} {n}");
                 assert!(events.contains(&a.opened_by), "{name} {n}");
+                // T1 on the grid: the latest of the w + 1 positions from the maximum on
+                // that keeps 7/8 of it (the maximum itself always does).
+                let keep = a.emax - (a.emax >> 3);
+                let grid = (a.imax..=a.imax + w).rev().find(|&p| energies[p] >= keep);
+                assert_eq!(t.t1, grid, "{name} {n}");
+                moved += usize::from(t.t1 != Some(a.imax));
                 seen += 1;
             }
-            assert!(t.accepted.is_some() || t.sums.is_none(), "{name} {n}");
+            assert!(
+                t.accepted.is_some() || (t.sums.is_none() && t.t1.is_none()),
+                "{name} {n}"
+            );
         }
         assert!(seen > 0, "{name}");
+        all_moved += moved;
     }
+    // The grid does move T1 off the maximum somewhere.
+    assert!(all_moved > 0);
 }

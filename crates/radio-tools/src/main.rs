@@ -21,9 +21,11 @@ use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, IfftConfig};
 use radio_phy::ppdu::{build_ppdu, frame_hash, Rate};
+use radio_phy::rx_decision::{run_schedule, DecisionTiming};
 use radio_phy::rx_front::{
-    backoff_samples, RxConfig, AUTOCORR_LEN, COARSE_LEN, DECISION_LATENCY, GI_LEN, HISTORY,
-    LATCH_LAG, LTF_SYMBOL_LEN, PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET, STF_PERIOD,
+    backoff_samples, RxConfig, AUTOCORR_LEN, COARSE_LEN, DECISION_LATENCY, FINE_GUARD, FINE_LEN,
+    GI2_LEN, GI_LEN, HISTORY, LATCH_LAG, LTF_SYMBOL_LEN, PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET,
+    STF_PERIOD,
 };
 use radio_phy::rx_front_fixed::{
     cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
@@ -334,6 +336,13 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
     let det_run = rx.run;
     let search_w = GI_LEN.saturating_sub(backoff_samples(&rx));
     let decision_latency = rx.decision_latency;
+    let est_bits = fx.est_bits;
+    let tap_energy: i64 = ltf_taps(&fx).iter().map(|t| t.0 * t.0 + t.1 * t.1).sum();
+    if fx.coarse_weight_64 != 0 || fx.nco_phase_bits != fx.angle_bits + 6 {
+        return Err(io::Error::other(
+            "the decision's RTL has no coarse weight and takes the fine angle as the step",
+        ));
+    }
     if decision_latency != DECISION_LATENCY {
         return Err(io::Error::other("the default decision latency moved"));
     }
@@ -386,6 +395,13 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   localparam int SEARCH_W         = {search_w};\n\
          \x20   localparam int DECISION_LATENCY = {decision_latency};\n\
          \x20   localparam int HISTORY          = {HISTORY};\n\
+         \x20   // The decision: samples of the coarse and fine sums at EST_BITS; the fine sum's\n\
+         \x20   // FINE_LEN lag-64 products from FINE_GUARD into GI2; the taps' energy E_L.\n\
+         \x20   localparam int EST_BITS         = {est_bits};\n\
+         \x20   localparam int GI2_LEN          = {GI2_LEN};\n\
+         \x20   localparam int FINE_GUARD       = {FINE_GUARD};\n\
+         \x20   localparam int FINE_LEN         = {FINE_LEN};\n\
+         \x20   localparam int LTF_TAP_ENERGY   = {tap_energy};\n\
          \n\
          \x20   // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().",
         fx.z_bits,
@@ -1426,6 +1442,437 @@ fn search_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// The short frame of the receiver scenes (three octets at 6 Mb/s), as float samples.
+fn short_frame() -> io::Result<Vec<(f64, f64)>> {
+    let cfg = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+    Ok(build_ppdu(&[0x5a; 3], Rate::R6, 0x5d, &cfg)
+        .map_err(io::Error::other)?
+        .iter()
+        .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+        .collect())
+}
+
+/// The idle clocks the RTL testbenches put before sample n beyond R − 1: one after every
+/// fifth sample and two after every thirteenth (`tb_decide.cpp`, `feed`).
+fn tb_idle(n: usize) -> usize {
+    match n.checked_sub(1) {
+        Some(k) => usize::from(k % 5 == 4) + 2 * usize::from(k % 13 == 12),
+        None => 0,
+    }
+}
+
+/// What the decision segments exercise.
+#[derive(Debug, Default, Clone, Copy)]
+struct DecideCover {
+    samples: usize,
+    decisions: usize,
+    acquisitions: usize,
+    /// Candidates the rules reject (the sums are there, the acquisition is not).
+    rejected: usize,
+    /// Candidates whose first symbol is less than 160 samples into the stream.
+    no_coarse_window: usize,
+    /// Decisions whose grid moved T1 off the maximum.
+    grid_moved: usize,
+    /// Cycles decisions waited for the CORDIC behind a latch, with the coarse and the fine
+    /// sum.
+    coarse_waits: usize,
+    fine_waits: usize,
+    /// Decisions whose result's cycle is given.
+    timed: usize,
+    /// Decisions on silence: the energy of the rotated samples is zero.
+    zero_energy: usize,
+    /// A decision with T1 exactly 160 samples into the stream (the first that has its
+    /// coarse window), and a candidate at 159 (the last that has not).
+    t1_at_160: usize,
+    t1_at_159: usize,
+    /// Candidates that hold the confirmation rule and fail the coherence rule.
+    coherence_alone: usize,
+    /// Acquisitions whose residual (the word handed on less the coarse one) is 2^14 or
+    /// more, and −2^14 or less: the top bit of its 16.
+    residual_high: usize,
+    residual_low: usize,
+    /// Whether the acquisitions' clear of the run counter moves a later event.
+    clear_moves_events: usize,
+    /// The largest confirmation, coarse sum component and energy, in bits.
+    confirmation_bits: u32,
+    coarse_bits: u32,
+    energy_bits: u32,
+    /// Decisions with a grid energy between 7/8 of the maximum rounded down and the
+    /// model's emax − (emax >> 3): the rounding decides T1.
+    keep_rounding: usize,
+}
+
+/// One decision segment (see [`decide_vectors`]).
+fn decide_segment(
+    out: &mut dyn Write,
+    label: &str,
+    x: &[(i16, i16)],
+    w: usize,
+    c: &mut DecideCover,
+) -> io::Result<()> {
+    let cfg = search_config(w);
+    let fx = FixedRxConfig::default();
+    let timing = DecisionTiming::default();
+    let runs = run_schedule(x, &cfg, &fx, &timing, &tb_idle, &|_| false)
+        .map_err(|e| io::Error::other(format!("{label} at w = {w}: {e:?}")))?;
+    let tap_energy: i128 = ltf_taps(&fx)
+        .iter()
+        .map(|t| i128::from(t.0 * t.0 + t.1 * t.1))
+        .sum();
+    let unclear = detector_trace_fixed(x, &cfg, &fx);
+    let mut rx = RxFrontFixed::new(cfg, fx);
+    writeln!(out, "reset {label} {w}")?;
+    c.samples += x.len();
+    let mut moved = false;
+    let mut energies: Vec<i128> = Vec::new();
+    for (n, s) in x.iter().enumerate() {
+        let (acq, t) = rx.push_traced(*s);
+        moved |= unclear.get(n).is_some_and(|u| u.event != t.event);
+        energies.extend(t.energy);
+        writeln!(out, "{} {} {}", s.0, s.1, u8::from(t.event))?;
+        if let Some(a) = t.accepted {
+            let run = runs.iter().find(|r| r.accepted_at == n);
+            let t1 = t.t1.map_or("-".to_string(), |v| v.to_string());
+            let sums = t.sums.map_or("- - - - -".to_string(), |m| {
+                format!(
+                    "{} {} {} {} {}",
+                    m.coarse.0, m.coarse.1, m.confirmation, m.coherence, m.energy
+                )
+            });
+            let fine = t
+                .sums
+                .and_then(|m| m.fine)
+                .map_or("- -".to_string(), |f| format!("{} {}", f.0, f.1));
+            // The result's cycle after the strobe, for a decision that runs its whole
+            // schedule and whose result falls inside the segment.
+            let done = run
+                .filter(|r| r.sums.is_some())
+                .map_or("- - -".to_string(), |r| {
+                    format!("{} {} {}", r.done, r.coarse_wait, r.fine_wait)
+                });
+            writeln!(out, "A {t1} {sums} {fine} {done}")?;
+            if let Some(m) = t.sums {
+                let rhs = tap_energy * m.energy;
+                c.coherence_alone +=
+                    usize::from(2 * m.confirmation >= rhs && 2 * m.coherence < rhs);
+                c.confirmation_bits = c
+                    .confirmation_bits
+                    .max(128 - m.confirmation.leading_zeros());
+                let widest = m.coarse.0.unsigned_abs().max(m.coarse.1.unsigned_abs());
+                c.coarse_bits = c.coarse_bits.max(64 - widest.leading_zeros());
+                c.energy_bits = c.energy_bits.max(128 - m.energy.leading_zeros());
+            }
+            c.decisions += 1;
+            c.rejected += usize::from(t.sums.is_some_and(|m| m.fine.is_none()));
+            c.no_coarse_window += usize::from(t.t1.is_some() && t.sums.is_none());
+            c.grid_moved += usize::from(t.t1.is_some_and(|v| v != a.imax));
+            let (down, model) = ((7 * a.emax) >> 3, a.emax - (a.emax >> 3));
+            c.keep_rounding += usize::from(
+                energies[a.imax..=a.imax + w]
+                    .iter()
+                    .any(|&e| e >= down && e < model),
+            );
+            c.zero_energy += usize::from(t.sums.is_some_and(|m| m.energy == 0));
+            c.t1_at_160 += usize::from(t.t1 == Some(160) && t.sums.is_some());
+            c.t1_at_159 += usize::from(t.t1 == Some(159) && t.sums.is_none());
+            if let Some(r) = run {
+                if r.sums != t.sums {
+                    return Err(io::Error::other(format!(
+                        "{label} at w = {w}: the schedule's sums are not the model's"
+                    )));
+                }
+                c.coarse_waits += r.coarse_wait;
+                c.fine_waits += r.fine_wait;
+                c.timed += usize::from(r.sums.is_some());
+            }
+        }
+        if let Some(q) = acq {
+            if q.fft_start + GI_LEN != q.ltf_start + GI2_LEN + w {
+                return Err(io::Error::other("the acquisition's two starts disagree"));
+            }
+            writeln!(
+                out,
+                "Q {} {} {} {}",
+                q.ltf_start + GI2_LEN,
+                q.cfo_phase,
+                q.coarse_phase,
+                q.fine_phase
+            )?;
+            c.acquisitions += 1;
+            c.residual_high += usize::from(q.cfo_phase - q.coarse_phase >= 1 << 14);
+            c.residual_low += usize::from(q.cfo_phase - q.coarse_phase <= -(1 << 14));
+        }
+    }
+    c.clear_moves_events += usize::from(moved);
+    Ok(())
+}
+
+/// Vectors for the decision's datapath (gate G3: `make -C hw decide`): the chain of the
+/// search's gate with `rx_decide` behind it and the loop closed. Per sample `<x re> <x im>
+/// <event>` (the detector's event: with the loop closed, the gate of the run counter's clear);
+/// after the sample of an acceptance a line `A <T1> <coarse re> <coarse im> <confirmation>
+/// <coherence> <energy> <fine re> <fine im> <done>` (`SampleTrace::t1` and `sums`; `-` for
+/// what the model did not make; `done` the result's cycle after the strobe by
+/// `rx_decision::run_schedule` on the testbench's clock pattern at R = 8, D = 4); after the
+/// sample an acquisition is applied at, `Q <T1> <cfo> <coarse> <fine>` (the three phase
+/// words of `FixedAcquisition`). Segments, for w = 12, 16, 8 and 4: the four frames; two
+/// frames under a weak tone; a frame under a strong one; a tone alone (rejected candidates);
+/// frames under a tone of their own power; a stream that begins 40 samples into a frame
+/// (T1 less than 160 samples in: no decision), and streams cut to put T1 at sample 160 and
+/// at 159; a tone burst and then silence (candidates of zero energy). For w = 4, where the
+/// fine sum's branch of the schedule is the longer one, a subset. Under the tones the
+/// stream's own latches meet a decision's requests of the CORDIC (at w = 12 with this clock
+/// pattern).
+fn decide_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    writeln!(
+        out,
+        "# rvec decide — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# reset <label> <w>; <x re> <x im> <event> per sample; after an acceptance's sample:"
+    )?;
+    writeln!(
+        out,
+        "# A <T1> <coarse re im> <confirmation> <coherence> <energy> <fine re im> <done> <waits>;"
+    )?;
+    writeln!(
+        out,
+        "# after an acquisition's sample: Q <T1> <cfo> <coarse> <fine> (- where the model has none)"
+    )?;
+    let frame = short_frame()?;
+    let p = mean_power(&frame);
+    let full = f64::from(ADC_FULL_SCALE);
+    // Frames under a tone of their own power: the detector keeps firing while decisions
+    // are made.
+    let under_tone = {
+        let mut rng = Rng::new(0xDEC1_0001);
+        let mut x = Vec::new();
+        for _ in 0..5 {
+            x.extend(vec![(0.0, 0.0); 400]);
+            x.extend_from_slice(&frame);
+        }
+        x.extend(vec![(0.0, 0.0); 400]);
+        let x = awgn(&add_tone(&x, p, 1.3e6, 20e6, 0.3), 25.0, p, &mut rng);
+        to_adc(&x, full * 10f64.powf(-18.0 / 20.0) / (2.0 * p).sqrt())
+    };
+    // A stream that begins 40 samples into a frame, and a whole frame after it.
+    let cut = {
+        let mut rng = Rng::new(0xDEC1_0002);
+        let mut x: Vec<(f64, f64)> = frame[40..].to_vec();
+        x.extend(vec![(0.0, 0.0); 300]);
+        x.extend_from_slice(&frame);
+        x.extend(vec![(0.0, 0.0); 300]);
+        to_adc(&awgn(&x, 25.0, p, &mut rng), 0.1 * full / p.sqrt())
+    };
+    let latch = latch_scenes(&fx)?;
+    let wanted = [
+        "frame_awgn_25dB",
+        "frame_awgn_4dB",
+        "frame_tgn_d_9dB",
+        "frame_hot_-3dBFS",
+        "two_frames_under_tone",
+        "frame_under_strong_tone",
+        "tone_10dB_from_0",
+    ];
+    // A tone burst, then silence: candidates of zero energy (every position keeps 7/8 of
+    // nothing; the rules hold on 0 ≥ 0 and the energy test alone rejects).
+    let mut silence = tone_burst_scene(900, &[(150, 120)], 0x5EA2_0001);
+    for v in silence.iter_mut().skip(270) {
+        *v = (0, 0);
+    }
+    // Streams that begin 32 and 33 samples into a frame: T1 at sample 160, the first with a
+    // coarse window in the stream, and at 159.
+    let cut_at = |cut: usize, seed: u64| {
+        let mut rng = Rng::new(seed);
+        let mut x: Vec<(f64, f64)> = frame[cut..].to_vec();
+        x.extend(vec![(0.0, 0.0); 300]);
+        to_adc(&awgn(&x, 30.0, p, &mut rng), 0.1 * full / p.sqrt())
+    };
+    // A frame whose frequency steps between the short and the long training field (156
+    // samples in, phase-continuous): the coarse estimate is the short field's, so the long
+    // field's residual is the step. Up to some 94 kHz the candidate is acquired with a
+    // residual in the top half of its 16 bits; beyond, the two long symbols no longer add
+    // up after the rotation by the coarse angle, and the coherence rule alone fails (the
+    // independent review's construction).
+    let stepped = |step_hz: f64, seed: u64| {
+        let mut rng = Rng::new(seed);
+        let mut x = vec![(0.0, 0.0); 230];
+        x.extend_from_slice(&frame);
+        x.extend(vec![(0.0, 0.0); 200]);
+        let x = frequency_offset(&x, (rng.uniform() - 0.5) * 20e3, 20e6, 0.0);
+        let x: Vec<(f64, f64)> = x
+            .iter()
+            .enumerate()
+            .map(|(n, &(a, b))| {
+                let turns = step_hz * n.saturating_sub(386) as f64 / 20e6;
+                let ph = 2.0 * std::f64::consts::PI * turns;
+                (a * ph.cos() - b * ph.sin(), a * ph.sin() + b * ph.cos())
+            })
+            .collect();
+        to_adc(&awgn(&x, 25.0, p, &mut rng), 0.3 * full / p.sqrt())
+    };
+    // A frame 18 dB over full scale: the ADC clips nearly every sample, the widest sums the
+    // stream reaches.
+    let clipping = {
+        let mut rng = Rng::new(0xDEC1_0003);
+        let mut x = vec![(0.0, 0.0); 250];
+        x.extend_from_slice(&frame);
+        x.extend(vec![(0.0, 0.0); 250]);
+        to_adc(&awgn(&x, 30.0, p, &mut rng), 8.0 * full / p.sqrt())
+    };
+    // A tone burst and then noise of a few LSB: small integer energies, where 7/8 of the
+    // maximum is rounded as the model rounds it or not at all.
+    let faint = |seed: u64| {
+        let mut x = tone_burst_scene(900, &[(150, 120)], 0x5EA2_0001);
+        let mut rng = Rng::new(seed);
+        let span = 3.0 + (seed % 5) as f64 * 2.0;
+        for v in x.iter_mut().skip(270) {
+            *v = (
+                (rng.uniform() * span) as i16 - (span as i16) / 2,
+                (rng.uniform() * span) as i16 - (span as i16) / 2,
+            );
+        }
+        x
+    };
+    let mut total = DecideCover::default();
+    for w in [12usize, 16, 8, 4] {
+        let mut c = DecideCover::default();
+        for (label, x) in latch.iter().filter(|(l, _)| wanted.contains(&l.as_str())) {
+            // At w = 4 (a back-off of 600 ns, where the fine sum's branch of the schedule is
+            // the longer one) the two AWGN frames, the two frames under a weak tone and the
+            // tone alone (the other three `frame_` scenes are left out).
+            if w != 4 || !label.starts_with("frame_") || label.contains("awgn") {
+                decide_segment(out, label, x, w, &mut c)?;
+            }
+        }
+        decide_segment(out, "burst_then_silence", &silence, w, &mut c)?;
+        for (label, cut) in [("t1_at_160", 32usize), ("t1_at_159", 33)] {
+            let want = |c: &DecideCover| if cut == 32 { c.t1_at_160 } else { c.t1_at_159 };
+            let scene = (0..200u64).find_map(|k| {
+                let x = cut_at(cut, 0xDEC1_1000 + k);
+                let mut probe = DecideCover::default();
+                decide_segment(&mut io::sink(), label, &x, w, &mut probe).ok()?;
+                (want(&probe) > 0).then_some(x)
+            });
+            let x = scene.ok_or_else(|| io::Error::other(format!("w = {w}: no scene {label}")))?;
+            decide_segment(out, label, &x, w, &mut c)?;
+        }
+        decide_segment(out, "stream_cut_into_a_frame", &cut, w, &mut c)?;
+        decide_segment(out, "frame_clipping", &clipping, w, &mut c)?;
+        {
+            let scene = (0..300u64).find_map(|k| {
+                let x = faint(0xDEC1_4000 + k);
+                let mut probe = DecideCover::default();
+                decide_segment(&mut io::sink(), "probe", &x, w, &mut probe).ok()?;
+                (probe.keep_rounding > 0).then_some(x)
+            });
+            let x = scene
+                .ok_or_else(|| io::Error::other(format!("w = {w}: no rounding of 7/8 decides")))?;
+            decide_segment(out, "burst_then_faint_noise", &x, w, &mut c)?;
+        }
+        type Want = fn(&DecideCover) -> usize;
+        let steps: [(&str, f64, f64, Want); 3] = [
+            ("residual_high", 78e3, 94e3, |c| c.residual_high),
+            ("residual_low", 78e3, 94e3, |c| c.residual_low),
+            ("coherence_alone", 94e3, 138e3, |c| c.coherence_alone),
+        ];
+        for (label, lo, hi, want) in steps {
+            let scene = (0..400u64).find_map(|k| {
+                // Both signs of the step in turn, across the band.
+                let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                let f = sign * (lo + (hi - lo) * ((k / 2) % 20) as f64 / 20.0);
+                let x = stepped(f, 0xDEC1_2000 + k);
+                let mut probe = DecideCover::default();
+                decide_segment(&mut io::sink(), label, &x, w, &mut probe).ok()?;
+                (want(&probe) > 0).then_some(x)
+            });
+            let x = scene.ok_or_else(|| io::Error::other(format!("w = {w}: no scene {label}")))?;
+            decide_segment(out, label, &x, w, &mut c)?;
+        }
+        // A frame, and a tone 10 dB above it that begins in its data: the detector is in a
+        // run of fires when the acquisition is applied, and the clear of its counter moves
+        // the events that follow (the gate of `det_a.clear` from the decision).
+        {
+            let scene = (0..64usize).find_map(|k| {
+                let mut rng = Rng::new(0xDEC1_3000 + k as u64);
+                let mut x = vec![(0.0, 0.0); 300];
+                x.extend_from_slice(&frame);
+                x.extend(vec![(0.0, 0.0); 300]);
+                let mut x = awgn(&x, 25.0, p, &mut rng);
+                let tone = add_tone(&vec![(0.0, 0.0); 260], 10.0 * p, 5.1e6, 20e6, 0.7);
+                for (v, t) in x.iter_mut().skip(300 + 192 + 180 + k).zip(tone) {
+                    *v = (v.0 + t.0, v.1 + t.1);
+                }
+                let x = to_adc(&x, 0.1 * full / (11.0 * p).sqrt());
+                let mut probe = DecideCover::default();
+                decide_segment(&mut io::sink(), "probe", &x, w, &mut probe).ok()?;
+                (probe.clear_moves_events > 0 && probe.acquisitions > 0).then_some(x)
+            });
+            let x =
+                scene.ok_or_else(|| io::Error::other(format!("w = {w}: no clear inside a run")))?;
+            decide_segment(out, "clear_inside_a_run", &x, w, &mut c)?;
+        }
+        decide_segment(out, "frames_under_own_power_tone", &under_tone, w, &mut c)?;
+        writeln!(out, "# w = {w}: {c:?}")?;
+        let missing: Vec<&str> = [
+            (c.timed, "a timed decision"),
+            (c.acquisitions, "an acquisition"),
+            (c.no_coarse_window, "a first symbol too early"),
+            (c.rejected, "a rejected candidate"),
+            (c.zero_energy, "a candidate of zero energy"),
+            (c.t1_at_160, "a decision with T1 at sample 160"),
+            (c.t1_at_159, "a candidate with T1 at sample 159"),
+            (
+                c.coherence_alone,
+                "a candidate failing the coherence rule alone",
+            ),
+            (
+                c.residual_high,
+                "an acquisition with a residual of 2^14 or more",
+            ),
+            (
+                c.residual_low,
+                "an acquisition with a residual of -2^14 or less",
+            ),
+            (
+                c.clear_moves_events,
+                "an acquisition whose clear moves a later event",
+            ),
+            (c.keep_rounding, "a grid decided by the rounding of 7/8"),
+            (
+                // (The energy's own bound is 31 bits; a stream without a DC offset of half the
+                // scale does not come nearer than this.)
+                usize::from(c.coarse_bits >= 28 && c.energy_bits >= 28),
+                "a coarse sum and an energy of 28 bits",
+            ),
+            // A wait moves the result's cycle only on the schedule's longer branch: the
+            // coarse sum's from w = 5 up, the fine sum's below.
+            (
+                usize::from(w != 12) + c.coarse_waits,
+                "a coarse wait at w = 12",
+            ),
+            (usize::from(w != 4) + c.fine_waits, "a fine wait at w = 4"),
+        ]
+        .iter()
+        .filter_map(|&(n, what)| (n == 0).then_some(what))
+        .collect();
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "decide vectors at w = {w} miss: {}",
+                missing.join("; ")
+            )));
+        }
+        total.grid_moved += c.grid_moved;
+    }
+    if total.grid_moved == 0 {
+        return Err(io::Error::other("no decision moves T1 off the maximum"));
+    }
+    Ok(())
+}
+
 /// Vectors for `hw/rtl/conv_encoder.sv` (gate G3: `make -C hw conv_encoder`): frames of input
 /// bits with the encoder's A and B outputs (`ConvolutionalEncoder::encode_bit`), each frame
 /// from the all-zero state. Frames: all zeros, all ones, a single one (the impulse response:
@@ -1485,9 +1932,10 @@ fn main() -> ExitCode {
         "det" => det_vectors(&mut out),
         "latch" => latch_vectors(&mut out),
         "search" => search_vectors(&mut out),
+        "decide" => decide_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

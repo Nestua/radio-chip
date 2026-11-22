@@ -749,6 +749,10 @@ pub struct SampleTrace {
     /// The candidate accepted at this sample, whose decision is applied
     /// `decision_latency` samples later.
     pub accepted: Option<Accepted>,
+    /// The first long symbol's start T1 that the decision of that candidate placed on the
+    /// grid (the latest position within GI − B of the maximum keeping 7/8 of its energy);
+    /// `None` without an acceptance.
+    pub t1: Option<usize>,
     /// The sums of that candidate's decision, as far as the decision got.
     pub sums: Option<DecisionSums>,
 }
@@ -898,6 +902,7 @@ impl RxFrontFixed {
             event,
             energy: None,
             accepted: None,
+            t1: None,
             sums: None,
         };
         self.phase = (self.phase + self.step).rem_euclid(1i64 << fx.nco_phase_bits);
@@ -951,8 +956,9 @@ impl RxFrontFixed {
                     deadline: s.deadline,
                     opened_by: s.opened_by,
                 });
-                let mut sums = None;
-                let result = self.decide(&s, imax, n, &mut sums);
+                let (mut t1, mut sums) = (None, None);
+                let result = self.decide(&s, imax, n, &mut t1, &mut sums);
+                self.trace.t1 = t1;
                 self.trace.sums = sums;
                 self.pending = Some(Pending {
                     due: n + self.cfg.decision_latency.min(MAX_DECISION_LATENCY),
@@ -969,12 +975,14 @@ impl RxFrontFixed {
         None
     }
 
-    /// The decision on the candidate at `imax`; `sums` is left with the sums it got to.
+    /// The decision on the candidate at `imax`; `t1` and `sums` are left with the grid's
+    /// position and the sums it got to.
     fn decide(
         &self,
         s: &Search,
         imax: usize,
         n: usize,
+        t1: &mut Option<usize>,
         sums: &mut Option<DecisionSums>,
     ) -> Option<FixedAcquisition> {
         let fx = self.fx;
@@ -985,6 +993,7 @@ impl RxFrontFixed {
         let sym = (imax..=imax + w)
             .rev()
             .find(|&p| p < s.deadline && self.energy.get(p) >= keep)?;
+        *t1 = Some(sym);
 
         // Final coarse CFO over the STF located from the timing.
         let kc = sym.checked_sub(COARSE_END_BEFORE_T1 + COARSE_LEN)?;

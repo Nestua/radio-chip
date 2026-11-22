@@ -3425,3 +3425,316 @@ and the input's multiplexer); a reset longer than a clock.
 - The decision's side is driven by the testbench only; its first real user is step 3b.
 - `docs/gates/silicon_probe.md`'s figures for `rx_latch` include the CORDIC it no longer
   holds; not rerun.
+
+## 2026-11-22 · G0 · R0-08d part d, step 3b: the decision's datapath (`rx_decide`)
+
+**Block.** `hw/rtl/rx_decide.sv` with `hw/rtl/ltf_corr1.sv` (the one-symbol correlator);
+golden: `RxFrontFixed::decide` for the values (`SampleTrace::t1`, `sums`, the acquisition
+`push` returns), `rx_decision::run_schedule` for the cycles (the two grants of the CORDIC,
+the rotation's first read, the result's cycle). Gate: `make -C hw decide` on the chain of the search's gate
+with the decision behind it and the loop closed: `det_a.clear` and `rx_search.acquired` come
+from the decision, no longer from the vectors.
+
+**G0: what it holds**
+- The history: 512 words of 2 × 13 bits through `ram_1w2r`, y(n) at address n mod 512,
+  written in cycle Y(n).
+- One complex multiplier with two accumulators (the coarse and the fine sum: products of
+  samples narrowed to E = 12 bits, half to even, 34-bit sums as the CORDIC takes them).
+- A second `nco` (the phase from 0 at each decision, the step the coarse angle's) and the
+  one-symbol correlator: 64 taps, the Hermitian fold of `ltf_corr` without the T1 + T2
+  sum, 32 multipliers over F = 4 clocks, the full sum out (Z + T + 7 = 27 bits).
+- The first symbol's w correlations kept for the second's (w × 2 × 27 bits); three squared
+  magnitudes a pair (54 bits) into the confirmation and the coherence (62 bits each:
+  2 · 27 + 8); the energy of the 128 rotated samples (31 bits); the two rules as
+  2·x ≥ E_L·energy in two stages (the difference, then its sign), E_L the taps' energy
+  from the generated package (an elaboration check holds it to 20 bits).
+- The CFO: coarse = −(angle << 2); the fine angle is the lag-64 step itself; the residual
+  is the difference's low 16 bits, signed; the word handed on is coarse + residual (the
+  coarse weight is 0, ADR 0007: no multiplier).
+
+**G0: the cycles** are the schedule's table (`rx_decision`), with nothing added: the grid
+in the strobe's cycle and the w after it, T1 registered at w + 2, the coarse sum's reads
+from w + 3 on both ports, its request at c + 99, the fine sum behind it on port 1, the
+rotation from g + 20 on port 0 with three cycles of wait after each sample that completes a
+correlated window, the result registered 8·w + 268 cycles after the strobe when nothing
+waits (from w = 5 up; below, the fine sum's branch is the longer one: 304 at w = 4). The
+gate holds four cycles of every full decision to `run_schedule`'s, with the testbench's
+own clock pattern given to the model: the coarse grant (w + 102 and the wait), the
+rotation's first read (20 later), the fine grant (w + 278 and its wait), the result.
+
+**G0: the result.** Kept until sample n + L of the detector's timeline (the history's
+write count equal to `acc_n` + L) and given in cycle Y(n + L) + 3, the cycle `det_a` takes
+its clear: `dec_valid` for every decision, `acquired` with T1 (modulo 512) and the three
+CFO words. A result not registered by then stops the simulation.
+- **No decision** when the grid's T1 is less than 160 samples into the stream
+  (`acc_lapped` = 0 and T1 < 160): the model's `checked_sub`. The model's two other tests
+  are always true at an acceptance (the schedule's finding 3).
+- A rejected candidate runs its whole schedule (the fine sum is made beside the rotation,
+  before the rules are known); the model does not make it, and the gate does not compare
+  it then.
+
+## 2026-11-22 · G3 · R0-08d part d, steps 3b and 3c: the decision's datapath, the loop closed
+
+The G0 is the entry above. With the decision in the chain, `det_a.clear` and
+`rx_search.acquired` are the decision's own `acquired`: step 3c is this gate, not a block.
+
+**Order of work, as it was.** The model first (`SampleTrace::t1`, with its test seen to
+fail on a mutation), then the vectors, then the RTL, and the testbench after the RTL. The
+first run of the gate passed. So nothing here was "seen to fail first" but by mutation: the
+table below is that evidence, and the review's. The gate was then changed twice: after the
+first mutation round (f19631a) and after the independent review (973018b). The numbers
+below are the last ones.
+
+**Model.** `SampleTrace::t1`: the grid's T1 of an accepted candidate (trace only).
+`g2_rx_decision` holds it to the energies of the same trace (the latest of the w + 1
+positions keeping 7/8 of the maximum) and requires that the grid moves T1 off the maximum
+somewhere; with `t1` set to the maximum the test fails. 8 passed.
+
+**Vectors** (`rvec decide`, `hw/vectors/decide.txt`): the ADC samples with the detector's
+event of each; after an acceptance's sample T1, the five sums as far as the model made
+them, and by `rx_decision::run_schedule` on the testbench's own clock pattern (R = 8,
+D = 4, an idle clock after every fifth sample and two after every thirteenth) the result's
+cycle after the strobe and the cycles waited behind a latch with the coarse and with the
+fine sum; after an acquisition's sample T1 and the three phase words. For w = 12, 16, 8
+(eighteen segments, 26 312 samples each) and w = 4 (fifteen, 22 869; the back-off at which
+the fine sum's branch of the schedule is the longer one):
+- the four frames, two frames under a weak tone, a frame under a strong one, a tone alone,
+  five frames under a tone of their own power (the detector's events go on while decisions
+  are made: the stream's own latches meet a decision's requests of the CORDIC, 6 cycles of
+  coarse wait and 4 of fine at w = 12, 7 and 6 at w = 4, none at 16 and 8 with this clock
+  pattern). At w = 4 the TGn D frame, the hot frame and the frame under a strong tone are
+  left out;
+- a tone burst and then silence: candidates of zero energy;
+- streams cut to put T1 at sample 160 (the first with a coarse window: a decision) and at
+  159 (none), found by seed; a stream that begins 40 samples into a frame;
+- after the review: a frame 18 dB over full scale (the ADC clips nearly every sample: the
+  widest sums); a tone burst and then noise of a few LSB, found by seed, where the rounding
+  of 7/8 of the maximum decides T1; frames whose frequency steps between the short and the
+  long training field, found by seed: a step of 78 to 94 kHz acquired with a residual of
+  2^14 or more and of −2^14 or less, a step of 94 to 138 kHz that holds the confirmation
+  rule and fails the coherence rule; a frame with a tone 10 dB above it beginning in its
+  data, found by seed, so that the acquisition's clear of the run counter falls inside a
+  run of fires and moves the events after it.
+`rvec` refuses to write the file without, per w: a timed decision, an acquisition, a
+rejected candidate, a candidate of zero energy, T1 at 160 and at 159, a first symbol too
+early, a candidate failing the coherence rule alone, a residual on each side of ±2^14, a
+clear that moves a later event, a grid decided by the rounding, a coarse sum and an energy
+of 28 bits; a coarse wait at w = 12 and a fine wait at w = 4 (a wait moves the result only
+on the schedule's longer branch); and overall a grid that moves T1. It also refuses if the
+schedule's sums are not the model's. The widest values in the file: the coarse sum 28 bits
+of 34, the energy 28 of 31, the confirmation 47 of 62.
+
+**Evidence** (`make -C hw decide` at 973018b: six builds, eighteen runs, 0 mismatches in
+each; where the three runs of a build differ, R = 8 / 11 / 16)
+| Build | Runs | Acceptances | Results | With sums | With the fine sum | Held to the schedule (R = 8): results, grants and rotation starts | Decisions delivered | Acquisitions | Resets in flight | Mismatches |
+|---|---|---|---|---|---|---|---|---|---|---|
+| D = 4, W = 12 | R = 8, 11, 16 | 74 | 71 | 69 | 19 | 68, 204 | 70 | 19 | 72 | 0 |
+| D = 4, W = 16 | R = 8, 11, 16 | 66 | 63 | 60 | 20 | 59, 177 | 62 | 20 | 72 | 0 |
+| D = 4, W = 8 | R = 8, 11, 16 | 85 | 84 | 80 | 17 | 78, 234 | 82 | 17 | 72 | 0 |
+| D = 4, W = 4 | R = 8, 11, 16 | 84 | 82 / 83 / 84 | 78 / 79 / 80 | 14 | 77, 231 | 81 | 14 | 60 | 0 |
+| D = 3, W = 12 | R = 8, 11, 16 | 74 | 71 | 69 | 19 | — | 70 | 19 | 72 | 0 |
+| D = 5, W = 12 | R = 8, 11, 16 | 74 | 71 | 69 | 19 | — | 70 | 19 | 72 | 0 |
+
+- Compared: the detector's event of every sample (a run fails unless as many events were
+  compared as it has samples); an acceptance strobe at exactly the model's samples (with
+  the loop closed, a wrong or missing acquisition moves every later one); at each result
+  T1, whether the decision got to its sums, the final coarse sum, the confirmation, the
+  coherence, the energy, and the fine sum where the model made one; at sample n + L, three
+  edges after it, whether an acquisition is applied, with T1 and the cfo, coarse and fine
+  words.
+- Held to `run_schedule`, for every decision that runs its schedule and ends inside its
+  segment, in the run at R = 8 and D = 4 (the clock pattern the model was given), in cycles
+  after the strobe: the grant of the coarse sum's request of the CORDIC (w + 102 and the
+  model's wait), the rotation's first read (20 later), the grant of the fine sum's (w + 278
+  and its wait), the result. Without a wait the result is at 364 (w = 12), 396 (16), 332
+  (8), as 8·w + 268; at w = 4 at 304, the fine sum's branch. A run at R = 8, D = 4 fails
+  unless three grants and starts are held for each result held.
+- Before each segment four one-clock resets in the middle of a decision or at its delivery
+  (the segment up to its first acceptance and 0 to 71 samples and 0 to 7 clocks more: the
+  grid, the sums, the rotation, the tail, the result waiting for its sample, the delivery
+  at 64); after each, 30 clocks in which nothing may come out, neither a result nor a
+  delivery.
+- Idle clocks and garbage on idle inputs as in the other chains; registers without a reset
+  and both memories from random values.
+
+**Mutations** (each built from scratch in a private copy of `hw/`, D = 4, R = 8, on the
+builds W = 12 and W = 4, at 973018b; mismatches, the first kind in brackets; "stopped": a
+simulation check of the RTL): 83, of which 76 fail in at least one build. Log
+`target/handoff/dec_mut.log` (not committed), runner `mutate_dec.py` beside it.
+| Mutation | W = 12 | W = 4 |
+|---|---|---|
+| grid keeps 3/4 | 187 (T1 at the result) | 214 (T1 at the result) |
+| grid: above, not at, 7/8 | stopped: read and write of address 301 in the same cycle | stopped: read and write of address 351 in the same cycle |
+| grid: the first that keeps, not the last | 571 (T1 at the result) | 434 (T1 at the result) |
+| grid: T1 a position late | 659 (T1 at the result) | 663 (T1 at the result) |
+| grid: one word fewer read | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| no decision up to T1 = 160 | 5 (sums made) | 5 (sums made) |
+| no decision below T1 = 159 | 4 (sums made) | 4 (sums made) |
+| early test ignores acc_lapped | 60 (sums made) | 62 (sums made) |
+| early test ignores the grid's carry | 5 (sums made) | 5 (sums made) |
+| coarse window a sample late | 376 (coarse re) | 376 (coarse re) |
+| coarse lag 15 | 376 (coarse re) | 376 (coarse re) |
+| coarse product conjugates the other sample | 942 (coarse im) | 353 (coarse im) |
+| product's real part a difference | 585 (coarse re) | 510 (coarse re) |
+| port a's im from its re | 555 (coarse re) | 555 (coarse re) |
+| no narrowing's rounding (port b re truncated) | 333 (coarse re) | 346 (coarse re) |
+| fine window a sample late | 76 (fine re) | 56 (fine re) |
+| fine lag 63 | 76 (fine re) | 56 (fine re) |
+| fine sum added to the coarse one | 204 (coarse re) | 200 (coarse re) |
+| fine first operand from port a | 76 (fine re) | 56 (fine re) |
+| step: angle << 1 | 192 (confirmation) | 216 (confirmation) |
+| coarse word without its sign | 31 (cfo) | 22 (cfo) |
+| residual from +fine angle | 38 (cfo) | 28 (cfo) |
+| residual 15 bits | 6 (cfo) | 4 (cfo) |
+| cfo word is the coarse one | 38 (cfo) | 28 (cfo) |
+| CORDIC given the other sum | 428 (confirmation) | 418 (confirmation) |
+| request dropped without the grant | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| rotation one sample short | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| rotation from T1 + 1 | 421 (confirmation) | 416 (confirmation) |
+| rotation waits two cycles | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| rotation never waits | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| one window more correlated | 200 (confirmation) | 156 (confirmation) |
+| one window fewer correlated | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| second NCO not restarted | 147 (confirmation) | 179 (confirmation) |
+| energy of 127 samples | 62 (energy) | 72 (energy) |
+| energy of every rotated sample | 97 (energy) | 73 (energy) |
+| energy: im from re | 66 (energy) | 98 (energy) |
+| confirmation without the second symbol | 161 (confirmation) | 139 (confirmation) |
+| coherence from the first symbol alone | 161 (coherence) | 139 (coherence) |
+| first symbol's correlation always offset 0 | 66 (confirmation) | 85 (confirmation) |
+| coherent sum a difference | 103 (coherence) | 73 (coherence) |
+| rule: confirmation against the whole energy | 98 (acquired) | 69 (acquired) |
+| rule: coherence against the whole energy | 35 (acquired) | 24 (acquired) |
+| rule: coherence against a quarter | 3 (acquired) | 3 (acquired) |
+| acquired without the coherence rule | 3 (acquired) | 3 (acquired) |
+| acquired without the confirmation rule | 247 (acquired) | 15 (acquired) |
+| acquired without the energy test | 3 (acquired) | 4 (acquired) |
+| half the taps' energy | 1544 (acquired) | 18 (acquired) |
+| tail ready a stage early | 69 (result's cycle after the strobe) | **passes** |
+| fine word a cycle early | **passes** | 77 (result's cycle after the strobe) |
+| result at sample n + L + 1 | 272 (dec_valid at a sample that is no acceptance + L) | 270 (dec_valid at a sample that is no acceptance + L) |
+| result at sample n + L - 1 | 270 (dec_valid at a sample that is no acceptance + L) | 271 (dec_valid at a sample that is no acceptance + L) |
+| dec_valid a cycle early | 273 (dec_valid at a sample that is no acceptance + L) | 271 (dec_valid at a sample that is no acceptance + L) |
+| busy never cleared | stopped: an acceptance with a decision in flight | stopped: an acceptance with a decision in flight |
+| reset: busy | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| reset: the read control | **passes** | stopped: read and write of address 0 in the same cycle |
+| reset: the multiplier's valids | **passes** | **passes** |
+| reset: the tail's valids | **passes** | **passes** |
+| reset: the CORDIC's flags | **passes** | **passes** |
+| reset: the result's flags | **passes** | **passes** |
+| reset: the delivery | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| reset: the history's write address | stopped: an acceptance with a decision in flight | stopped: the result is not registered at its sample |
+| corr1: im tap from re | 367 (confirmation) | 351 (confirmation) |
+| corr1: pair partner off by one | 183 (confirmation) | 195 (confirmation) |
+| corr1: im difference reversed | 189 (confirmation) | 207 (confirmation) |
+| corr1: sum never restarted | 2173 (confirmation) | 2248 (confirmation) |
+| corr1: real taps both t(0) | 133 (confirmation) | 161 (confirmation) |
+| corr1: a slot left out of the clock's sum | 133 (confirmation) | 156 (confirmation) |
+| corr1: valid chain not reset | **passes** | **passes** |
+| corr1: run not reset | **passes** | **passes** |
+| residual's top bit dropped | 6 (cfo) | 4 (cfo) |
+| 7/8 of the maximum rounded down | 2 (T1 at the result) | 6 (T1 at the result) |
+| confirmation keeps 46 bits | 5 (confirmation) | 5 (confirmation) |
+| coarse sum keeps 28 bits | 8 (coarse re) | 8 (coarse re) |
+| energy keeps 28 bits | **passes** | **passes** |
+| energy keeps 27 bits | 1 (energy) | 1 (energy) |
+| chain: the detector cleared a cycle late | 135 (event) | 109 (event) |
+| rules a stage early | 69 (result's cycle after the strobe) | **passes** |
+| rotation a cycle late | 136 (rotation's first read, cycles after the strobe) | 77 (rotation's first read, cycles after the strobe) |
+| rotation a cycle late and the tail a stage early | 69 (rotation's first read, cycles after the strobe) | 77 (rotation's first read, cycles after the strobe) |
+| the six resets the first round let pass, together | 1 (outputs after a reset in flight) | **passes** |
+| chain: the detector not cleared | 135 (event) | 109 (event) |
+| chain: the search not told | 98 (acceptance the model does not make, at sample) | 90 (acceptance the model does not make, at sample) |
+| chain: the history of the delayed stream | 273 (dec_valid at a sample that is no acceptance + L) | 271 (dec_valid at a sample that is no acceptance + L) |
+
+The seven that pass both builds:
+- *reset: the multiplier's valids, the tail's valids, the CORDIC's flags, the result's
+  flags; `ltf_corr1`: the valid chain, run*: **not seen singly.** All six together fail
+  at W = 12 (a stray `res_valid` after a reset near a decision's end: "outputs after a
+  reset in flight") and pass at W = 4. I do not call any of them equivalent: no single one
+  has been shown to matter or not to. They stay, for a defined state.
+- *energy keeps 28 bits*: the widest energy in the vectors is 28 bits of 31 (27 kept bits
+  fail, once in each build). The top three bits are by derivation only: a stream without a
+  DC offset of half the scale does not reach them.
+
+Five pass one build and fail the other. Three as they should: the tail's ready flag and
+the rules a stage early (the tail is the longer branch at w = 12: 69 results a cycle
+early) and the fine word a cycle early (the longer branch at w = 4: 77). Two that I have
+not explained: the read control without its reset stops at W = 4 on the memory's collision
+check and passes at W = 12 (in the round at f19631a it stopped in both); and the six
+resets together, above, are seen at W = 12 only.
+
+**The rounds before this one.** The first (73 mutants, before f19631a) found three cases
+missing, each now in the vectors: an energy equal to 7/8 of the maximum (zero energies: the
+mutant now reads a stale T1 and stops on the memory's collision check); T1 at 159 and 160;
+the energy test of the rules (zero energy). A fourth, the correlator restarted at each
+strobe, was dead logic and is removed. The second (72, at f19631a) left nine passing both
+builds; I wrote two of them down as gaps with an argument (the residual's top bit, the
+coherence rule alone) and the six resets with another. The review showed the first
+argument false and the last untested; see below.
+
+**Independent review** (a fresh agent on f19631a, given the code and the model, not the
+conclusions). It found no input on which `rx_decide` and `ltf_corr1` differ from the model
+in values or in the result's cycle. Its own stress: 48 scenes at four W over the eighteen
+runs; W = 1, 2, 3, 5, 15; 40 scenes with a frequency step; 160 scenes; 60 low-level
+scenes; 35 mutants. What it found in the gate and the journal, each corrected in 973018b:
+1. **A false claim of mine.** The journal said the residual stays below 2^14 in every
+   acquisition. An acquisition with residual −32 170 was already in the vectors at w = 16,
+   and a frame whose frequency steps between the short and the long field gives
+   |residual| ≥ 2^14 (78 to 94 kHz) at any w. Now scenes found by seed, with counters.
+2. The same construction with a step of 94 to 138 kHz fails the coherence rule with the
+   confirmation rule held: the case I had called absent. Now a scene per w, with a counter;
+   both coherence mutants fail (3 mismatches in each build).
+3. Six reset mutants invisible singly give together a stray `res_valid` after a reset near
+   a decision's end. The testbench now requires silence after each reset in flight and
+   resets up to 71 samples after the acceptance (the delivery at 64 included).
+4. The cycle check held only the total: a rotation a cycle late with the tail a stage
+   early passed. The two grants and the rotation's first read are now held, and the rules
+   are two real stages (difference, sign) so that the tail has no slack of its own.
+5. `det_a.clear` was thinly covered and not at all at W = 4. The detector's event of every
+   sample is now compared, and a scene with the clear inside a run of fires is required
+   per w ("the detector not cleared" and "cleared a cycle late": 135 and 109 mismatches).
+6. The sums' upper bits: the clipping scene brings the coarse sum and the energy to 28
+   bits and the confirmation to 47 of 62. The energy's top 3 bits, squares above 46 bits
+   and the correlator's top 3 bits stay by derivation only.
+7. The rounding of `keep` (floor of 7/8 against emax − (emax >> 3)): a scene of faint
+   noise found by seed, with a counter.
+8. T1 on the `A` line was parsed and never compared: now compared at every result. A
+   check that could not fail ("acquired without dec_valid") is removed; `acq_cfo` and
+   `acq_fine` are one wire (the coarse weight is 0).
+9. The wait counters: a coarse wait is required at w = 12 and a fine one at w = 4, where
+   each moves the result.
+10. An elaboration check that `LTF_TAP_ENERGY` fits the rule's 20 bits.
+
+Not checked by the review: L other than 64, R below 8, resets longer than a clock,
+synthesis.
+
+**Timing probe** (Vivado 2024.2, out of context, KV260 part, 6.25 ns, the probe script
+with an input delay of 0.5 ns on every input; `rx_decide` with its `nco` and `ltf_corr1`;
+sources at 973018b; excerpt in `docs/gates/reports/rx_front_timing_ooc.txt`): **+0.24 ns.**
+1913 LUTs, 3064 registers, 68 DSP blocks, 2 block RAMs (the history). The run at 84c9ac6,
+before the correlator's reset was simplified and the rules were two stages, gave +0.12 ns.
+The worst path is `ltf_corr1`'s sum of a clock's eight slots, which Vivado folded into the
+DSP blocks of the stage before. It meets, with nothing to speak of: a stage there costs
+one cycle of the schedule's 96 to spare (and `rx_decision`'s count of the correlator's
+stages). The squares (54 bits), the multiplier with its two sums and the rules are not the
+worst paths. Not run: the open ASIC flow, where `ltf_corr` and `det_a` were the tight ones.
+
+**Not covered**
+- The six reset mutants singly, and the two unexplained one-build results above.
+- The energy's top 3 bits, squares above 46 bits, the correlator's top 3 bits.
+- The schedule's cycles at any clock pattern but R = 8, D = 4 (the values and the
+  delivery's sample are held in all eighteen runs).
+- At w = 4: the TGn D frame, the hot frame, the frame under a strong tone.
+- `L` other than 64; R below 8; a reset longer than a clock or of `rx_decide` alone.
+- A decision that does not fit its budget (the check stops the simulation; in hardware
+  `acquired` is not given and the candidate is lost).
+- The search's own outputs: they are the search gate's, which still takes `acquired`
+  from the vectors.
+
+**Open (for step 4, the top level)**
+- `acq_t1` is T1 modulo 512; the hand-off needs the FFT window's start (GI − W before
+  it) in its own sample count.
+- The second history (the ADC's samples, ADR 0008 decision 1), the hold and the replay:
+  the hand-off's RTL, with its own schedule.
+- `ltf_corr1`'s tight path; the open ASIC flow for the search and the decision.
