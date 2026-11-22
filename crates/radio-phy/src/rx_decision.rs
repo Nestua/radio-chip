@@ -173,6 +173,8 @@ pub enum Store {
     History,
     /// The ring of the search's energies.
     Ring,
+    /// The second history, of the ADC's samples (the hand-off's: [`crate::rx_handoff`]).
+    Adc,
 }
 
 /// Why a schedule cannot be built in hardware.
@@ -249,20 +251,20 @@ pub fn schedule_len(w: usize, t: &DecisionTiming) -> usize {
 }
 
 /// A memory written once per index in known cycles, read by absolute index on its ports.
-struct Memory<'a, T> {
+pub(crate) struct Memory<'a, T> {
     store: Store,
     depth: usize,
     /// Cycle in which index k is written (increasing).
     written: &'a [usize],
     data: &'a [T],
     /// The least number of spare words seen.
-    spare: usize,
+    pub(crate) spare: usize,
     /// The (port, cycle) of every read.
     used: BTreeSet<(u8, usize)>,
 }
 
 impl<'a, T: Copy> Memory<'a, T> {
-    fn new(store: Store, depth: usize, written: &'a [usize], data: &'a [T]) -> Self {
+    pub(crate) fn new(store: Store, depth: usize, written: &'a [usize], data: &'a [T]) -> Self {
         Self {
             store,
             depth,
@@ -273,7 +275,12 @@ impl<'a, T: Copy> Memory<'a, T> {
         }
     }
 
-    fn read(&mut self, port: u8, index: usize, clock: usize) -> Result<T, ScheduleError> {
+    pub(crate) fn read(
+        &mut self,
+        port: u8,
+        index: usize,
+        clock: usize,
+    ) -> Result<T, ScheduleError> {
         let store = self.store;
         if !self.used.insert((port, clock)) {
             return Err(ScheduleError::PortBusy { store, port, clock });
@@ -302,7 +309,7 @@ impl<'a, T: Copy> Memory<'a, T> {
         Ok(v)
     }
 
-    fn reads(&self, port: u8) -> usize {
+    pub(crate) fn reads(&self, port: u8) -> usize {
         self.used.iter().filter(|u| u.0 == port).count()
     }
 

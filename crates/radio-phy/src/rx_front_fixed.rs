@@ -294,7 +294,7 @@ pub fn correct_fixed(y: &[IQ], cfo_phase: i64, out_bits: u32, fx: &FixedRxConfig
 
 /// One sample of [`correct_fixed`]: `v` turned by `phase`, which then steps back by the CFO
 /// word.
-fn turn(
+pub(crate) fn turn(
     v: IQ,
     phase: &mut i64,
     cfo_phase: i64,
@@ -384,7 +384,7 @@ pub fn remove_dc_fixed(x: &[(i16, i16)], dc: IQ) -> Vec<IQ> {
 }
 
 /// One sample of [`remove_dc_fixed`].
-fn remove_dc(x: (i16, i16), dc: IQ) -> IQ {
+pub(crate) fn remove_dc(x: (i16, i16), dc: IQ) -> IQ {
     let (lo, hi) = (-(1i64 << (Y_BITS - 1)), (1i64 << (Y_BITS - 1)) - 1);
     (
         (i64::from(x.0) - dc.0).clamp(lo, hi),
@@ -1276,7 +1276,7 @@ struct Replay {
 /// taken ends as a packet whatever comes before its mark is taken.
 ///
 /// The front searches on while a packet is read; what it should search for then is not
-/// decided (ADR 0008, decision 1). The clock-exact schedule is the RTL's.
+/// decided (ADR 0008, decision 1). The schedule in clocks is [`crate::rx_handoff`].
 #[derive(Debug, Clone)]
 pub struct RxHandoffFixed {
     front: RxFrontFixed,
