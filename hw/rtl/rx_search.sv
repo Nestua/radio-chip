@@ -27,10 +27,11 @@
 //   best   the running maximum (the first of equal energies) and its age in positions; it is
 //          accepted when 63 + W old, and the maximum restarts at the next position.
 //   busy   a decision in flight: L samples from the acceptance, counted here. `acquired`
-//          (a strobe from the decision engine, any time before the search's own sample n + L;
-//          in the detector's timeline the result is due D samples and 20 clocks earlier)
-//          makes the end of the decision close the search — also one opened at that very
-//          sample, as in the model. No strobe: not acquired.
+//          (a strobe from the decision engine, from the cycle of acc_valid to the cycle
+//          before the one in which the search takes its own sample n + L, i.e. two cycles
+//          before that sample's out_valid; in the detector's timeline the result is due D
+//          samples and 20 clocks earlier) makes the end of the decision close the search —
+//          also one opened at that very sample, as in the model. No strobe: not acquired.
 // The model accepts only with no decision in flight. With L ≤ 63 + W that never decides
 // anything (after an acceptance at sample n the next maximum cannot be 63 + W old before
 // n + 64 + W), so there is no such gate here: an elaboration check on L, and a simulation
@@ -41,13 +42,16 @@
 // Handed to the decision with acc_valid: acc_n, the sample of the acceptance, acc_imax, the
 // maximum's position, and acc_opened, the opening event's sample, all modulo 2^POS_W (the
 // history's addresses; acc_opened is a tag: a search under a tone stays open without bound);
-// acc_ring, the ring address of e(imax); acc_emax. ring_re/ring_addr/ring_data: the ring's
+// acc_lapped, whether the maximum's position is 2^POS_W or more (while it is 0, acc_imax is
+// the position itself: the decision's test for a first symbol less than 160 samples into the
+// stream, the model's checked_sub); acc_ring, the ring address of e(imax); acc_emax. ring_re/ring_addr/ring_data: the ring's
 // read port (ram_1w1r: never the address being written, the data for one cycle).
 //
 // Stream: never stalls; one sample in 8 clocks at most (ltf_corr). CHECK_TIMING = 1 stops
 // simulation when a correlator output comes without its sample's tick or a tick from the
 // 128th sample on without a correlator output (PATH_DELAY wrong, or samples too close), on an
-// acceptance with a decision in flight, and on `acquired` without one.
+// acceptance with a decision in flight, and on `acquired` without one or in the cycle its
+// decision ends (too late: it would be lost).
 
 `default_nettype none
 
@@ -78,6 +82,7 @@ module rx_search
     output logic                              acc_valid,
     output logic [POS_W-1:0]                  acc_n,
     output logic [POS_W-1:0]                  acc_imax,
+    output logic                              acc_lapped,
     output logic [RA_W-1:0]                   acc_ring,
     output logic [E_W-1:0]                    acc_emax,
     output logic [POS_W-1:0]                  acc_opened,
@@ -167,6 +172,7 @@ module rx_search
     // ---- C + 2 → C + 3: the search
     logic [POS_W-1:0] npos, jpos;        // this sample's number, this energy's position
     logic             open, busy, acq_seen, best_v;
+    logic             lap, best_lap;     // the position count has wrapped
     logic [CW-1:0]    wait_q, left_q, wait_a, left_a;
     logic [E_W-1:0]   best_e;
     logic [POS_W-1:0] best_pos, open_pos;
@@ -195,6 +201,7 @@ module rx_search
         if (!rst_n) begin
             npos      <= '0;
             jpos      <= '0;
+            lap       <= 1'b0;
             open      <= 1'b0;
             busy      <= 1'b0;
             acq_seen  <= 1'b0;
@@ -205,7 +212,10 @@ module rx_search
             out_valid <= t_s;
             acc_valid <= t_s && accept;
             if (acquired && busy) acq_seen <= 1'b1;
-            if (e_valid) jpos <= jpos + 1'b1;
+            if (e_valid) begin
+                jpos <= jpos + 1'b1;
+                if (&jpos) lap <= 1'b1;
+            end
             if (t_s) begin
                 npos <= npos + 1'b1;
                 open <= open_a && !dead && !(dec_end && acq_seen);
@@ -227,6 +237,7 @@ module rx_search
             if (take) begin
                 best_e    <= e;
                 best_pos  <= jpos;
+                best_lap  <= lap;
                 best_ring <= wa;
             end
             if (accept)    cnt <= LW'(L);
@@ -234,6 +245,7 @@ module rx_search
             if (accept) begin
                 acc_n      <= npos;
                 acc_imax   <= best_pos;
+                acc_lapped <= best_lap;
                 acc_ring   <= best_ring;
                 acc_emax   <= best_e;
                 acc_opened <= open_pos;
@@ -258,6 +270,8 @@ module rx_search
                     $error("rx_search: an acceptance with a decision in flight");
                 if (acquired && !busy)
                     $error("rx_search: acquired without a decision in flight");
+                if (acquired && t_s && dec_end)
+                    $error("rx_search: acquired in the cycle its decision ends (too late)");
             end
         end
     end

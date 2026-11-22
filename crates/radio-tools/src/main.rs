@@ -1020,6 +1020,13 @@ struct SearchCover {
     event_after_close: usize,
     /// An event at the sample an acquisition is applied.
     event_at_acquisition: usize,
+    /// A search opened by an event at the very sample an acquisition is applied (and closed
+    /// by it).
+    opened_at_acquisition: usize,
+    /// An accepted maximum at a position below 2^9 and one at or above (the hand-over's
+    /// numbers are modulo 2^9, with a flag).
+    maximum_before_wrap: usize,
+    maximum_after_wrap: usize,
     /// An acceptance at the search's last position.
     acceptance_at_last_position: usize,
     /// An accepted maximum at the search's first position.
@@ -1046,6 +1053,9 @@ impl SearchCover {
         self.event_at_last_position += o.event_at_last_position;
         self.event_after_close += o.event_after_close;
         self.event_at_acquisition += o.event_at_acquisition;
+        self.opened_at_acquisition += o.opened_at_acquisition;
+        self.maximum_before_wrap += o.maximum_before_wrap;
+        self.maximum_after_wrap += o.maximum_after_wrap;
         self.acceptance_at_last_position += o.acceptance_at_last_position;
         self.maximum_at_first += o.maximum_at_first;
         self.larger_before_first += o.larger_before_first;
@@ -1076,6 +1086,15 @@ impl SearchCover {
             (
                 self.event_at_acquisition,
                 "an event at the sample of an acquisition",
+            ),
+            (
+                self.opened_at_acquisition,
+                "a search opened at the sample of an acquisition",
+            ),
+            (self.maximum_before_wrap, "a maximum below position 512"),
+            (
+                self.maximum_after_wrap,
+                "a maximum at or above position 512",
             ),
             (
                 self.acceptance_at_last_position,
@@ -1136,6 +1155,7 @@ fn search_trace(x: &[(i16, i16)], w: usize) -> (Vec<String>, SearchCover) {
                 usize::from(was_open && last_event.is_some_and(|l| n - l == last_position));
             c.event_after_close += usize::from(closed_at.is_some_and(|k| n == k + 1));
             c.event_at_acquisition += usize::from(acq.is_some());
+            c.opened_at_acquisition += usize::from(acq.is_some() && !was_open);
             if !was_open {
                 accepted_in_search = 0;
             }
@@ -1147,6 +1167,8 @@ fn search_trace(x: &[(i16, i16)], w: usize) -> (Vec<String>, SearchCover) {
             c.acceptance_at_last_position += usize::from(!open && acq.is_none());
             let first = a.opened_by + SEARCH_OFFSET;
             c.maximum_at_first += usize::from(a.imax == first);
+            c.maximum_before_wrap += usize::from(a.imax < HISTORY);
+            c.maximum_after_wrap += usize::from(a.imax >= HISTORY);
             c.larger_before_first +=
                 usize::from(accepted_in_search == 0 && first > 0 && energy[first - 1] > a.emax);
             c.ties += usize::from(energy[a.imax + 1..=j].contains(&a.emax));
@@ -1201,7 +1223,8 @@ fn tone_burst_scene(total: usize, bursts: &[(usize, usize)], seed: u64) -> Vec<(
 /// that an event falls on a search's last position, and one sample later; lone bursts chosen
 /// by their seed for an acceptance at a search's last position, a maximum at its first, and
 /// a larger energy just before the first; a frame with a strong tone beginning in its data,
-/// placed for an event at the sample of the acquisition; the long symbol's signs at full scale (the largest energy
+/// placed for an event at the sample of the acquisition; a bare long training field between
+/// two tones, placed so that the acquisition closes a search opened at its very sample; the long symbol's signs at full scale (the largest energy
 /// the chain reaches).
 fn search_vectors(out: &mut impl Write) -> io::Result<()> {
     let fx = FixedRxConfig::default();
@@ -1308,6 +1331,63 @@ fn search_vectors(out: &mut impl Write) -> io::Result<()> {
                 .ok_or_else(|| io::Error::other(format!("w = {w}: no event at an acquisition")))?;
             scenes.push(("event_at_acquisition".to_string(), x));
         }
+        // An acquisition that closes a search opened at its very sample (the independent
+        // review's scene): a tone burst opens a search; a frame follows whose short training
+        // field is 3 dB under the noise (no event) and whose long one is 17 dB over it; the
+        // search accepts it and closes by its deadline while the decision is in flight; a
+        // tone then begins, placed so that its first event falls on the sample the
+        // acquisition is applied at.
+        {
+            let cfg = IfftConfig::tx_default();
+            let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+            let frame: Vec<(f64, f64)> = build_ppdu(&[0x5a; 3], Rate::R6, 0x5d, &cfg)
+                .map_err(io::Error::other)?
+                .iter()
+                .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+                .collect();
+            let p = mean_power(&frame);
+            let full = f64::from(ADC_FULL_SCALE);
+            let sigma2 = (0.1 * full).powi(2) * 10f64.powf(-17.0 / 10.0);
+            let amp = 0.1 * full / p.sqrt();
+            let amp_stf = (sigma2 * 10f64.powf(-3.0 / 10.0) / p).sqrt();
+            // The acceptance is at about T1 + 189 + 2·w and the tone's first event some 27
+            // samples after its start: the long field's place g must put the first search's
+            // deadline between the acceptance and its result, the tone's start t the event
+            // on the result's sample. Seeds, since the noise decides the confirmation.
+            let scene = (0..70 * 13 * 12usize).filter(|_| w != 8).find_map(|k| {
+                let (g, t) = (130 + k % 70, 92 + 2 * w + (k / 70) % 13);
+                let mut rng = Rng::new(0x5EA2_3000 + k as u64);
+                let mut x = awgn(&vec![(0.0, 0.0); 1500], 0.0, sigma2, &mut rng);
+                let mut add = |at: usize, y: &[(f64, f64)], gain: f64| {
+                    for (v, q) in x.iter_mut().skip(at).zip(y) {
+                        *v = (v.0 + q.0 * gain, v.1 + q.1 * gain);
+                    }
+                };
+                let tone = |len: usize| {
+                    add_tone(&vec![(0.0, 0.0); len], 0.01 * full * full, 0.9e6, 20e6, 0.3)
+                };
+                let ltf = 250 + g;
+                add(150, &tone(100), 1.0);
+                add(ltf - 160, &frame[..160], amp_stf);
+                add(ltf, &frame[160..320], amp);
+                let start = ltf + 160 + t;
+                add(start, &tone(1500 - start), 1.0);
+                let x = to_adc(&x, 1.0);
+                (search_trace(&x, w).1.opened_at_acquisition > 0).then_some(x)
+            });
+            // With a back-off of 400 ns none of these placements acquires (the candidate is
+            // taken ten positions early and w = 8 does not reach T1), so they are not tried:
+            // the case is required of the other two builds.
+            match scene {
+                Some(x) => scenes.push(("opened_at_acquisition".to_string(), x)),
+                None if w == 8 => {}
+                None => {
+                    return Err(io::Error::other(format!(
+                        "w = {w}: no search opened at an acquisition"
+                    )))
+                }
+            }
+        }
         // The long symbol's component signs at full scale: the largest energy the chain
         // reaches (32 bits of the 44: the detector's events turn the NCO, and the match is
         // lost).
@@ -1331,7 +1411,10 @@ fn search_vectors(out: &mut impl Write) -> io::Result<()> {
                 writeln!(out, "{l}")?;
             }
         }
-        let missing = total.missing();
+        let mut missing = total.missing();
+        if w == 8 {
+            missing.retain(|m| *m != "a search opened at the sample of an acquisition");
+        }
         if !missing.is_empty() {
             return Err(io::Error::other(format!(
                 "search vectors at w = {w} miss: {}",

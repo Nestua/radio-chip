@@ -35,6 +35,7 @@ module search_chain
     output logic                              acc_valid,
     output logic [POS_W-1:0]                  acc_n,
     output logic [POS_W-1:0]                  acc_imax,
+    output logic                              acc_lapped,
     output logic [RA_W-1:0]                   acc_ring,
     output logic [E_W-1:0]                    acc_emax,
     output logic [POS_W-1:0]                  acc_opened
@@ -80,7 +81,7 @@ module search_chain
         .clk, .rst_n, .s_valid(l_valid), .s_event(l_event), .c_valid, .c_re, .c_im,
         .acquired(clr[3]),
         .e_valid, .e, .out_valid(s_valid), .searching,
-        .acc_valid, .acc_n, .acc_imax, .acc_ring, .acc_emax, .acc_opened,
+        .acc_valid, .acc_n, .acc_imax, .acc_lapped, .acc_ring, .acc_emax, .acc_opened,
         .ring_re, .ring_addr, .ring_data
     );
 

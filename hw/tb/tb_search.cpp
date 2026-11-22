@@ -16,8 +16,10 @@
 // kELatency, the sample's strobe (searching, acceptance) kSLatency — the schedule's
 // Y(n + D) + 5 + 15 + 3 (rx_decision). Before each segment the chain is reset in the clocks
 // in which the search takes an accepted sample (the segment up to its first acceptance, a
-// one-clock reset 19 … 24 clocks after that sample, in turn); junk samples are in the pipeline at each segment's end reset: nothing of
-// either may come out or disturb the next run. The RTL's own checks ($error) abort the run.
+// one-clock reset 19 … 24 clocks after that sample, in turn), and again between an
+// acquisition's strobe and the search's own sample of it; three junk samples precede each
+// segment's end reset (the last one R − 1 clocks old, in nco or ltf_corr): nothing of any of
+// these may come out or disturb the next run. The RTL's own checks ($error) abort the run.
 // Exit code 0 = passed.
 
 #include <cstdint>
@@ -58,7 +60,7 @@ struct Gate {
     int R = 8, D = 4, W = 12;
     long cycle = 0, mismatches = 0;
     long es = 0, ss = 0, accs = 0, ring_reads = 0;   // totals compared
-    long in_flight_resets = 0;
+    long in_flight_resets = 0, acquired_resets = 0;
     size_t ne = 0, ns = 0;                // per-segment output indices
     const Segment* seg = nullptr;
     std::vector<long> fed;                // cycle of each fed sample (segment + flush)
@@ -121,6 +123,7 @@ struct Gate {
                 if (dut.acc_valid && g.has_acc) {
                     if (dut.acc_n != static_cast<long>(ns) % kPosMod) fail("acc_n", ns, dut.acc_n, static_cast<long>(ns) % kPosMod);
                     if (dut.acc_imax != g.imax % kPosMod) fail("acc_imax", ns, dut.acc_imax, g.imax % kPosMod);
+                    if (dut.acc_lapped != (g.imax >= kPosMod)) fail("acc_lapped", ns, dut.acc_lapped, g.imax >= kPosMod);
                     if (dut.acc_ring != g.imax % kRing) fail("acc_ring", ns, dut.acc_ring, g.imax % kRing);
                     if (static_cast<long>(dut.acc_emax) != g.emax) fail("acc_emax", ns, static_cast<long>(dut.acc_emax), g.emax);
                     if (dut.acc_opened != g.opened % kPosMod) fail("acc_opened", ns, dut.acc_opened, g.opened % kPosMod);
@@ -181,9 +184,31 @@ struct Gate {
         junk = false;
     }
 
+    // A reset after `acquired` and before the search's own sample of the result (D samples
+    // later): the segment up to its first acquisition, 6, 13 or 20 clocks, a one-clock
+    // reset. A strobe remembered across the reset closes a search of the run that follows
+    // at its first failed candidate.
+    void reset_after_acquired(const Segment& s) {
+        size_t q = 0;
+        while (q < s.s.size() && !s.s[q].acq) ++q;
+        if (q >= s.s.size()) return;
+        const int wait = 6 + 7 * static_cast<int>(acquired_resets % 3);
+        ++acquired_resets;
+        junk = true;
+        dut.rst_n = 0;
+        dut.in_valid = 0;
+        tick();
+        dut.rst_n = 1;
+        fed.clear();
+        for (size_t k = 0; k <= q; ++k) feed(s.s[k].xr, s.s[k].xi, s.s[k].acq, k);
+        for (int i = 0; i < wait; ++i) tick();
+        junk = false;
+    }
+
     void run(const Segment& s) {
         seg = &s;
         reset_in_flight(s);
+        reset_after_acquired(s);
         fed.clear();
         ne = ns = 0;
         rd_left = 0;
@@ -304,11 +329,12 @@ int main(int argc, char** argv) {
         g.run(s);
     }
     std::printf("search G3 (R = %d, D = %d, W = %d): %ld segments, %ld samples (%ld energies, %ld searches "
-                "opened, %ld closed, %ld acceptances, %ld acquisitions, %ld ring words read, %ld resets "
+                "opened, %ld closed, %ld acceptances, %ld acquisitions, %ld ring words read, %ld + %ld resets "
                 "in flight), %ld mismatches\n",
                 g.R, g.D, g.W, run_segments, samples, energies, opens, closes, accepted, acqs,
-                g.ring_reads, g.in_flight_resets, g.mismatches);
-    if (run_segments == 0 || accepted == 0 || acqs == 0 || closes == 0 || g.in_flight_resets == 0) {
+                g.ring_reads, g.in_flight_resets, g.acquired_resets, g.mismatches);
+    if (run_segments == 0 || accepted == 0 || acqs == 0 || closes == 0 || g.in_flight_resets == 0 ||
+        g.acquired_resets == 0) {
         std::cerr << "nothing compared — refusing to pass an empty gate\n";
         return 1;
     }
