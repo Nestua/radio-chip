@@ -4035,7 +4035,7 @@ sum is linear, so the hardware needs two sums and no multiplier per sample):
 | t + 2 … t + 129 | the words, each added to the first or the second symbol's sum (18 bits a component) |
 | t + 130 | both sums registered. Meanwhile e (the rotator's table at 64 CFO words and half an address), d = A − e, 64·\|d\|², the test 256·\|d\|² < A² |
 | t + 132 | S = A·Σ₂ − e·Σ₁ (30 bits) |
-| t + 134 | the numerator S·d* (42 bits; the divisor 28) |
+| t + 134 | the numerator S·d* (41 bits by the reviewer's maximum over the table, below 2⁴⁰ in magnitude; `ltf_dc_offset_fixed`'s text says 42; the divisor 28) |
 | t + 135 | the two magnitudes in two dividers side by side |
 | t + 146 | 11 quotient bits each (restoring, a bit a cycle); a quotient of 2¹¹ or more is known before the first step and is a rail of the ADC's range |
 | t + 147 | **the offset registered** (half to even from the remainder, the sign, 12 bits); the replay's first address in this cycle |
@@ -4067,11 +4067,15 @@ dropped with its stream.
   of data symbols, patient).
 
 **What the schedule found**
-1. **The model's pace needs no change.** With the tick 6 cycles after the sample, a
+1. **The model's `push` needs no change; its default rate of 8 is the pace only with
+   samples exactly 8 clocks apart.** With the tick 6 cycles after the sample, a
    buffer of 7 and a registered count, a ready reader gets a beat in every cycle while the
-   model has one: the periods of the run are the model's, for every pattern of readiness
-   tried. A buffer of 6 starves the reader one cycle in seven (6 do with a count that is
-   free in the cycle of the beat, 5 do not).
+   model has one: the periods of the run are the model's with `rate` out of the way and
+   `room` the ready cycles, for every pattern of readiness tried. A period with idle
+   clocks is longer than 8 cycles and hands on more than the model at rate 8 does (up to
+   10 with the gate's idle pattern; the reviewer counted 30 such periods in one run): the
+   samples are the same, the pace is the clock's. A buffer of 6 starves the reader one
+   cycle in seven (6 do with a count that is free in the cycle of the beat, 5 do not).
 2. **Two dividers, or a start delay of 21.** One divider is late by 4 cycles at R = 8.
 3. **11 quotient bits are enough** (the first model had 13): a quotient of 2¹¹ or more is
    −2048 or beyond 2047 after rounding, and it is known from the dividend's upper bits
@@ -4087,7 +4091,8 @@ dropped with its stream.
    subcarrier spacing) skips the division like no CFO at all: the model's rule, seen here
    on the largest word. Outside the acquisition's range.
 
-**Gate.** `crates/radio-phy/tests/g2_rx_handoff_schedule.rs`, fifteen tests, and a unit
+**Gate.** `crates/radio-phy/tests/g2_rx_handoff_schedule.rs`, eighteen tests (fifteen
+before the review below, three for its findings), and a unit
 test of the divider (`rx_handoff::tests`). A model gate:
 no reference from outside the project. References: `RxHandoffFixed::push` (gated in
 `g2_rx_handoff`) for beats, hold and acquisitions; `ltf_dc_offset_fixed` (gated by hand in
@@ -4134,7 +4139,7 @@ lengths, the count of words read and the divider's unit test: of these only one 
 at its first run, on my expectation (a reader away a sample before the stream's end loses
 it to the overrun before the next declaration; it is not aborted by it). The others have
 been seen to fail by mutation only (below).
-Commands: `cargo test -p radio-phy --test g2_rx_handoff_schedule` — 15 passed;
+Commands: `cargo test -p radio-phy --test g2_rx_handoff_schedule` — 18 passed;
 `cargo test -p radio-phy --lib` — 6 passed.
 
 **Mutations** (each applied to `rx_handoff.rs` in a private copy of the workspace, five
@@ -4144,7 +4149,8 @@ it, not committed). A first run of 128 against the twelve tests then written: 11
 failed and 14 passed. Those 14 are what the tests written after the model are for
 (above), together with one change of the model (the remainder's register, finding 3) and
 one mutant withdrawn because it changed nothing (two statements in another order). The
-run on the gate as committed: **128 mutants, 126 fail.** They cover the offset's
+run on the fifteen tests: 128 mutants, 126 failed. **On the gate as committed, with the
+review's eleven: 139 mutants, 137 fail** (`handoff_mut3.log`). They cover the offset's
 arithmetic (the phase of e, d, the threshold, each sum's role, both signs of the
 numerator, the divisor, the components), the divider (the early test, its sign, the
 register's width, the number of steps, the comparison, each way of rounding, the sign,
@@ -4158,17 +4164,68 @@ end, the declaration (the inheritance and its condition, which mark, the tag's c
 watchdog, the word, the start delay and the opening cycle, where the reader and the
 replay start, the first phase, the tail), the rails and both rules' windows and counts,
 the overrun's bound and its condition, and what a close keeps. The two that pass:
-- *the skipped division's test with ≤ for <*: 256·|d|² is even and A² is odd with the
-  default table (A = 1023), so the two never differ. My argument; not gated.
+- *the skipped division's test with ≤ for <*: 256·|d|² is even and A² is odd
+  (A = 2^(Q−1) − 1 for every valid table, the reviewer's reading), so the two never
+  differ. An argument; not gated.
 - *the starving check a sample short* (a reader left without the sample of the period
   that has just begun is not refused): the tick is derived from the pipeline's length in
   this model, so that sample is at the pins by construction and the case cannot be
   configured. The check's stricter half has not been seen to bite.
 
+**Independent review** (a fresh agent in its own worktree on c578b5a; the code, ADR 0008
+and the RTL headers, not the conclusions). It found no wrong result. By its own runs: the
+clock model against `RxHandoffFixed` in 4975 runs (3000 at the defaults, half of them
+with truncated frames; 1975 with other `HandoffConfig`, `FixedRxConfig`, `RxConfig` and
+`HandoffTiming`; 11 798 acquisitions, some 26 700 strobes with wrong tags, repeats,
+failures and both kinds of verdict at arbitrary cycles, rail bursts, 6 to 35 dB, ±40 ppm;
+every kind of mark more than 900 times), ticks, rooms and each strobe's tick recomputed
+by itself, and each period's beats in that period's first ready cycles: 0 mismatches, no
+false refusal. The serial offset against `ltf_dc_offset_fixed` in 59 160 cases over 1479
+valid configurations (Q 2 to 30, L 2 to 13, P 8 to 40; 17 813 saturated): equal, and
+|d|² < 2^(2Q) at every table address. The numbers of the tables rebuilt (the buffer of 6
+starving one cycle in seven; the history's spare 6 as the least over 3000 runs; the
+widths; the cycle conventions against `rx_front.sv`, `nco.sv`, `ram_1w1r`). Its vectors
+and scratch tests are not in the repo. Found, each corrected here:
+1. **Ten mutants of its own that the gate let pass and that are not equivalent** (of 20
+   tried): each rail tested on one component only (my `on_rails` put I on the upper and Q
+   on the lower rail, never the other way: "both rails" was half true); the patience
+   looked at before the hold's end; no release on a declaring sample; the rail flags
+   cleared at a declaration; the overrun tested before the declaration; a count of 0; a
+   window of 64; the back-off fixed at 4 (at a verdict and at a declaration); a tick in
+   `acq_valid`'s own cycle refused. Three tests added
+   (`each_rail_of_each_component_counts_and_a_declaring_sample_can_give_up_its_hold`,
+   `a_hold_that_ends_at_a_declaration_and_a_loss_at_one_follow_the_models_order`,
+   `the_back_off_is_the_receivers`) and one case in `what_cannot_be_built_is_refused`;
+   the first of them failed once on my own expectation of the hold across an abort.
+   Its ten, written again as eleven mutants of the runner, all fail now (one test each).
+2. **Finding 1 was overstated** ("the model's pace needs no change"): restated above.
+3. The numerator is 41 bits, not 42; a comment said |d| < 2·A (it passes 2·A by the
+   table's rounding at four addresses; < 2^Q is what holds and what the width needs);
+   `run_handoff`'s text named an error that cannot occur and did not say what an invalid
+   configuration gives; `done` echoes the formula. Corrected or stated above.
+4. What a tick asks of one cycle (above).
+Not checked by it: a declaration during an estimate or within 20 periods of another (it
+could not force one either: the closest pair in 1500 truncated-frame scenes was 305
+samples apart), a tag's wrap, a reset in flight, R below 8, `acq_latency` other than 4,
+other stage counts of the estimate, synthesis or timing, the history of this entry.
+
 **What this is not.** Not RTL and not timing: the stage counts of what is not built are
 allowances (an 18 × 12 and a 30 × 13 complex product, a 28-bit subtraction a divider
 step). One clock (R = 8; R = 7 only as a refusal), one idle pattern, `FixedRxConfig` at
-its defaults. Counter widths are not modelled (the model counts samples without a limit).
+its defaults but for one run with a coarse weight, `RxConfig` at its defaults but for one
+test with a back-off of 400 ns. Counter widths are not modelled (the model counts samples
+without a limit). `EstimateRun::done` is the table's formula, not an observation: what the
+gate observes is the first sample at the pins (153) and the first beat (161).
+
+**What the RTL has to do in one cycle** (the reviewer's reading; allowances like the
+stage counts, and a tick spread over several cycles would be another model):
+- the tick: a verdict kept in T − 1 gives, in T, the hold's end (80 × an 11-bit count and
+  two additions), its comparison with the sample count, the hold, the kind of mark
+  against the new last sample, and the overrun's test;
+- `ready` reaches control state: a beat taken in the tick's own cycle is counted before
+  the tick compares the reader's position (comparisons "one short" prepared beforehand);
+- a strobe in a tick's cycle is compared with the tag as it is after that tick's
+  declaration.
 
 **Not covered**
 - A declaration while an estimate runs, or less than 20 periods after another: the

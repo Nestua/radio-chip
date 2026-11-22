@@ -192,6 +192,7 @@ impl Model {
 /// the tick that takes it; every period's beats, the hold and the acquisition are its.
 fn held_to_the_model(
     adc: &[(i16, i16)],
+    cfg: &RxConfig,
     fx: FixedRxConfig,
     pace: HandoffConfig,
     run: &HandoffRun,
@@ -210,7 +211,7 @@ fn held_to_the_model(
         rate: usize::MAX,
         ..pace
     };
-    let mut rx = RxHandoffFixed::new(RxConfig::new(FS), fx, free);
+    let mut rx = RxHandoffFixed::new(cfg.clone(), fx, free);
     let mut model = Model {
         hold: Vec::new(),
         marks: Vec::new(),
@@ -266,18 +267,194 @@ fn check_fx(
     reader: &mut Decoder,
     what: &str,
 ) -> (HandoffRun, Model) {
-    let run = run_handoff(
-        adc,
-        &RxConfig::new(FS),
-        &fx,
-        &pace,
-        &HandoffTiming::default(),
-        idle,
-        reader,
-    )
-    .unwrap_or_else(|e| panic!("{what}: {e:?}"));
-    let model = held_to_the_model(adc, fx, pace, &run, what);
+    check_cfg(adc, &RxConfig::new(FS), fx, pace, idle, reader, what)
+}
+
+/// [`check_fx`] with a receiver of other numbers.
+fn check_cfg(
+    adc: &[(i16, i16)],
+    cfg: &RxConfig,
+    fx: FixedRxConfig,
+    pace: HandoffConfig,
+    idle: &dyn Fn(usize) -> usize,
+    reader: &mut Decoder,
+    what: &str,
+) -> (HandoffRun, Model) {
+    let t = HandoffTiming::default();
+    let run = run_handoff(adc, cfg, &fx, &pace, &t, idle, reader)
+        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+    let model = held_to_the_model(adc, cfg, fx, pace, &run, what);
     (run, model)
+}
+
+/// `adc` with the samples at `at` replaced.
+fn with(adc: &[(i16, i16)], at: &[(usize, (i16, i16))]) -> Vec<(i16, i16)> {
+    let mut out = adc.to_vec();
+    for &(n, v) in at {
+        out[n] = v;
+    }
+    out
+}
+
+#[test]
+fn each_rail_of_each_component_counts_and_a_declaring_sample_can_give_up_its_hold() {
+    let pace = HandoffConfig::default();
+    let adc = scene(&[SLOW], 700, 900, 12.5, 4);
+    let mut reader = Decoder::new(&always, &silent);
+    let (run, _) = check(&adc, pace, &no_idle, &mut reader, "as it is");
+    let a = run.acquired.iter().flatten().next().copied().unwrap();
+    let at = a.decided_at + 150;
+    // Two samples in a row, each with one component on one rail, in every pairing; a unit
+    // inside a rail is not on it.
+    let rails = [(2047, 0), (-2048, 0), (0, 2047), (0, -2048)];
+    for first in rails {
+        for second in rails {
+            let clipped = with(&adc, &[(at, first), (at + 1, second)]);
+            let mut reader = Decoder::new(&always, &silent);
+            let what = format!("{first:?} then {second:?}");
+            let (_, model) = check(&clipped, pace, &no_idle, &mut reader, &what);
+            assert_eq!(model.holds(), [(a.decided_at, at + 1)], "{what}");
+        }
+        let near = with(&adc, &[(at, first), (at + 1, (2046, -2047))]);
+        let mut reader = Decoder::new(&always, &silent);
+        let (_, model) = check(&near, pace, &no_idle, &mut reader, "a unit inside");
+        assert_eq!(model.holds(), [(a.decided_at, adc.len())], "{first:?}");
+    }
+    // The sample before the declaration's and the declaration's own: the rail window runs
+    // whatever the hold is, so the hold raised by that sample is given up by it, and the
+    // stream goes on.
+    let d = a.decided_at;
+    let clipped = with(&adc, &[(d - 1, (2047, 0)), (d, (0, -2048))]);
+    let mut reader = Decoder::new(&always, &silent);
+    let (run, model) = check(&clipped, pace, &no_idle, &mut reader, "at the declaration");
+    assert_eq!(run.acquired[d], Some(a));
+    assert_eq!(model.holds(), []);
+    assert!(run.beats.len() > 1000);
+    // A count of 0 never gives up; a window of 64 looks back over 64 samples.
+    let never = HandoffConfig {
+        clip_count: 0,
+        ..pace
+    };
+    let burst = on_rails(&adc, at, 12);
+    let mut reader = Decoder::new(&always, &silent);
+    let (_, model) = check(&burst, never, &no_idle, &mut reader, "a count of 0");
+    assert_eq!(model.holds(), [(d, adc.len())]);
+    let wide = HandoffConfig {
+        clip_window: 64,
+        clip_count: 2,
+        ..pace
+    };
+    for (gap, down) in [(63, Some(at + 63)), (64, None)] {
+        let two = with(&adc, &[(at, (2047, 0)), (at + gap, (2047, 0))]);
+        let mut reader = Decoder::new(&always, &silent);
+        let (_, model) = check(&two, wide, &no_idle, &mut reader, "a window of 64");
+        assert_eq!(model.holds(), [(d, down.unwrap_or(adc.len()))], "{gap}");
+    }
+}
+
+#[test]
+fn a_hold_that_ends_at_a_declaration_and_a_loss_at_one_follow_the_models_order() {
+    let pace = HandoffConfig::default();
+    // The gap for which the second declaration falls on the sample a length of the first
+    // frame ends its hold at: the hold is down before the declaration looks at it, so the
+    // patience is not inherited and two samples on a rail take the new hold.
+    let mut found = None;
+    for gap in 320..480 {
+        let adc = scene(&[SLOW, SHORT], 700, gap, 12.5, 9);
+        let mut reader = Decoder::new(&always, &silent);
+        let (run, _) = check(&adc, pace, &no_idle, &mut reader, "search");
+        let acq: Vec<_> = run.acquired.iter().flatten().copied().collect();
+        if let [a, b] = acq[..] {
+            let span = b.decided_at - a.fft_start - SIGNAL_END - B;
+            if span.is_multiple_of(80) {
+                found = Some((adc, a, b, span / 80));
+                break;
+            }
+        }
+    }
+    let (adc, a, b, symbols) = found.unwrap();
+    let told = move |k: usize| {
+        (k == 0).then_some((
+            100,
+            Some(SignalVerdict {
+                data_symbols: symbols,
+                patient: true,
+            }),
+        ))
+    };
+    let clipped = on_rails(&adc, b.decided_at + 30, 2);
+    let mut reader = Decoder::new(&always, &told);
+    let (_, model) = check(&clipped, pace, &no_idle, &mut reader, "the hold ends there");
+    assert_eq!(model.holds(), [(a.decided_at, b.decided_at + 31)]);
+    // A symbol longer and the hold is up at the declaration: inherited, nothing happens.
+    let longer = move |k: usize| {
+        (k == 0).then_some((
+            100,
+            Some(SignalVerdict {
+                data_symbols: symbols + 1,
+                patient: true,
+            }),
+        ))
+    };
+    let mut reader = Decoder::new(&always, &longer);
+    let (_, model) = check(&clipped, pace, &no_idle, &mut reader, "a symbol longer");
+    assert_eq!(model.holds(), [(a.decided_at, adc.len())]);
+
+    // A reader that stops so that its stream is lost at the very sample of the next
+    // declaration: the declaration's mark, an abort. A sample earlier: the overrun's.
+    let adc = scene(&[SHORT, SHORT], 700, 600, -33.0, 8);
+    let mut reader = Decoder::new(&always, &silent);
+    let (run, _) = check(&adc, pace, &no_idle, &mut reader, "always");
+    let acq: Vec<_> = run.acquired.iter().flatten().copied().collect();
+    let (a, b) = (acq[0], acq[1]);
+    // At the antenna the reader takes sample m in the first cycle of its period.
+    assert!(b.decided_at - 512 > a.decided_at + 100);
+    let back = tick(b.decided_at) + 20;
+    let (d2, len) = (b.decided_at, adc.len());
+    // The abort leaves the hold up across both packets; the loss a sample earlier takes
+    // it down for that one sample.
+    let cases = [
+        (0, HandoffEnd::Acquisition, vec![(a.decided_at, len)]),
+        (
+            1,
+            HandoffEnd::Overrun,
+            vec![(a.decided_at, d2 - 1), (d2, len)],
+        ),
+    ];
+    for (short, mark, holds) in cases {
+        let m = d2 - 512 - 1 - short;
+        let stop = tick(m) + 1;
+        let away = move |c: usize| c <= stop || c > back;
+        let mut reader = Decoder::new(&away, &silent);
+        let (_, model) = check(&adc, pace, &no_idle, &mut reader, "lost at the declaration");
+        assert_eq!(model.marks[0], (d2 + 2, mark), "{short}");
+        assert_eq!(model.holds(), holds, "{short}");
+    }
+}
+
+#[test]
+fn the_back_off_is_the_receivers() {
+    let pace = HandoffConfig::default();
+    let cfg = RxConfig {
+        backoff_ns: 400.0,
+        ..RxConfig::new(FS)
+    };
+    let fx = FixedRxConfig::default();
+    let adc = scene(&[SHORT], 700, 111_000, 12.5, 1);
+    // With a length, and by the watchdog: the frame's last sample is 8 after the window.
+    let length = |_: usize| Some((400usize, Some(plain(SHORT_SYMBOLS))));
+    for (say, symbols) in [
+        (&length as &dyn Fn(usize) -> Say, SHORT_SYMBOLS),
+        (&silent, 1366),
+    ] {
+        let mut reader = Decoder::new(&always, say);
+        let (run, model) = check_cfg(&adc, &cfg, fx, pace, &no_idle, &mut reader, "400 ns");
+        let a = run.acquired.iter().flatten().next().copied().unwrap();
+        assert_eq!(a.fft_start, 700 + 192 - 8);
+        let end = a.fft_start + SIGNAL_END + 80 * symbols + 8;
+        assert_eq!(model.holds(), [(a.decided_at, end)]);
+        assert_eq!(model.marks, [(end + 8 - 1, HandoffEnd::Packet)]);
+    }
 }
 
 fn no_idle(_: usize) -> usize {
@@ -949,7 +1126,7 @@ fn what_cannot_be_built_is_refused() {
     let run = |pace: HandoffConfig, t: HandoffTiming, ready: &dyn Fn(usize) -> bool| {
         let mut reader = Decoder::new(ready, &silent);
         run_handoff(&adc, &cfg, &fx, &pace, &t, &no_idle, &mut reader).inspect(|run| {
-            held_to_the_model(&adc, fx, pace, run, "a variant that fits");
+            held_to_the_model(&adc, &cfg, fx, pace, run, "a variant that fits");
         })
     };
     let (pace, t) = (HandoffConfig::default(), HandoffTiming::default());
@@ -1027,6 +1204,10 @@ fn what_cannot_be_built_is_refused() {
     // A rotator of one stage would put the tick before the front's acq_valid.
     let quick = HandoffTiming { rotator: 1, ..t };
     assert_eq!(quick.tick(), 3);
+    // Two stages put it in acq_valid's own cycle, which is in time.
+    let level = HandoffTiming { rotator: 2, ..t };
+    assert_eq!((level.tick(), level.acq_latency), (4, 4));
+    assert!(run(pace, level, &always).is_ok());
     assert_eq!(run(pace, quick, &always).map(|_| ()), late);
 }
 

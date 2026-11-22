@@ -298,8 +298,9 @@ fn offset_of_sums(s1: IQ, s2: IQ, cfo_phase: i64, fx: &FixedRxConfig, table: &[I
         wide(s.1) * wide(d.0) - wide(s.0) * wide(d.1),
     );
     let den = LTF_SYMBOL_LEN as u128 * d2.unsigned_abs();
-    // |d| < 2·A < 2^Q, so the divisor is below 2^(2Q + 6): 28 bits with the default
-    // rotator, and a remainder register of 29.
+    // |d| < 2^Q (the table's rounding lets it pass 2·A by a little, never 2^Q), so the
+    // divisor is below 2^(2Q + 6): 28 bits with the default rotator, and a remainder
+    // register of 29.
     let rem_bits = 2 * fx.nco_amp_bits + 7;
     (divide(num.0, den, rem_bits), divide(num.1, den, rem_bits))
 }
@@ -412,13 +413,15 @@ impl Machine {
 ///
 /// `idle(n)` is the number of idle clocks before sample n beyond the R − 1 of
 /// `t.clocks_per_sample`. `pace` gives the start delay and the release's numbers; its
-/// `rate` is not used (a beat a clock).
+/// `rate` is not used (a beat a clock: a period of more than 8 clocks hands on more than
+/// the model does at its default rate of 8). An empty run, without ticks, for an invalid
+/// configuration.
 ///
 /// # Errors
 /// The first thing that cannot be built: a word read when the history no longer or not yet
-/// holds it, the read port used twice in a cycle, an offset not ready for its stream's
-/// first cycle, a tick before `acq_valid`, or a ready reader left without a beat that the
-/// model hands on in that period ([`ScheduleError::Late`]).
+/// holds it, an offset not ready for its stream's first cycle, a tick before `acq_valid`,
+/// or a ready reader left without a beat that the model hands on in that period
+/// ([`ScheduleError::Late`]). (The read port is used once a cycle by construction.)
 ///
 /// [`RxHandoffFixed`]: crate::rx_front_fixed::RxHandoffFixed
 pub fn run_handoff(
