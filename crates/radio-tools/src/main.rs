@@ -21,9 +21,11 @@ use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, IfftConfig};
 use radio_phy::ppdu::{build_ppdu, frame_hash, Rate};
+use radio_phy::rx_decision::{run_schedule, DecisionTiming};
 use radio_phy::rx_front::{
-    backoff_samples, RxConfig, AUTOCORR_LEN, COARSE_LEN, DECISION_LATENCY, GI_LEN, HISTORY,
-    LATCH_LAG, LTF_SYMBOL_LEN, PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET, STF_PERIOD,
+    backoff_samples, RxConfig, AUTOCORR_LEN, COARSE_LEN, DECISION_LATENCY, FINE_GUARD, FINE_LEN,
+    GI2_LEN, GI_LEN, HISTORY, LATCH_LAG, LTF_SYMBOL_LEN, PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET,
+    STF_PERIOD,
 };
 use radio_phy::rx_front_fixed::{
     cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
@@ -334,6 +336,13 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
     let det_run = rx.run;
     let search_w = GI_LEN.saturating_sub(backoff_samples(&rx));
     let decision_latency = rx.decision_latency;
+    let est_bits = fx.est_bits;
+    let tap_energy: i64 = ltf_taps(&fx).iter().map(|t| t.0 * t.0 + t.1 * t.1).sum();
+    if fx.coarse_weight_64 != 0 || fx.nco_phase_bits != fx.angle_bits + 6 {
+        return Err(io::Error::other(
+            "the decision's RTL has no coarse weight and takes the fine angle as the step",
+        ));
+    }
     if decision_latency != DECISION_LATENCY {
         return Err(io::Error::other("the default decision latency moved"));
     }
@@ -386,6 +395,13 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   localparam int SEARCH_W         = {search_w};\n\
          \x20   localparam int DECISION_LATENCY = {decision_latency};\n\
          \x20   localparam int HISTORY          = {HISTORY};\n\
+         \x20   // The decision: samples of the coarse and fine sums at EST_BITS; the fine sum's\n\
+         \x20   // FINE_LEN lag-64 products from FINE_GUARD into GI2; the taps' energy E_L.\n\
+         \x20   localparam int EST_BITS         = {est_bits};\n\
+         \x20   localparam int GI2_LEN          = {GI2_LEN};\n\
+         \x20   localparam int FINE_GUARD       = {FINE_GUARD};\n\
+         \x20   localparam int FINE_LEN         = {FINE_LEN};\n\
+         \x20   localparam int LTF_TAP_ENERGY   = {tap_energy};\n\
          \n\
          \x20   // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().",
         fx.z_bits,
@@ -1426,6 +1442,223 @@ fn search_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// The short frame of the receiver scenes (three octets at 6 Mb/s), as float samples.
+fn short_frame() -> io::Result<Vec<(f64, f64)>> {
+    let cfg = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+    Ok(build_ppdu(&[0x5a; 3], Rate::R6, 0x5d, &cfg)
+        .map_err(io::Error::other)?
+        .iter()
+        .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+        .collect())
+}
+
+/// The idle clocks the RTL testbenches put before sample n beyond R − 1: one after every
+/// fifth sample and two after every thirteenth (`tb_decide.cpp`, `feed`).
+fn tb_idle(n: usize) -> usize {
+    match n.checked_sub(1) {
+        Some(k) => usize::from(k % 5 == 4) + 2 * usize::from(k % 13 == 12),
+        None => 0,
+    }
+}
+
+/// What the decision segments exercise.
+#[derive(Debug, Default, Clone, Copy)]
+struct DecideCover {
+    samples: usize,
+    decisions: usize,
+    acquisitions: usize,
+    /// Candidates the rules reject (the sums are there, the acquisition is not).
+    rejected: usize,
+    /// Candidates whose first symbol is less than 160 samples into the stream.
+    no_coarse_window: usize,
+    /// Decisions whose grid moved T1 off the maximum.
+    grid_moved: usize,
+    /// Cycles decisions waited for the CORDIC behind a latch, with the coarse and the fine
+    /// sum.
+    coarse_waits: usize,
+    fine_waits: usize,
+    /// Decisions whose result's cycle is given.
+    timed: usize,
+}
+
+/// One decision segment (see [`decide_vectors`]).
+fn decide_segment(
+    out: &mut dyn Write,
+    label: &str,
+    x: &[(i16, i16)],
+    w: usize,
+    c: &mut DecideCover,
+) -> io::Result<()> {
+    let cfg = search_config(w);
+    let fx = FixedRxConfig::default();
+    let timing = DecisionTiming::default();
+    let runs = run_schedule(x, &cfg, &fx, &timing, &tb_idle, &|_| false)
+        .map_err(|e| io::Error::other(format!("{label} at w = {w}: {e:?}")))?;
+    let mut rx = RxFrontFixed::new(cfg, fx);
+    writeln!(out, "reset {label} {w}")?;
+    c.samples += x.len();
+    for (n, s) in x.iter().enumerate() {
+        let (acq, t) = rx.push_traced(*s);
+        writeln!(out, "{} {}", s.0, s.1)?;
+        if let Some(a) = t.accepted {
+            let run = runs.iter().find(|r| r.accepted_at == n);
+            let t1 = t.t1.map_or("-".to_string(), |v| v.to_string());
+            let sums = t.sums.map_or("- - - - -".to_string(), |m| {
+                format!(
+                    "{} {} {} {} {}",
+                    m.coarse.0, m.coarse.1, m.confirmation, m.coherence, m.energy
+                )
+            });
+            let fine = t
+                .sums
+                .and_then(|m| m.fine)
+                .map_or("- -".to_string(), |f| format!("{} {}", f.0, f.1));
+            // The result's cycle after the strobe, for a decision that runs its whole
+            // schedule and whose result falls inside the segment.
+            let done = run
+                .filter(|r| r.sums.is_some())
+                .map_or("-".to_string(), |r| r.done.to_string());
+            writeln!(out, "A {t1} {sums} {fine} {done}")?;
+            c.decisions += 1;
+            c.rejected += usize::from(t.sums.is_some_and(|m| m.fine.is_none()));
+            c.no_coarse_window += usize::from(t.t1.is_some() && t.sums.is_none());
+            c.grid_moved += usize::from(t.t1.is_some_and(|v| v != a.imax));
+            if let Some(r) = run {
+                if r.sums != t.sums {
+                    return Err(io::Error::other(format!(
+                        "{label} at w = {w}: the schedule's sums are not the model's"
+                    )));
+                }
+                c.coarse_waits += r.coarse_wait;
+                c.fine_waits += r.fine_wait;
+                c.timed += usize::from(r.sums.is_some());
+            }
+        }
+        if let Some(q) = acq {
+            if q.fft_start + GI_LEN != q.ltf_start + GI2_LEN + w {
+                return Err(io::Error::other("the acquisition's two starts disagree"));
+            }
+            writeln!(
+                out,
+                "Q {} {} {} {}",
+                q.ltf_start + GI2_LEN,
+                q.cfo_phase,
+                q.coarse_phase,
+                q.fine_phase
+            )?;
+            c.acquisitions += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Vectors for the decision's datapath (gate G3: `make -C hw decide`): the chain of the
+/// search's gate with `rx_decide` behind it and the loop closed. Per sample `<x re> <x im>`;
+/// after the sample of an acceptance a line `A <T1> <coarse re> <coarse im> <confirmation>
+/// <coherence> <energy> <fine re> <fine im> <done>` (`SampleTrace::t1` and `sums`; `-` for
+/// what the model did not make; `done` the result's cycle after the strobe by
+/// `rx_decision::run_schedule` on the testbench's clock pattern at R = 8, D = 4); after the
+/// sample an acquisition is applied at, `Q <T1> <cfo> <coarse> <fine>` (the three phase
+/// words of `FixedAcquisition`). Segments, for w = 12, 16 and 8: the four frames; two
+/// frames under a weak tone; a frame under a strong one; a tone alone (rejected candidates);
+/// frames under a tone of their own power; a stream that begins 40 samples into a frame
+/// (T1 less than 160 samples in: no decision). Under the tones the stream's own latches
+/// meet a decision's requests of the CORDIC (at w = 12 with this clock pattern).
+fn decide_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    writeln!(
+        out,
+        "# rvec decide — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# reset <label> <w>; <x re> <x im> per sample; after an acceptance's sample:"
+    )?;
+    writeln!(
+        out,
+        "# A <T1> <coarse re im> <confirmation> <coherence> <energy> <fine re im> <done>;"
+    )?;
+    writeln!(
+        out,
+        "# after an acquisition's sample: Q <T1> <cfo> <coarse> <fine> (- where the model has none)"
+    )?;
+    let frame = short_frame()?;
+    let p = mean_power(&frame);
+    let full = f64::from(ADC_FULL_SCALE);
+    // Frames under a tone of their own power: the detector keeps firing while decisions
+    // are made.
+    let under_tone = {
+        let mut rng = Rng::new(0xDEC1_0001);
+        let mut x = Vec::new();
+        for _ in 0..5 {
+            x.extend(vec![(0.0, 0.0); 400]);
+            x.extend_from_slice(&frame);
+        }
+        x.extend(vec![(0.0, 0.0); 400]);
+        let x = awgn(&add_tone(&x, p, 1.3e6, 20e6, 0.3), 25.0, p, &mut rng);
+        to_adc(&x, full * 10f64.powf(-18.0 / 20.0) / (2.0 * p).sqrt())
+    };
+    // A stream that begins 40 samples into a frame, and a whole frame after it.
+    let cut = {
+        let mut rng = Rng::new(0xDEC1_0002);
+        let mut x: Vec<(f64, f64)> = frame[40..].to_vec();
+        x.extend(vec![(0.0, 0.0); 300]);
+        x.extend_from_slice(&frame);
+        x.extend(vec![(0.0, 0.0); 300]);
+        to_adc(&awgn(&x, 25.0, p, &mut rng), 0.1 * full / p.sqrt())
+    };
+    let latch = latch_scenes(&fx)?;
+    let wanted = [
+        "frame_awgn_25dB",
+        "frame_awgn_4dB",
+        "frame_tgn_d_9dB",
+        "frame_hot_-3dBFS",
+        "two_frames_under_tone",
+        "frame_under_strong_tone",
+        "tone_10dB_from_0",
+    ];
+    let mut total = DecideCover::default();
+    for w in [12usize, 16, 8] {
+        let mut c = DecideCover::default();
+        for (label, x) in latch.iter().filter(|(l, _)| wanted.contains(&l.as_str())) {
+            decide_segment(out, label, x, w, &mut c)?;
+        }
+        decide_segment(out, "stream_cut_into_a_frame", &cut, w, &mut c)?;
+        decide_segment(out, "frames_under_own_power_tone", &under_tone, w, &mut c)?;
+        writeln!(out, "# w = {w}: {c:?}")?;
+        let missing: Vec<&str> = [
+            (c.timed, "a timed decision"),
+            (c.acquisitions, "an acquisition"),
+            (c.no_coarse_window, "a first symbol too early"),
+            (c.rejected, "a rejected candidate"),
+        ]
+        .iter()
+        .filter_map(|&(n, what)| (n == 0).then_some(what))
+        .collect();
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "decide vectors at w = {w} miss: {}",
+                missing.join("; ")
+            )));
+        }
+        total.grid_moved += c.grid_moved;
+        total.coarse_waits += c.coarse_waits;
+        total.fine_waits += c.fine_waits;
+    }
+    // The stream's own latches meet a decision's requests of the CORDIC where the
+    // testbench's idle clocks put them in one cycle: somewhere, with each sum.
+    if total.coarse_waits == 0 || total.fine_waits == 0 {
+        return Err(io::Error::other(
+            "no decision waits behind a latch with each sum",
+        ));
+    }
+    if total.grid_moved == 0 {
+        return Err(io::Error::other("no decision moves T1 off the maximum"));
+    }
+    Ok(())
+}
+
 /// Vectors for `hw/rtl/conv_encoder.sv` (gate G3: `make -C hw conv_encoder`): frames of input
 /// bits with the encoder's A and B outputs (`ConvolutionalEncoder::encode_bit`), each frame
 /// from the all-zero state. Frames: all zeros, all ones, a single one (the impulse response:
@@ -1485,9 +1718,10 @@ fn main() -> ExitCode {
         "det" => det_vectors(&mut out),
         "latch" => latch_vectors(&mut out),
         "search" => search_vectors(&mut out),
+        "decide" => decide_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

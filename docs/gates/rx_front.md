@@ -3425,3 +3425,47 @@ and the input's multiplexer); a reset longer than a clock.
 - The decision's side is driven by the testbench only; its first real user is step 3b.
 - `docs/gates/silicon_probe.md`'s figures for `rx_latch` include the CORDIC it no longer
   holds; not rerun.
+
+## 2026-11-22 · G0 · R0-08d part d, step 3b: the decision's datapath (`rx_decide`)
+
+**Block.** `hw/rtl/rx_decide.sv` with `hw/rtl/ltf_corr1.sv` (the one-symbol correlator);
+golden: `RxFrontFixed::decide` for the values (`SampleTrace::t1`, `sums`, the acquisition
+`push` returns), `rx_decision::run_schedule` for the cycles (each read, each request of the
+CORDIC, the result's cycle). Gate: `make -C hw decide` on the chain of the search's gate
+with the decision behind it and the loop closed: `det_a.clear` and `rx_search.acquired` come
+from the decision, no longer from the vectors.
+
+**G0: what it holds**
+- The history: 512 words of 2 × 13 bits through `ram_1w2r`, y(n) at address n mod 512,
+  written in cycle Y(n).
+- One complex multiplier with two accumulators (the coarse and the fine sum: products of
+  samples narrowed to E = 12 bits, half to even, 34-bit sums as the CORDIC takes them).
+- A second `nco` (the phase from 0 at each decision, the step the coarse angle's) and the
+  one-symbol correlator: 64 taps, the Hermitian fold of `ltf_corr` without the T1 + T2
+  sum, 32 multipliers over F = 4 clocks, the full sum out (Z + T + 7 = 27 bits).
+- The first symbol's w correlations kept for the second's (w × 2 × 27 bits); three squared
+  magnitudes a pair (54 bits) into the confirmation (59 bits) and the coherence (60); the
+  energy of the 128 rotated samples (31 bits); the two rules as 2·x ≥ E_L·energy, E_L the
+  taps' energy from the generated package.
+- The CFO: coarse = −(angle << 2); the fine angle is the lag-64 step itself; the residual
+  is the difference's low 16 bits, signed; the word handed on is coarse + residual (the
+  coarse weight is 0, ADR 0007: no multiplier).
+
+**G0: the cycles** are the schedule's table (`rx_decision`), with nothing added: the grid
+in the strobe's cycle and the w after it, T1 registered at w + 2, the coarse sum's reads
+from w + 3 on both ports, its request at c + 99, the fine sum behind it on port 1, the
+rotation from g + 20 on port 0 with three cycles of wait after each sample that completes a
+correlated window, the result registered 8·w + 268 cycles after the strobe when nothing
+waits. The gate holds the result's cycle of every full decision to `run_schedule`'s, with
+the testbench's own clock pattern given to the model.
+
+**G0: the result.** Kept until sample n + L of the detector's timeline (the history's
+write count equal to `acc_n` + L) and given in cycle Y(n + L) + 3, the cycle `det_a` takes
+its clear: `dec_valid` for every decision, `acquired` with T1 (modulo 512) and the three
+CFO words. A result not registered by then stops the simulation.
+- **No decision** when the grid's T1 is less than 160 samples into the stream
+  (`acc_lapped` = 0 and T1 < 160): the model's `checked_sub`. The model's two other tests
+  are always true at an acceptance (the schedule's finding 3).
+- A rejected candidate runs its whole schedule (the fine sum is made beside the rotation,
+  before the rules are known); the model does not make it, and the gate does not compare
+  it then.
