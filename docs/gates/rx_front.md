@@ -3738,3 +3738,250 @@ worst paths. Not run: the open ASIC flow, where `ltf_corr` and `det_a` were the 
 - The second history (the ADC's samples, ADR 0008 decision 1), the hold and the replay:
   the hand-off's RTL, with its own schedule.
 - `ltf_corr1`'s tight path; the open ASIC flow for the search and the decision.
+
+## 2026-11-22 · G0 + G3 · R0-08d part d, step 4a: the front's top level (`rx_front`)
+
+**Block.** `hw/rtl/rx_front.sv`: the front up to the acquisition as one synthesisable
+module, dc_block → det_a → rx_latch → nco → ltf_corr → rx_search → rx_decide, the CORDIC
+through `cordic_arb`, the loop closed. Golden: `RxFrontFixed::push` (the
+`FixedAcquisition` it returns). Gates: `make -C hw front` at the pins, and `make -C hw
+decide`, whose wrapper `hw/tb/decide_chain.sv` no longer wires the chain itself: it
+instantiates `rx_front` and brings the probes out of it. There is one wiring, and both
+gates run on it. The hand-off (ADR 0008, decision 1: the second history, the DC estimate,
+the replay, the hold) is step 4b and is not here.
+
+**G0: the pins**
+- In: 12-bit I and Q with a valid (ADR 0008, decision 6), a sample in R clocks, R at
+  least 8 (`ltf_corr`) and D·R at least 24 (`rx_latch`). No ready: the front never stalls.
+- Out: `acq_valid` for one cycle: the cycle after the third clock edge from the edge that
+  takes the sample the acquisition is applied at (the model's `decided_at`; the cycle
+  `det_a` takes its clear). In that cycle `acq_t1` and `acq_fft` (T1 and the first sample
+  of its FFT window, GI − W before it, both modulo 512: the model's `ltf_start` + 32 and
+  `fft_start`) and the three phase words `acq_cfo`, `acq_coarse`, `acq_fine`.
+- **The data pins are valid in that cycle only.** They are `rx_decide`'s working
+  registers: the next candidate's decision moves them, acquisition or not, and they have
+  no reset value. Whoever uses them latches them at `acq_valid`. (The first text of this
+  entry and of the module's header said "held until the next"; the review showed 821
+  changes of `acq_t1` with `acq_valid` low on the gate's own stream.)
+- Samples count from reset, the first is 0. A 512-deep memory written with the input at
+  the sample's number modulo 512 (the hand-off's history) holds the window's first sample
+  at address `acq_fft`. With L = 64 an acquisition is applied 189 + w + L to 189 + 2w + L
+  samples after its T1: the maximum's position is at most w before T1 and the acceptance
+  189 + 2w after the maximum (the review's derivation from the model's code; `rvec front`
+  refuses to write the vectors if an acquisition is outside it, and both ends are met at
+  w = 8 and 4, the lower one at w = 12 and 16). So the window's first sample is at most 285
+  samples old, its age is (the memory's write count − `acq_fft`) modulo 512, and 227
+  samples remain before it is overwritten. The bound is L = 64's.
+- Not at the pins, because nothing takes them: a decision that is not an acquisition
+  (`dec_valid`), whether a search is open, the opening event's sample (`acc_opened`;
+  `FixedAcquisition::detected_at` is not compared anywhere). The model of the hand-off
+  (`RxHandoffFixed`) takes `fft_start`, `cfo_phase` and the sample of the declaration,
+  nothing else of the front (the review's reading).
+
+**Order of work.** The vectors and the testbench first. The gate was then run on a top
+level complete but for the window's start (`acq_fft` = `acq_t1`): 69 mismatches at
+W = 12, all "FFT window's start", every other word and every sample of an acquisition
+right. With the subtraction in, the gate passed. The wiring itself was copied from the
+wrapper the gate `decide` had passed on, so it was never seen to fail but by mutation
+(below). The vectors and the testbench's resets were then changed after the independent
+review; the numbers below are the last ones.
+
+**Vectors** (`rvec front`, `hw/vectors/front.txt`): the ADC samples, and after the sample
+an acquisition is applied at its `FixedAcquisition` (the two starts as full numbers).
+Segments, each one run of the model from reset with nothing reset inside it:
+- *long_stream*, per w: short frames (560 samples) over a noise floor at −46 dBFS, each at
+  its own level (−40 to −4 dBFS; every seventh 6 dB over full scale), CFO within ±235 kHz
+  and phase; every sixth through a TGn D channel, the others delayed by a fraction of a
+  sample; from a frame's last sample to the next one's first a SIFS (320 samples), 60 to
+  120 samples, or 150 to 900; a tone burst in some gaps, a tone of the frame's own power
+  over some frames. 76 frames and 69 480 samples at w = 12 (the last acquisition at sample
+  69 043, past 2^16: 134 laps of the 512-deep counters); 20 frames at w = 16, 8, 4.
+- *window_before_the_wrap*, for w below 16: a frame placed by its lead (found by search)
+  so that T1 modulo 512 is less than GI − w and the window's address borrows.
+- *two_paths* (the review's construction): six frames with a second path w or w + 1
+  samples behind the first and 0.94 to 0.99 of it, chosen by seed so that an acquisition's
+  T1 is the grid's last position (the maximum's and w more).
+`rvec` refuses to write the file without, per w: an acquisition for half the long
+stream's frames, an acquisition less than 900 samples after another in it, a window
+before the wrap (w below 16), a T1 at the grid's last position, and at w = 12 an
+acquisition past sample 2^16. It also refuses when an acquisition is not returned at its
+own `decided_at`, when its two starts disagree, or when it is outside the bound above.
+| w | Samples | Long stream: frames, acquisitions | Less than 900 samples after another (870 to 899: after a SIFS) | Other segments' acquisitions | Window a lap before T1 | Samples from T1 to the acquisition's sample |
+|---|---|---|---|---|---|---|
+| 12 | 78 810 | 76, 74 | 41 (17) | 2 + 6 | 1 | 265 to 275 |
+| 16 | 25 709 | 20, 19 | 12 (5) | 6 | — | 269 to 281 |
+| 8 | 28 062 | 20, 20 | 12 (4) | 2 + 6 | 1 | 261 to 269 |
+| 4 | 28 672 | 20, 19 | 9 (4) | 2 + 6 | 2 | 257 to 261 |
+
+(Whether each acquisition of the long stream is a frame's own, and which frames are missed
+and why, was not looked into: this gate holds the RTL to the model, not the model to the
+frames.)
+
+**Evidence** (commit of this entry; `make -C hw front`: six builds, eighteen runs, and
+`make -C hw decide` on the same top level: eighteen runs as before, 0 mismatches in each)
+| Build | Runs | Segments | Samples | Acquisitions | Window a lap before T1 | Resets in flight | Mismatches |
+|---|---|---|---|---|---|---|---|
+| D = 4, W = 12 | R = 8, 11, 16 | 3 | 78 810 | 82 | 1 | 12 | 0 |
+| D = 4, W = 16 | R = 8, 11, 16 | 2 | 25 709 | 25 | — | 8 | 0 |
+| D = 4, W = 8 | R = 8, 11, 16 | 3 | 28 062 | 28 | 1 | 12 | 0 |
+| D = 4, W = 4 | R = 8, 11, 16 | 3 | 28 672 | 27 | 2 | 12 | 0 |
+| D = 3, W = 12 | R = 8, 11, 16 | 3 | 78 810 | 82 | 1 | 12 | 0 |
+| D = 5, W = 12 | R = 8, 11, 16 | 3 | 78 810 | 82 | 1 | 12 | 0 |
+
+- Compared: `acq_valid` at exactly the samples the model applies an acquisition at, in
+  its cycle, and in no other; in that cycle the window's start, T1 and the three phase
+  words; the count of acquisitions of each segment. The data pins are not looked at in
+  any other cycle.
+- Before each segment four one-clock resets on the way to its first acquisition: the feed
+  stopped 1 + 37·k mod 190 samples before the acquisition's sample (k counts the resets of
+  the run: 1, 38, 75, 112, 149, 186, 33, 70, 107, 144, 181, 28) and 0 to 7 clocks on. Less
+  than 64 samples before, the decision is in flight; more, the search or the detection.
+  After each, 520 samples of zeros, more than a lap of the history, in which no
+  acquisition may come out.
+- Idle clocks and garbage on idle inputs as in the other chains; registers without a reset
+  and the memories from random values.
+- `decide` after the change of its wrapper: the run lines are those of the entry above,
+  number for number (74 / 66 / 85 / 84 acceptances, 19 / 20 / 17 / 14 acquisitions).
+
+**Mutations** (each built from scratch in a private copy of `hw/`, D = 4, R = 8, against
+`front` at W = 12 and W = 4, `decide` at W = 12, and `front` at W = 12 again with every
+register starting from zero instead of a random value, which leaves the resets in flight
+as the only ones that matter; mismatches, the first kind in brackets; "stopped": a
+simulation check of the RTL): 32, of which 30 fail in at least one run. Logs
+`target/handoff/front_mut.log` and `front_mut2.log` (not committed), runner
+`mutate_front.py` beside them. The first 24 are of `rx_front.sv`'s wiring, the next five
+remove one reset inside `rx_decide` or `rx_search`, the last three tie a block's reset
+off in `rx_front.sv`.
+| Mutation | front, W = 12 | front, W = 4 | decide, W = 12 | front, W = 12, from zero |
+|---|---|---|---|---|
+| the detector not cleared | **passes** | **passes** | 135 (event) | **passes** |
+| the detector cleared at every decision | **passes** | **passes** | 1357 (event) | **passes** |
+| the search not told | **passes** | **passes** | 98 (acceptance the model does not make, at sample) | **passes** |
+| the search told at every decision | 1 (acquisitions in the segment) | 3 (acquisitions in the segment) | 82 (no dec_valid for the acceptance at sample) | 1 (acquisitions in the segment) |
+| the history of the delayed stream | 85 (acquisition the model does not make, at sample) | 30 (acquisition the model does not make, at sample) | 273 (dec_valid at a sample that is no acceptance + L) | 85 (acquisition the model does not make, at sample) |
+| window's start: T1 itself | 82 (FFT window's start) | 27 (FFT window's start) | **passes** | 82 (FFT window's start) |
+| window's start: GI - W after T1 | 82 (FFT window's start) | 27 (FFT window's start) | **passes** | 82 (FFT window's start) |
+| window's start: a sample early | 82 (FFT window's start) | 27 (FFT window's start) | **passes** | 82 (FFT window's start) |
+| window's start: the back-off, not GI - W | 82 (FFT window's start) | 27 (FFT window's start) | **passes** | 82 (FFT window's start) |
+| acq_valid at every decision | 72 (acquisition the model does not make, at sample) | 34 (acquisition the model does not make, at sample) | 51 (acquired) | 72 (acquisition the model does not make, at sample) |
+| the search at W - 1 | 79 (acquisition the model does not make, at sample) | 30 (acquisition the model does not make, at sample) | 405 (acceptance the model does not make, at sample) | 79 (acquisition the model does not make, at sample) |
+| the decision at W - 1 | 5 (FFT window's start) | 5 (FFT window's start) | 464 (coarse grant, cycles after the strobe) | 5 (FFT window's start) |
+| the latch at D + 1 | **passes** | **passes** | 162 (acceptance the model does not make, at sample) | **passes** |
+| the CORDIC's two answers swapped | stopped: the latch of sample tag 36 is not back before its emission | stopped: the latch of sample tag 35 is not back before its emission | stopped: the latch of sample tag 164 is not back before its emission | stopped: the latch of sample tag 36 is not back before its emission |
+| the search correlator's I and Q swapped | 9 (acquisition the model does not make, at sample) | 5 (acquisitions in the segment) | 525 (acceptance the model does not make, at sample) | 9 (acquisition the model does not make, at sample) |
+| the search's event not delayed | **passes** | **passes** | 29 (acceptance the model does not make, at sample) | **passes** |
+| the search's samples counted at the NCO's output | stopped: a correlator output without its sample's tick | stopped: a correlator output without its sample's tick | stopped: a correlator output without its sample's tick | stopped: a correlator output without its sample's tick |
+| the NCO's step zero | 57 (acquisition the model does not make, at sample) | 16 (acquisition the model does not make, at sample) | 323 (acceptance the model does not make, at sample) | 57 (acquisition the model does not make, at sample) |
+| the latch's event from fire | 3 (acquisition the model does not make, at sample) | **passes** | 125 (coarse grant, cycles after the strobe) | 3 (acquisition the model does not make, at sample) |
+| the latch's C with I and Q swapped | 41 (acquisition the model does not make, at sample) | 5 (acquisition the model does not make, at sample) | 602 (acceptance the model does not make, at sample) | 41 (acquisition the model does not make, at sample) |
+| the detector's I and Q swapped | 53 (acquisition the model does not make, at sample) | 14 (acquisition the model does not make, at sample) | 362 (acceptance the model does not make, at sample) | 53 (acquisition the model does not make, at sample) |
+| cfo and coarse words swapped | 164 (cfo) | 54 (cfo) | 38 (cfo) | 164 (cfo) |
+| the decision's angle valid from the latch's | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| the decision's ring address stuck | stopped: read and write of address 159 in the same cycle | stopped: read and write of address 465 in the same cycle | stopped: read and write of address 3 in the same cycle | stopped: read and write of address 288 in the same cycle |
+| reset: the decision's busy | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample |
+| reset: the decision's delivery (q1, q2, dec_valid) | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | **passes** |
+| reset: the search's open | **passes** | **passes** | 43 (acceptance the model does not make, at sample) | **passes** |
+| reset: the search's busy | **passes** | **passes** | **passes** | **passes** |
+| reset: the search's best_v | **passes** | **passes** | **passes** | **passes** |
+| no reset: the decision | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: acquired without a decision in flight |
+| no reset: the search | stopped: acquired without a decision in flight | stopped: acquired without a decision in flight | stopped: a correlator output without its sample's tick | stopped: a sample without its correlator output |
+| no reset: the decision and the search | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: the result is not registered at its sample | stopped: a sample without its correlator output |
+
+What the table says:
+- **Two pass everything: the search's `busy` and `best_v` without their reset.** Not seen
+  by either gate, from random values or from zero. I do not call them equivalent.
+- **The gate at the pins alone lets five of the wiring's 24 pass in both its builds**: the
+  detector not cleared, the detector cleared at every decision, the search not told, the
+  search's event not delayed, the latch at D + 1; a sixth, the latch's event from `fire`,
+  passes at W = 4 and fails at W = 12 (3). The
+  first four need a detector still firing when a decision is applied, which the long
+  stream does not give; `decide` has the scenes made for it. (On the vectors before the
+  review "cleared at every decision" failed `front` with 2 mismatches; on these it does
+  not.) The latch's delay is not in the model at all: an acquisition does not depend on D,
+  so no gate at the pins can see it.
+- **`decide` lets the four mutants of the window's start pass**: it does not look at
+  `acq_fft`. They are the gate `front`'s (82 and 27 mismatches).
+- So the top level needs both gates, and both are in `make -C hw`.
+- **The decision at W − 1** passed `front` before the review; the two-path segment now
+  fails it (5 mismatches in each build).
+- **The resets.** Every mutant that lets a decision live through a reset is stopped by the
+  RTL's own simulation checks (`rx_decide`: the result not registered at its sample;
+  `rx_search`: acquired without a decision in flight), before the testbench's own check
+  ("an acquisition after a reset in flight") has anything to say. **That check of the
+  testbench has not been seen to fail.** The delivery's flags without their reset (`q1`,
+  `q2`, `dec_valid`) pass from zero and are stopped only from random values, which is the
+  power-on reset, not one in flight. The search's `open` without its reset is `decide`'s
+  alone (43).
+
+**Independent review** (a fresh agent on the uncommitted tree, given the code, the ADRs
+and the journal, not the conclusions). It found no input on which the pins differ from
+the model: the gate reproduced; three further seeds of the long stream (one with a DC
+offset), 40 back-to-back truncated preambles and two-path frames at W = 12, 16, 8, 4 and
+1, R = 8 and 11: 663 632 samples, 721 acquisitions, 0 mismatches (its vectors are not in
+the repo). What it found, each corrected here unless said:
+1. **A false statement of mine**: the data pins "held until the next" acquisition. They
+   move with the next candidate's decision (821 changes of `acq_t1` and 137 of each phase
+   word with `acq_valid` low on the gate's stream; the soonest 248 samples after an
+   acquisition on its streams). The contract is now "valid in the cycle of `acq_valid`,
+   latch them"; nothing was registered. Its bound "stable for 214 + 2·W samples" is not
+   in the contract and not gated.
+2. "At most 287 samples after T1" was observed, not shown. Its derivation from the model's
+   code gives 189 + w + L to 189 + 2w + L; `rvec` now refuses an acquisition outside it.
+3. "Three edges after": said precisely (the cycle after the third edge; a register takes
+   it at the fourth).
+4. **The resets in flight were not what the testbench said**: 0, 7, 14, 21 samples before
+   the acquisition only, never in the search, and the first of every run after the
+   acquisition had been delivered (counted as in flight all the same). Now 1 to 190
+   samples before, never 0.
+5. The silence after a reset could not fail: no sample was fed, and a delivery needs one.
+   Now 520 samples of zeros are fed. Its reset mutants are in the table; the check is
+   still unproven (above).
+6. The decision at W − 1 need not give the same acquisitions: the model takes the latest
+   of w + 1 positions keeping 7/8 of the maximum, and a second path w samples behind and
+   nearly as strong puts T1 at the last. Its construction is the segment *two_paths*.
+7. The stream's gaps were 40 samples longer than described (the channel's tail), so no
+   pair after a SIFS was among the "less than 900 samples" ones. The gaps are now from a
+   frame's last sample to the next one's first.
+8. The journal's numbers matched the logs.
+9. Nothing against the RTL conventions. Noted: `acq_valid` and `acq_fft` are
+   combinational at the pins (an AND of two registers, a 9-bit subtraction); the input's
+   contract (R at least 8, D·R at least 24) is checked only by the blocks' simulation
+   checks.
+10. For the hand-off the pins suffice (G0 above).
+Not adopted: its back-to-back preambles, on which "the search not told" fails at the pins
+(31 acquisitions against 32). Not checked by the review: D = 3 and 5 and R = 16 in its own
+runs, synthesis, the ADRs in full, L other than 64.
+
+**Timing probe** (Vivado 2024.2, out of context, KV260 part, 6.25 ns,
+`tools/syn/ooc_probe.tcl` as committed, no input delays; `rx_front` whole, before the
+review's changes, which touched its comments only; excerpt appended to
+`docs/gates/reports/rx_front_timing_ooc.txt`): **−0.38 ns, 29 failing endpoints.** 6561
+LUTs, 8622 registers, 124 DSP blocks, 3 block RAMs. The three worst paths end in
+`det_a`'s `rhs3` register (−0.379, −0.349, −0.348 ns): the block that misses alone by
+0.64 ns and is to be made serial after R0-08c's retune (ADR 0008, decision 4). The report
+lists no failing path outside `det_a`; I did not list all 29 endpoints. The front does
+not meet 160 MHz on this part until `det_a` is redone. Not run: the open ASIC flow on the
+whole front (area against ADR 0008's 2.5 mm²).
+
+**Not covered**
+- At the pins: the six mutants above; they rest on `decide`. The two reset mutants that
+  pass everything. The testbench's silence check, never seen to fail.
+- A reset within three clocks of a delivery; a reset longer than a clock; resets other
+  than before a segment's first acquisition.
+- The data pins outside the cycle of `acq_valid` (by contract, nothing).
+- `acq_fft` at W = 16 is T1 itself; the borrow is exercised once or twice per w below.
+- A sample count past 2^16 at w other than 12; streams longer than 69 480 samples.
+- R below 8; clock patterns other than the testbench's; `L` other than 64 (the bound on
+  the window's age is L = 64's).
+- The enable of the correlators' arithmetic while no search is open (ADR 0008, decision 4;
+  the journal's entry on the folded `ltf_corr` left it to the top level): not built. It is
+  a power measure, and there is no power figure to hold it to yet.
+- `FixedAcquisition::detected_at`: not at the pins, not compared.
+
+**Open (for step 4b, the hand-off)**
+- The hand-off's own schedule in clocks first, as the decision's was (`rx_decision`): the
+  DC estimate's 128 reads, the replay, when `signal()` may arrive.
+- It latches `acq_fft` and `acq_cfo` at `acq_valid`, and its history must count the same
+  `in_valid` from the same reset as the front.
+- `det_a` serial after R0-08c, and with it this top level through timing; then the open
+  ASIC flow on the whole front.
