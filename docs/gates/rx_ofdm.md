@@ -1280,5 +1280,6 @@ again on the final code with the same rows.
 
 **Open**
 - The second history and the replay in `RxFrontFixed`; the gain control's hold; then RTL.
-- `rxagc` on the word start with its reruns.
+- `rxagc` on the word start with its reruns: done 2026-11-21, `rx_front.md` ("`rxagc`'s other
+  reports on the word start"): 26 integer cells of 3674 move, by one or two frames.
 - Narrowing the tracker (R 6, M 8, K 8, V 4 lose nothing here either) before its RTL.

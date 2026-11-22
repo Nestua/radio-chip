@@ -418,175 +418,240 @@ impl FastAttackAgc {
         dc: Option<&GainDc>,
         holds: &[(usize, usize)],
     ) -> AgcTrace {
-        enum State {
-            /// Peak detection and power measurement; `since` is the first sample at the
-            /// present gain (or of the state), `look` the first sample the peak detectors
-            /// examine (they are held in reset after a change), `sum` the power so far.
-            Seeking { since: usize, look: usize, sum: f64 },
-            /// Locked from `since`, aiming at `level` (power); `stands` is the last power
-            /// comparison (1 stronger, −1 lost, 0 neither), `stood` the samples it has stood.
-            Locked {
-                since: usize,
-                level: f64,
-                stands: i64,
-                stood: usize,
-            },
-        }
-        let mut gain = self.max_gain_db;
+        let mut run = self.start(dc.copied());
         let mut t = AgcTrace {
             gain_db: Vec::with_capacity(x.len()),
-            changes: vec![(0, gain)],
+            changes: Vec::new(),
             locks: Vec::new(),
             unlocks: Vec::new(),
         };
-        let mut state = State::Seeking {
-            since: 0,
-            look: 0,
-            sum: 0.0,
-        };
-        // Power after the gain, per sample, for the locked state's window.
-        let mut powers: Vec<f64> = Vec::with_capacity(x.len());
-        let mut offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
+        if x.is_empty() {
+            t.changes.push((0, self.max_gain_db));
+        }
         let held_at = |n: usize| holds.iter().any(|h| h.0 <= n && n < h.1);
         for (n, s) in x.iter().enumerate() {
-            let held = held_at(n);
-            if n > 0 && !held && held_at(n - 1) {
-                // The release: decided at the end of the last held sample.
-                if matches!(state, State::Locked { .. }) {
-                    t.unlocks.push(n - 1);
-                }
-                if self.unlock_to_max && gain != self.max_gain_db {
-                    gain = self.max_gain_db;
-                    offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
-                    t.changes.push((n, gain));
-                }
-                state = State::Seeking {
-                    since: n,
-                    look: n,
-                    sum: 0.0,
-                };
+            let step = run.push(*s, held_at(n));
+            if t.gain_db.last() != Some(&step.gain_db) {
+                t.changes.push((n, step.gain_db));
             }
-            t.gain_db.push(gain);
-            let g = 10f64.powf(gain / 20.0);
-            // A sample that is not a number is no signal.
-            let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
-            let (re, im) = (finite(g * s.0 + offset.0), finite(g * s.1 + offset.1));
-            let peak = re.abs().max(im.abs());
-            let power = re * re + im * im;
-            powers.push(power);
-            if held {
-                continue;
-            }
-            let mut next = gain;
-            match &mut state {
-                State::Seeking { since, look, sum } => {
-                    let step = if n < *look {
-                        None
-                    } else if peak >= self.both_peak {
-                        Some(self.step_both)
-                    } else if peak >= self.large_peak {
-                        Some(self.step_large)
-                    } else if peak >= self.small_peak {
-                        Some(self.step_small)
-                    } else {
-                        None
-                    };
-                    let measure_from = *since + self.settling_delay.max(self.energy_detect);
-                    if let Some(step) = step {
-                        // An overload at any point of the search starts it again.
-                        next = (gain - step).max(self.min_gain_db);
-                        state = State::Seeking {
-                            since: n + 1,
-                            look: n + 1 + self.peak_wait,
-                            sum: 0.0,
-                        };
-                    } else if n >= measure_from {
-                        *sum += power;
-                        if n + 1 == measure_from + self.power_samples.max(1) {
-                            let mean = *sum / self.power_samples.max(1) as f64;
-                            let change = (self.lock_dbfs - 10.0 * mean.log10()).round();
-                            // Not `clamp`: it panics on a range given the wrong way round.
-                            next = (gain + change).min(self.max_gain_db).max(self.min_gain_db);
-                            t.locks.push(n + 1);
-                            state = State::Locked {
-                                since: n + 1,
-                                level: mean * 10f64.powf((next - gain) / 10.0),
-                                stands: 0,
-                                stood: 0,
-                            };
-                        }
-                    }
-                }
-                State::Locked {
-                    since,
-                    level,
-                    stands,
-                    stood,
-                } => {
-                    let w = self.lock_window.max(1);
-                    let mut unlock = self.unlock_on_overload && peak >= self.large_peak;
-                    // The power value updates once per window, counted from the lock; the
-                    // comparison stands until the next update.
-                    if (n + 1 - *since).is_multiple_of(w) {
-                        let mean = powers[n + 1 - w..=n].iter().sum::<f64>() / w as f64;
-                        // A lock on nothing (level 0) is left by any power, never by less.
-                        let dir = if mean > 0.0
-                            && mean >= *level * 10f64.powf(self.stronger_db / 10.0)
-                        {
-                            1
-                        } else if *level > 0.0 && mean <= *level * 10f64.powf(-self.lost_db / 10.0)
-                        {
-                            -1
-                        } else {
-                            0
-                        };
-                        if dir != *stands {
-                            (*stands, *stood) = (dir, 0);
-                        }
-                    }
-                    if *stands != 0 {
-                        // Samples the comparison has stood, the update's own included.
-                        *stood += 1;
-                        unlock |= *stood >= self.exit_count.max(1);
-                    }
-                    // The gain does not change while locked: `gain` is the lock's.
-                    let kept = if self.lock_hold_at_max || gain < self.max_gain_db {
-                        self.lock_hold
-                    } else {
-                        0
-                    };
-                    if unlock && n >= since.saturating_add(kept) {
-                        t.unlocks.push(n);
-                        if self.unlock_to_max {
-                            next = self.max_gain_db;
-                        }
-                        state = State::Seeking {
-                            since: n + 1,
-                            look: n + 1,
-                            sum: 0.0,
-                        };
-                    }
-                }
-            }
-            if next != gain {
-                gain = next;
-                offset = dc.map_or((0.0, 0.0), |d| d.at(gain));
-                t.changes.push((n + 1, gain));
-            }
+            t.gain_db.push(step.gain_db);
+            // A lock decided at the last sample has no sample to act on.
+            t.locks.extend(step.locked.filter(|l| *l < x.len()));
+            t.unlocks.extend(step.unlocked);
         }
         // A hold that ends with the stream leaves its lock at the last sample, as a free
         // control's unlock there is recorded.
-        if !x.is_empty()
-            && held_at(x.len() - 1)
-            && !held_at(x.len())
-            && matches!(state, State::Locked { .. })
-        {
+        if !x.is_empty() && held_at(x.len() - 1) && !held_at(x.len()) && run.locked() {
             t.unlocks.push(x.len() - 1);
         }
-        // A change decided at the last sample has no sample to act on.
-        t.changes.retain(|c| c.0 < x.len().max(1));
-        t.locks.retain(|l| *l < x.len());
         t
+    }
+
+    /// The control at the start of a stream, to be stepped a sample at a time
+    /// ([`AgcRun::push`]): in peak detection at the maximum gain. `dc` as in
+    /// [`FastAttackAgc::run_dc`].
+    pub fn start(&self, dc: Option<GainDc>) -> AgcRun {
+        AgcRun {
+            agc: *self,
+            dc,
+            n: 0,
+            gain: self.max_gain_db,
+            offset: dc.map_or((0.0, 0.0), |d| d.at(self.max_gain_db)),
+            state: AgcState::Seeking {
+                since: 0,
+                look: 0,
+                sum: 0.0,
+            },
+            powers: Vec::new(),
+            was_held: false,
+        }
+    }
+}
+
+enum AgcState {
+    /// Peak detection and power measurement; `since` is the first sample at the present
+    /// gain (or of the state), `look` the first sample the peak detectors examine (they are
+    /// held in reset after a change), `sum` the power so far.
+    Seeking { since: usize, look: usize, sum: f64 },
+    /// Locked from `since`, aiming at `level` (power); `stands` is the last power
+    /// comparison (1 stronger, −1 lost, 0 neither), `stood` the samples it has stood.
+    Locked {
+        since: usize,
+        level: f64,
+        stands: i64,
+        stood: usize,
+    },
+}
+
+/// A [`FastAttackAgc`] in the middle of a stream ([`FastAttackAgc::start`]): what a closed
+/// loop steps, the hold of each sample decided from the samples before it.
+pub struct AgcRun {
+    agc: FastAttackAgc,
+    dc: Option<GainDc>,
+    /// Samples taken.
+    n: usize,
+    gain: f64,
+    offset: Sample,
+    state: AgcState,
+    /// Power after the gain, per sample, for the locked state's window.
+    powers: Vec<f64>,
+    was_held: bool,
+}
+
+/// What [`AgcRun::push`] did with one sample.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AgcStep {
+    /// The gain applied to this sample, dB.
+    pub gain_db: f64,
+    /// A lock was taken at this sample: the first sample of the locked stretch (the next).
+    pub locked: Option<usize>,
+    /// The lock was left: at this sample, or by a hold's release at the one before.
+    pub unlocked: Option<usize>,
+}
+
+impl AgcRun {
+    /// Whether the control is locked after the samples taken so far.
+    pub fn locked(&self) -> bool {
+        matches!(self.state, AgcState::Locked { .. })
+    }
+
+    /// The next sample of the stream (the signal before the gain). `held`: the gain is
+    /// held from outside over this sample, as inside a window of
+    /// [`FastAttackAgc::run_held`]; the first sample not held after a held one is the
+    /// release. A decision at sample n acts from n + 1.
+    pub fn push(&mut self, s: Sample, held: bool) -> AgcStep {
+        let agc = self.agc;
+        let n = self.n;
+        let mut out = AgcStep {
+            gain_db: self.gain,
+            locked: None,
+            unlocked: None,
+        };
+        if !held && self.was_held {
+            // The release: decided at the end of the last held sample.
+            if self.locked() {
+                out.unlocked = Some(n.saturating_sub(1));
+            }
+            if agc.unlock_to_max && self.gain != agc.max_gain_db {
+                self.gain = agc.max_gain_db;
+                self.offset = self.dc.map_or((0.0, 0.0), |d| d.at(self.gain));
+            }
+            self.state = AgcState::Seeking {
+                since: n,
+                look: n,
+                sum: 0.0,
+            };
+        }
+        self.was_held = held;
+        self.n += 1;
+        let gain = self.gain;
+        out.gain_db = gain;
+        let g = 10f64.powf(gain / 20.0);
+        // A sample that is not a number is no signal.
+        let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
+        let (re, im) = (
+            finite(g * s.0 + self.offset.0),
+            finite(g * s.1 + self.offset.1),
+        );
+        let peak = re.abs().max(im.abs());
+        let power = re * re + im * im;
+        self.powers.push(power);
+        if held {
+            return out;
+        }
+        let mut next = gain;
+        match &mut self.state {
+            AgcState::Seeking { since, look, sum } => {
+                let step = if n < *look {
+                    None
+                } else if peak >= agc.both_peak {
+                    Some(agc.step_both)
+                } else if peak >= agc.large_peak {
+                    Some(agc.step_large)
+                } else if peak >= agc.small_peak {
+                    Some(agc.step_small)
+                } else {
+                    None
+                };
+                let measure_from = *since + agc.settling_delay.max(agc.energy_detect);
+                if let Some(step) = step {
+                    // An overload at any point of the search starts it again.
+                    next = (gain - step).max(agc.min_gain_db);
+                    self.state = AgcState::Seeking {
+                        since: n + 1,
+                        look: n + 1 + agc.peak_wait,
+                        sum: 0.0,
+                    };
+                } else if n >= measure_from {
+                    *sum += power;
+                    if n + 1 == measure_from + agc.power_samples.max(1) {
+                        let mean = *sum / agc.power_samples.max(1) as f64;
+                        let change = (agc.lock_dbfs - 10.0 * mean.log10()).round();
+                        // Not `clamp`: it panics on a range given the wrong way round.
+                        next = (gain + change).min(agc.max_gain_db).max(agc.min_gain_db);
+                        out.locked = Some(n + 1);
+                        self.state = AgcState::Locked {
+                            since: n + 1,
+                            level: mean * 10f64.powf((next - gain) / 10.0),
+                            stands: 0,
+                            stood: 0,
+                        };
+                    }
+                }
+            }
+            AgcState::Locked {
+                since,
+                level,
+                stands,
+                stood,
+            } => {
+                let w = agc.lock_window.max(1);
+                let mut unlock = agc.unlock_on_overload && peak >= agc.large_peak;
+                // The power value updates once per window, counted from the lock; the
+                // comparison stands until the next update.
+                if (n + 1 - *since).is_multiple_of(w) {
+                    let mean = self.powers[n + 1 - w..=n].iter().sum::<f64>() / w as f64;
+                    // A lock on nothing (level 0) is left by any power, never by less.
+                    let dir = if mean > 0.0 && mean >= *level * 10f64.powf(agc.stronger_db / 10.0) {
+                        1
+                    } else if *level > 0.0 && mean <= *level * 10f64.powf(-agc.lost_db / 10.0) {
+                        -1
+                    } else {
+                        0
+                    };
+                    if dir != *stands {
+                        (*stands, *stood) = (dir, 0);
+                    }
+                }
+                if *stands != 0 {
+                    // Samples the comparison has stood, the update's own included.
+                    *stood += 1;
+                    unlock |= *stood >= agc.exit_count.max(1);
+                }
+                // The gain does not change while locked: `gain` is the lock's.
+                let kept = if agc.lock_hold_at_max || gain < agc.max_gain_db {
+                    agc.lock_hold
+                } else {
+                    0
+                };
+                if unlock && n >= since.saturating_add(kept) {
+                    out.unlocked = Some(n);
+                    if agc.unlock_to_max {
+                        next = agc.max_gain_db;
+                    }
+                    self.state = AgcState::Seeking {
+                        since: n + 1,
+                        look: n + 1,
+                        sum: 0.0,
+                    };
+                }
+            }
+        }
+        if next != gain {
+            self.gain = next;
+            self.offset = self.dc.map_or((0.0, 0.0), |d| d.at(next));
+        }
+        out
     }
 }
 

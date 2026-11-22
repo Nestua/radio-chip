@@ -7,8 +7,14 @@
 #   float     = float DC blocker (pole 2^-7), float front, rx_ofdm (8 bits, clip 3);
 #   int O/s   = dc_block_fixed (pole 2^-7), RxFrontFixed, correct_fixed to O bits,
 #               decode_ppdu_fixed with in_bits O and in_shift s, tracker started from the
-#               CFO word (its conversion to ppm is the one float between the ADC and
-#               the PSDU); the int columns of a row share one acquisition;
+#               CFO word and the register fs/fc (FixedTracking::from_cfo_word): no float
+#               between the ADC and the PSDU; the int columns of a row share one acquisition;
+#   stream    = where a command has it: the receiver of ADR 0008 in a closed loop with the
+#               gain control, a sample at a time (the column `front alone` of `loop`): the
+#               streaming front (RxHandoffFixed), its own hold in place of the assumed one,
+#               the offset of the two long training symbols removed, 13 bits, the decoder
+#               at its defaults reading the beats; the front searches all through and the
+#               frame is received if any stream decodes to it; its phase jumps are its own draws;
 #   known     = the same chain behind a gain that knows the frame (it at -12 dBFS at
 #               the ADC, no gain control, no DC offset);
 #   raw       = the decoder handed the samples before the DC blocker.

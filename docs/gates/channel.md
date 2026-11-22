@@ -491,3 +491,30 @@ it, the detectors acting inside the hold, an unlock recorded when not locked; th
 ignored, `and` for `or`, no lock kept without the flag, the flag inverted.
 
 **Measured with it:** `rxagc loop`, `docs/gates/rx_front.md` (2026-11-21).
+
+## 2026-11-21 · model · the gain control stepped a sample at a time
+
+`FastAttackAgc::start(dc)` gives an `AgcRun`; `AgcRun::push(sample, held)` takes the next
+sample and returns the gain applied to it, a lock taken at it and an unlock (`AgcStep`);
+`AgcRun::locked()`. `held` is what a window of `run_held` was: the first sample not held
+after a held one is the release. `run_held` (and so `run`, `run_dc`) now runs on it; no
+rule of the control changed. Why: a closed loop with a receiver decides the hold of
+sample n from the samples before it (`rxagc loop`, `rx_front.md`, the same date).
+
+**Gate.** `cargo test -p radio-phy --test g1_agc`: 20 pass at 2785e4c. The 19 hand-worked
+tests that were there are unchanged and pass. New:
+`the_control_stepped_a_sample_at_a_time_is_the_run_with_the_same_holds` (a hold raised 10
+samples after each lock the steps report, kept 50: the first case worked by hand through
+two holds, and three parameter sets against `run_held` with the windows that came out).
+`rxagc loop 100` and `rxagc dc 30` gave byte-identical output before and after the change
+(tool of 146c5d4). A reviewer's differential test against the old function: `rx_front.md`.
+
+**Mutations** (restored with `cp` + `touch`): the release ignored; the last sample's hold
+never remembered; a lock reported a sample early; a held sample still decides; `locked()`
+always false: all fail the file (the first four fail the older tests too). Against the new
+test alone: no release, the lock's index, the release's unlock index and a release that
+keeps the gain fail it; "a held sample still decides" does not (the lock it holds is
+quiet) and fails `a_hold_freezes_the_gain_and_its_release_starts_the_search_again`.
+
+**Open.** `AgcRun` keeps every sample's power (only a lock window is needed).
+
