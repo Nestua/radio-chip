@@ -13,11 +13,13 @@
 //! in units of 2π/2^A, NCO phases and CFO in units of 2π/2^P per sample (fs·2^−P Hz).
 
 use crate::fixed::{requantize, Overflow, QFormat, Rounding};
+use crate::ppdu::{data_symbols, Rate};
 use crate::rx_front::{
     backoff_samples, long_training_symbol, Pending, Ring, RxConfig, AUTOCORR_LEN,
     COARSE_END_BEFORE_T1, COARSE_LEN, FINE_GUARD, FINE_LEN, GI2_LEN, GI_LEN, HISTORY, LATCH_LAG,
     LTF_SYMBOL_LEN, MAX_DECISION_LATENCY, PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET, STF_PERIOD,
 };
+use crate::rx_ofdm::{Signal, SignalCheck};
 use std::f64::consts::PI;
 
 /// ADC full scale: a 12-bit converter gives integers in [−2048, 2048).
@@ -1035,6 +1037,37 @@ pub struct HandoffConfig {
     /// (I or Q at or beyond −[`ADC_FULL_SCALE`] or [`ADC_FULL_SCALE`] − 1). 0, or a count
     /// above the window: never.
     pub clip_count: usize,
+    /// The window and the count of the release while the hold is patient
+    /// ([`SignalVerdict::patient`]); as `clip_window` and `clip_count`.
+    pub patient_window: usize,
+    /// See [`HandoffConfig::patient_window`].
+    pub patient_count: usize,
+    /// The fewest agreeing coded bits of SIGNAL ([`SignalCheck::agree`]) at which a slow
+    /// rate makes the hold patient ([`SignalVerdict::of`]).
+    pub patient_agree: usize,
+}
+
+/// The decoder's verdict on a SIGNAL that decoded, as the front needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalVerdict {
+    /// The frame's number of data symbols.
+    pub data_symbols: usize,
+    /// The frame is one that survives a few clipped samples under a still gain, and its
+    /// SIGNAL is believed: the hold is given up by the patient rule from now on.
+    pub patient: bool,
+}
+
+impl SignalVerdict {
+    /// The verdict for a decoded SIGNAL and its check: patient at 6, 9 and 12 Mb/s (BPSK
+    /// and QPSK at rate 1/2 and BPSK at 3/4) when at least `patient_agree` of the 48 coded
+    /// bits agree.
+    pub fn of(signal: Signal, check: SignalCheck, pace: &HandoffConfig) -> Self {
+        Self {
+            data_symbols: data_symbols(signal.rate, signal.length),
+            patient: matches!(signal.rate, Rate::R6 | Rate::R9 | Rate::R12)
+                && check.agree >= pace.patient_agree,
+        }
+    }
 }
 
 impl Default for HandoffConfig {
@@ -1044,6 +1077,9 @@ impl Default for HandoffConfig {
             start_delay: 20,
             clip_window: 4,
             clip_count: 2,
+            patient_window: 32,
+            patient_count: 24,
+            patient_agree: 40,
         }
     }
 }
@@ -1152,6 +1188,8 @@ pub struct RxHandoffFixed {
     x: Ring<(i16, i16)>,
     replay: Option<Replay>,
     hold: bool,
+    /// Whether the hold is given up by the patient rule.
+    patient: bool,
     /// Which of the last 64 ADC samples sat on a rail, the newest in bit 0.
     rails: u64,
     mark: Option<HandoffEnd>,
@@ -1167,6 +1205,7 @@ impl RxHandoffFixed {
             x: Ring::new(ADC_HISTORY, (0, 0)),
             replay: None,
             hold: false,
+            patient: false,
             rails: 0,
             mark: None,
             opened: 0,
@@ -1183,7 +1222,7 @@ impl RxHandoffFixed {
     /// verdict for a packet counts; one for a packet that is not the open one is ignored.
     /// The hold covers the samples to the back-off after the last symbol's window: it is
     /// down at once if the first sample after them has been pushed, or SIGNAL failed.
-    pub fn signal(&mut self, packet: u8, data_symbols: Option<usize>) {
+    pub fn signal(&mut self, packet: u8, verdict: Option<SignalVerdict>) {
         let Some(r) = self
             .replay
             .as_mut()
@@ -1191,9 +1230,13 @@ impl RxHandoffFixed {
         else {
             return;
         };
-        match data_symbols {
-            Some(symbols) => {
+        match verdict {
+            Some(SignalVerdict {
+                data_symbols: symbols,
+                patient,
+            }) => {
                 r.verdict = true;
+                self.patient = patient;
                 r.hold_end = packet_end(r.fft_start, symbols, self.front.b);
                 r.last = r.hold_end.saturating_add(HANDOFF_TAIL);
                 // As in `push`: the hold is down with sample `hold_end`, not before it.
@@ -1209,6 +1252,7 @@ impl RxHandoffFixed {
     fn close(&mut self, mark: HandoffEnd) {
         self.replay = None;
         self.hold = false;
+        self.patient = false;
         self.mark.get_or_insert(mark);
     }
 
@@ -1233,12 +1277,17 @@ impl RxHandoffFixed {
         let full = i32::from(x.0).min(i32::from(x.1)) <= -ADC_FULL_SCALE
             || i32::from(x.0).max(i32::from(x.1)) >= ADC_FULL_SCALE - 1;
         self.rails = self.rails << 1 | u64::from(full);
-        let window = match self.pace.clip_window {
+        let (window, count) = if self.patient {
+            (self.pace.patient_window, self.pace.patient_count)
+        } else {
+            (self.pace.clip_window, self.pace.clip_count)
+        };
+        let window = match window {
             w if w >= 64 => u64::MAX,
             w => (1u64 << w) - 1,
         };
         let clipped = (self.rails & window).count_ones() as usize;
-        if self.pace.clip_count > 0 && clipped >= self.pace.clip_count {
+        if count > 0 && clipped >= count {
             self.hold = false;
         }
         // The oldest sample the history still holds is n + 1 − ADC_HISTORY.
@@ -1291,6 +1340,10 @@ impl RxHandoffFixed {
     fn open(&mut self, a: &FixedAcquisition, n: usize) {
         // A packet whose last sample has been taken ends as a packet, even if its end mark
         // was still waiting for the reader.
+        // A declaration under a hold that is up and patient inherits the patience until its
+        // own verdict: the gain has not moved, and what was being read survives a few
+        // clipped samples.
+        let patient = self.patient && self.hold;
         if let Some(old) = self.replay {
             self.close(if old.read >= old.last {
                 HandoffEnd::Packet
@@ -1318,6 +1371,7 @@ impl RxHandoffFixed {
             verdict: false,
         });
         self.hold = true;
+        self.patient = patient;
     }
 }
 

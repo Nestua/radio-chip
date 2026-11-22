@@ -33,16 +33,16 @@ use radio_phy::channel::{
     Rng, TgnModel,
 };
 use radio_phy::ofdm::IfftConfig;
-use radio_phy::ppdu::{build_ppdu, data_symbols, Rate};
+use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_front::{acquire, correct, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
     acquire_fixed, correct_fixed, handoff_fixed, ltf_dc_offset_fixed, remove_dc_fixed, to_adc,
-    FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxHandoffFixed, ADC_FULL_SCALE, IQ,
-    Y_BITS,
+    FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxHandoffFixed, SignalVerdict,
+    ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
 use radio_phy::rx_ofdm_fixed::{
-    clock_ratio, decode_ppdu_fixed, decode_signal_fixed, FixedOfdmConfig, FixedTracking,
+    clock_ratio, decode_ppdu_fixed, decode_signal_checked_fixed, FixedOfdmConfig, FixedTracking,
 };
 
 type C = (f64, f64);
@@ -833,11 +833,12 @@ fn streamed(scene: Scene, seed: u64, number: u64) -> Streamed {
             .is_some_and(|z| decode(&z, 0, a.cfo_phase));
     }
 
-    let mut hand = RxHandoffFixed::new(rx, front, HandoffConfig::default());
+    let pace = HandoffConfig::default();
+    let mut hand = RxHandoffFixed::new(rx, front, pace);
     let mut z: Vec<IQ> = Vec::new();
     let (mut word, mut tag) = (0i64, 0u8);
     // The verdict that is due: its period, the stream's tag and what SIGNAL said.
-    let mut due: Option<(usize, u8, Option<usize>)> = None;
+    let mut due: Option<(usize, u8, Option<SignalVerdict>)> = None;
     for (n, &s) in adc.iter().enumerate() {
         let step = hand.push(s, usize::MAX);
         out.declared += usize::from(step.acquired.is_some());
@@ -850,9 +851,9 @@ fn streamed(scene: Scene, seed: u64, number: u64) -> Streamed {
                     }
                     z.push(v);
                     if z.len() == SIGNAL_END {
-                        let verdict = decode_signal_fixed(&z, 0, &ofdm, &fo, start(word))
+                        let verdict = decode_signal_checked_fixed(&z, 0, &ofdm, &fo, start(word))
                             .ok()
-                            .map(|s| data_symbols(s.rate, s.length));
+                            .map(|(s, check)| SignalVerdict::of(s, check, &pace));
                         due = Some((n + VERDICT_LATENCY, tag, verdict));
                     }
                 }
