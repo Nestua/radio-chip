@@ -55,9 +55,9 @@ use crate::rx_front::{
     GI_LEN, HISTORY, LATCH_LAG, LTF_SYMBOL_LEN, MAX_DECISION_LATENCY, PAIR_LEN, STF_PERIOD,
 };
 use crate::rx_front_fixed::{
-    cordic_table, cordic_with, iabs2, iadd, iconj, imul, ltf_taps, narrow_iq, nco_mix_with,
-    nco_table, phase_per_sample, Accepted, FixedAcquisition, FixedRxConfig, RxFrontFixed, IQ,
-    Y_BITS,
+    confirmed, cordic_table, cordic_with, iabs2, iadd, iconj, imul, ltf_taps, narrow_iq,
+    nco_mix_with, nco_table, phase_per_sample, Accepted, DecisionSums, FixedAcquisition,
+    FixedRxConfig, RxFrontFixed, IQ, Y_BITS,
 };
 use std::collections::BTreeSet;
 
@@ -132,6 +132,8 @@ pub struct DecisionRun {
     /// The decision, as [`RxFrontFixed::push`] returns it `decision_latency` samples
     /// later (`decided_at` is that sample); `None` for a rejected candidate.
     pub result: Option<FixedAcquisition>,
+    /// The sums it was taken from (`SampleTrace::sums` of the model at `accepted_at`).
+    pub sums: Option<DecisionSums>,
     /// The cycle of the acceptance strobe.
     pub strobe: usize,
     /// Cycles after the strobe at which the result is a register's output.
@@ -142,6 +144,8 @@ pub struct DecisionRun {
     pub coarse_wait: usize,
     /// Cycles the fine sum waited for it.
     pub fine_wait: usize,
+    /// Words read on the history's port 0 and port 1.
+    pub reads: (usize, usize),
     /// Words of the history to spare at the read that came closest to an overwritten one.
     pub history_spare: usize,
     /// The same of the energy ring.
@@ -370,6 +374,9 @@ pub fn run_schedule(
         let a = y_clock[n + t.delay_samples] + to_strobe;
         let deadline = y_clock[due] + t.det_latency.max(1) - 1;
         let budget = deadline.checked_sub(a).ok_or(ScheduleError::Late)?;
+        if schedule_len(w, t) > budget {
+            return Err(ScheduleError::Late);
+        }
         let p = plan(w);
         let mut ring = Memory {
             ring: true,
@@ -403,19 +410,18 @@ pub fn run_schedule(
         let mut run = DecisionRun {
             accepted_at: n,
             result: None,
+            sums: None,
             strobe: a,
             done: schedule_len(w, t),
             budget,
             coarse_wait: 0,
             fine_wait: 0,
+            reads: (0, 0),
             history_spare: t.history_depth,
             ring_spare: ring.spare,
         };
         let kc = sym.and_then(|s| s.checked_sub(COARSE_END_BEFORE_T1 + COARSE_LEN));
         let (Some(sym), Some(kc)) = (sym, kc.filter(|&k| k + HISTORY > n)) else {
-            if run.done > budget {
-                return Err(ScheduleError::Late);
-            }
             runs.push(run);
             continue;
         };
@@ -450,8 +456,6 @@ pub fn run_schedule(
             (nc + iabs2(u) + iabs2(v), ch + iabs2(iadd(u, v)))
         });
         let rx_energy: i128 = rot[..PAIR_LEN].iter().map(|v| iabs2(*v)).sum();
-        let rhs = tap_energy * rx_energy;
-        let confirmed = rx_energy > 0 && 2 * conf >= rhs && 2 * coh >= rhs;
 
         // The fine sum on port 1 behind the coarse one, two reads a product.
         let fine_start = (sym + FINE_GUARD).checked_sub(GI2_LEN);
@@ -479,9 +483,23 @@ pub fn run_schedule(
         run.fine_wait = fine_taken - (a + p.fine_ask);
         run.done = end(w, fold, coarse_taken, fine_taken) - a;
         run.history_spare = ports.history.spare;
+        run.reads = (
+            ports.used.iter().filter(|u| u.0 == 0).count(),
+            ports.used.iter().filter(|u| u.0 == 1).count(),
+        );
         if run.done > budget {
             return Err(ScheduleError::Late);
         }
+        let mut sums = DecisionSums {
+            coarse: cc,
+            confirmation: conf,
+            coherence: coh,
+            energy: rx_energy,
+            fine: None,
+        };
+        let confirmed = confirmed(&sums, tap_energy);
+        sums.fine = fine_start.filter(|_| confirmed).map(|_| cf);
+        run.sums = Some(sums);
         run.result = match (confirmed, fine_start, sym.checked_sub(b)) {
             (true, Some(_), Some(fft_start)) => Some(FixedAcquisition {
                 decided_at: due,
@@ -498,4 +516,72 @@ pub fn run_schedule(
     }
 
     Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_port_gives_one_word_a_cycle() {
+        let written: Vec<usize> = (1..=40).collect();
+        let data = vec![(0, 0); 40];
+        let mut ports = Ports {
+            history: Memory {
+                ring: false,
+                depth: 16,
+                written: &written,
+                data: &data,
+                spare: 16,
+            },
+            used: BTreeSet::new(),
+        };
+        assert_eq!(ports.read(0, 30, 41), Ok((0, 0)));
+        assert_eq!(ports.read(1, 30, 41), Ok((0, 0)));
+        assert_eq!(ports.read(0, 31, 42), Ok((0, 0)));
+        assert_eq!(
+            ports.read(0, 32, 41),
+            Err(ScheduleError::PortBusy { port: 0, clock: 41 })
+        );
+    }
+
+    #[test]
+    fn a_memory_holds_its_newest_words_and_not_the_one_being_written() {
+        // Index k is written in cycle 10·(k + 1).
+        let written: Vec<usize> = (1..=40).map(|k| 10 * k).collect();
+        let data: Vec<usize> = (0..40).collect();
+        let mut m = Memory {
+            ring: true,
+            depth: 8,
+            written: &written,
+            data: &data,
+            spare: 8,
+        };
+        // In cycle 205 the newest is index 19 (cycle 200): 12 … 19 are held.
+        assert_eq!(m.read(19, 205), Ok(19));
+        assert_eq!(m.read(12, 205), Ok(12));
+        assert_eq!(m.spare, 0);
+        let stale = |index, clock| {
+            Err(ScheduleError::Stale {
+                ring: true,
+                index,
+                clock,
+            })
+        };
+        assert_eq!(m.read(11, 205), stale(11, 205));
+        // Index 20 is written in cycle 210 into the word of index 12: neither can be read
+        // in that cycle, both the cycle before and after as the memory then stands.
+        assert_eq!(m.read(12, 209), Ok(12));
+        assert_eq!(m.read(12, 210), stale(12, 210));
+        assert_eq!(
+            m.read(20, 210),
+            Err(ScheduleError::Unwritten {
+                ring: true,
+                index: 20,
+                clock: 210
+            })
+        );
+        assert_eq!(m.read(20, 211), Ok(20));
+        assert_eq!(m.read(13, 210), Ok(13));
+    }
 }

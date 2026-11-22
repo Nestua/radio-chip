@@ -17,7 +17,8 @@ use radio_phy::rx_decision::{
 };
 use radio_phy::rx_front::RxConfig;
 use radio_phy::rx_front_fixed::{
-    acquisitions_fixed, to_adc, FixedAcquisition, FixedRxConfig, ADC_FULL_SCALE,
+    acquisitions_fixed, ltf_taps, to_adc, DecisionSums, FixedAcquisition, FixedRxConfig,
+    RxFrontFixed, ADC_FULL_SCALE,
 };
 use std::f64::consts::PI;
 
@@ -105,6 +106,61 @@ fn tone_scene(seed: u64) -> Vec<(i16, i16)> {
     )
 }
 
+/// Frames whose second long symbol is negated: the search finds no maximum at T1 and the
+/// front settles a symbol away (the model's decisions on a preamble that is not one).
+fn negated_t2_scene(n: usize, seed: u64) -> Vec<(i16, i16)> {
+    let mut rng = Rng::new(seed);
+    let mut f = frame(Rate::R6, 40);
+    for v in &mut f[256..320] {
+        *v = (-v.0, -v.1);
+    }
+    let p = mean_power(&f);
+    let mut x = Vec::new();
+    for _ in 0..n {
+        x.extend(vec![(0.0, 0.0); 300 + (rng.uniform() * 100.0) as usize]);
+        x.extend_from_slice(&f);
+    }
+    x.extend(vec![(0.0, 0.0); 400]);
+    let x = awgn(&x, 25.0, p, &mut rng);
+    to_adc(
+        &x,
+        f64::from(ADC_FULL_SCALE) * 10f64.powf(-15.0 / 20.0) / p.sqrt(),
+    )
+}
+
+/// A stream that begins 40 samples into a frame's short training field (its T1 is at
+/// sample 152, and the final coarse window would begin before the stream), then frames.
+fn cut_scene(seed: u64) -> Vec<(i16, i16)> {
+    let mut rng = Rng::new(seed);
+    let f = frame(Rate::R6, 40);
+    let p = mean_power(&f);
+    let mut x = f[40..].to_vec();
+    for _ in 0..3 {
+        x.extend(vec![(0.0, 0.0); 300]);
+        x.extend_from_slice(&f);
+    }
+    x.extend(vec![(0.0, 0.0); 400]);
+    let x = awgn(&x, 25.0, p, &mut rng);
+    to_adc(
+        &x,
+        f64::from(ADC_FULL_SCALE) * 10f64.powf(-15.0 / 20.0) / p.sqrt(),
+    )
+}
+
+/// The model's own decisions: the sample of each acceptance whose result falls inside the
+/// stream, and the sums it was taken from.
+fn model_sums(x: &[(i16, i16)], cfg: &RxConfig) -> Vec<(usize, Option<DecisionSums>)> {
+    let mut rx = RxFrontFixed::new(cfg.clone(), FixedRxConfig::default());
+    let mut out = Vec::new();
+    for (n, s) in x.iter().enumerate() {
+        let t = rx.push_traced(*s).1;
+        if t.accepted.is_some() && n + cfg.decision_latency < x.len() {
+            out.push((n, t.sums));
+        }
+    }
+    out
+}
+
 fn with_backoff(ns: f64) -> RxConfig {
     let mut cfg = RxConfig::new(FS);
     cfg.backoff_ns = ns;
@@ -141,6 +197,8 @@ fn scenes() -> Vec<Scene> {
         ("no back-off", frames_scene(8, 20.0, 0x56), 0.0),
         ("no back-off, failed", failed_candidate_scene(8, 0x57), 0.0),
         ("back-off 400 ns", frames_scene(8, 20.0, 0x58), 400.0),
+        ("T2 negated", negated_t2_scene(8, 0x59), 200.0),
+        ("cut at its start", cut_scene(0x5a), 200.0),
     ]
 }
 
@@ -153,10 +211,12 @@ fn the_schedule_makes_the_models_decisions() {
         let cfg = with_backoff(backoff);
         let runs = run(&x, &cfg, &t);
         let model = acquisitions_fixed(&x, &cfg, &fx);
-        assert!(!model.is_empty(), "{name}: the scene has no acquisition");
         // Every decision whose result falls inside the stream, in order; a rejected one is
-        // a run with no result.
+        // a run with no result. And the sums behind each, as far as the model's got.
         assert_eq!(accepted(&runs), model, "{name}");
+        let sums: Vec<_> = runs.iter().map(|r| (r.accepted_at, r.sums)).collect();
+        assert_eq!(sums, model_sums(&x, &cfg), "{name}");
+        assert!(!runs.is_empty(), "{name}: the scene has no decision");
         some += model.len();
         none += runs.iter().filter(|r| r.result.is_none()).count();
     }
@@ -165,6 +225,50 @@ fn the_schedule_makes_the_models_decisions() {
         some >= 80 && none >= 100,
         "{some} accepted, {none} rejected"
     );
+}
+
+#[test]
+fn each_way_out_of_a_decision_is_taken() {
+    let fx = FixedRxConfig::default();
+    let t = DecisionTiming::default();
+    let cfg = RxConfig::new(FS);
+    let tap_energy: i128 = ltf_taps(&fx)
+        .iter()
+        .map(|v| i128::from(v.0).pow(2) + i128::from(v.1).pow(2))
+        .sum();
+    let ways = |x: &[(i16, i16)]| {
+        let mut seen = [0usize; 5];
+        for r in run(x, &cfg, &t) {
+            let way = match (r.sums, r.result) {
+                // No final coarse window in the stream.
+                (None, _) => 0,
+                (Some(_), Some(_)) => 4,
+                (Some(s), None) => {
+                    let rhs = tap_energy * s.energy;
+                    match (2 * s.confirmation >= rhs, 2 * s.coherence >= rhs) {
+                        (false, false) => 1,
+                        // Each long symbol alone is there, their sum is not.
+                        (true, false) => 2,
+                        (false, true) => 3,
+                        (true, true) => panic!("rejected with both rules met"),
+                    }
+                }
+            };
+            seen[way] += 1;
+            // A decision that ends early is still given its whole schedule.
+            assert_eq!((r.done, r.budget), (359, 461));
+        }
+        seen
+    };
+    let cut = ways(&cut_scene(0x5a));
+    assert_eq!((cut[0], cut[4]), (1, 3), "{cut:?}");
+    let failed = ways(&failed_candidate_scene(12, 0x54));
+    assert!(failed[1] >= 12 && failed[4] == 12, "{failed:?}");
+    // No scene of this gate is rejected by one rule alone (the search's own correlator
+    // already asks for two symbols that add up): the rules' comparison has its own test
+    // beside the model (`rx_front_fixed::tests`).
+    let tone = ways(&tone_scene(0x55));
+    println!("ways out: cut {cut:?}, failed {failed:?}, tone {tone:?}");
 }
 
 #[test]
@@ -189,6 +293,10 @@ fn a_decision_ends_at_the_clock_the_schedule_says() {
             // decision waited one clock for each.
             assert_eq!(r.done, schedule_len(w, &t) + r.coarse_wait, "{name}");
             assert!(r.coarse_wait <= 1 && r.fine_wait <= 1, "{name}");
+            // Port 0: the coarse sum's 96 words and the 127 + w rotated; port 1: 96 and
+            // the fine sum's 176. A decision with no coarse window in the stream reads none.
+            let reads = [(0, 0), (96 + 127 + w, 96 + 176)];
+            assert_eq!(r.reads, reads[usize::from(r.sums.is_some())], "{name}");
             // Samples every 8 clocks, D = 4, L = 64: (64 − 4)·8 − (5 + 14 + 3) + (4 − 1).
             assert_eq!(r.budget, 461, "{name}");
         }
@@ -218,6 +326,23 @@ fn the_latch_goes_first_at_the_cordic_and_costs_a_clock() {
     }
     // Each decision met the latch once with each of its two requests.
     assert_eq!((coarse, fine), (plain.len(), plain.len()));
+    // With no cycle to spare (a model latency of 52 samples and 9 cycles from a correlator
+    // output to the strobe leave 359), the one wait is one too many.
+    let mut tight = cfg.clone();
+    tight.decision_latency = 52;
+    let nine = DecisionTiming {
+        search_latency: 9,
+        ..t
+    };
+    let fits = run_schedule(&x, &tight, &fx, &nine, &no_idle, &no_latch).unwrap();
+    assert!(fits.iter().all(|r| (r.done, r.budget) == (359, 359)));
+    let late = (0..32)
+        .filter(|&phase| {
+            let latch = move |clock: usize| clock % 32 == phase;
+            run_schedule(&x, &tight, &fx, &nine, &no_idle, &latch) == Err(ScheduleError::Late)
+        })
+        .count();
+    assert!((1..=fits.len()).contains(&late), "{late}");
     // The latch asking in every clock would starve a decision: the schedule says so.
     let always = |_: usize| true;
     assert_eq!(
@@ -245,6 +370,20 @@ fn the_memories_hold_what_the_schedule_reads() {
         // The energy ring: position imax = j − 63 − w is read first, in the strobe's clock.
         let ring = runs.iter().map(|r| r.ring_spare).min().unwrap();
         assert_eq!(ring, 81 - (64 + w), "{name}");
+        if name == "failed candidates" {
+            // A scene where T1 is as early as it can be: the bound is met.
+            assert_eq!(spare, 512 - (oldest + 1));
+            // With three cycles more before the strobe the coarse sum's first read falls
+            // in the cycle that writes sample n + 9: the word of n − 503 is gone a cycle
+            // before a later read would lose it.
+            let moved = DecisionTiming {
+                search_latency: 6,
+                ..t
+            };
+            let runs = run(&x, &cfg, &moved);
+            let spare = runs.iter().map(|r| r.history_spare).min().unwrap();
+            assert_eq!(spare, 512 - (349 + 2 * w + 4 + 5 + 1));
+        }
 
         // One slot fewer than what is needed, and the schedule reads a sample that is gone.
         let short = DecisionTiming {
@@ -334,6 +473,21 @@ fn what_does_not_fit_is_refused() {
         .unwrap_err(),
         ScheduleError::Late
     );
+    // A decision that ends early is refused all the same: the stream cut at its start, up
+    // to its first decision and no further.
+    let cut = cut_scene(0x5a);
+    let slow = DecisionTiming {
+        clocks_per_sample: 6,
+        ..t
+    };
+    let first = run(&cut, &cfg, &t)[0];
+    assert!(first.sums.is_none() && first.accepted_at < 500);
+    let cut = &cut[..first.accepted_at + 65];
+    assert_eq!(run(cut, &cfg, &t).len(), 1);
+    assert_eq!(
+        run_schedule(cut, &cfg, &fx, &slow, &no_idle, &no_latch).unwrap_err(),
+        ScheduleError::Late
+    );
     // A model latency of 52 samples leaves 365 clocks, 51 leaves 357.
     let mut short = cfg.clone();
     short.decision_latency = 52;
@@ -343,4 +497,42 @@ fn what_does_not_fit_is_refused() {
         run_schedule(&x, &short, &fx, &t, &no_idle, &no_latch).unwrap_err(),
         ScheduleError::Late
     );
+}
+
+/// What the schedule is fed from: the trace's energy is the sum of the last GI − B squared
+/// correlator outputs, and an acceptance names the maximum's position, 63 + w positions
+/// back, and its energy.
+#[test]
+fn the_models_trace_names_the_energy_and_the_accepted_maximum() {
+    for (name, x, backoff) in scenes() {
+        let cfg = with_backoff(backoff);
+        let w = 16 - (backoff / 50.0) as usize;
+        let mut rx = RxFrontFixed::new(cfg.clone(), FixedRxConfig::default());
+        let (mut pairs, mut energies, mut seen) = (Vec::new(), Vec::new(), 0);
+        for (n, s) in x.iter().enumerate() {
+            let t = rx.push_traced(*s).1;
+            if let Some(c) = t.corr {
+                pairs.push(i128::from(c.0).pow(2) + i128::from(c.1).pow(2));
+            }
+            // Position j of the energy is complete at sample j + 126 + w.
+            assert_eq!(t.energy.is_some(), n >= 126 + w, "{name} {n}");
+            if let Some(e) = t.energy {
+                assert_eq!(
+                    e,
+                    pairs[pairs.len() - w..].iter().sum::<i128>(),
+                    "{name} {n}"
+                );
+                energies.push(e);
+            }
+            if let Some(a) = t.accepted {
+                let j = energies.len() - 1;
+                assert_eq!(a.imax + 63 + w, j, "{name} {n}");
+                assert_eq!(a.emax, energies[a.imax], "{name} {n}");
+                assert!(a.imax + w < a.deadline && a.opened_by < n, "{name} {n}");
+                seen += 1;
+            }
+            assert!(t.accepted.is_some() || t.sums.is_none(), "{name} {n}");
+        }
+        assert!(seen > 0, "{name}");
+    }
 }
