@@ -1040,8 +1040,11 @@ fn an_invalid_configuration_hands_on_nothing_and_builds_no_table() {
 const LO: i16 = -2048;
 const HI: i16 = 2047;
 
+/// A sample's index and what is put there.
+type Swap = (usize, (i16, i16));
+
 /// `adc` with the samples at `at` replaced.
-fn with(adc: &[(i16, i16)], at: &[(usize, (i16, i16))]) -> Vec<(i16, i16)> {
+fn with(adc: &[(i16, i16)], at: &[Swap]) -> Vec<(i16, i16)> {
     let mut out = adc.to_vec();
     for &(n, v) in at {
         out[n] = v;
@@ -1076,7 +1079,7 @@ fn two_of_four_samples_on_a_rail_give_up_the_hold_and_the_stream_goes_on() {
 
     let p = a.decided_at + 100;
     let kept = [(a.decided_at, adc.len())];
-    let cases: [(&[(usize, (i16, i16))], Option<usize>); 12] = [
+    let cases: [(&[Swap], Option<usize>); 12] = [
         // One rail sample is not enough.
         (&[(p, (HI, 0))], None),
         // Two that never share a window of four.
@@ -1151,7 +1154,7 @@ fn two_of_four_samples_on_a_rail_give_up_the_hold_and_the_stream_goes_on() {
         clip_count: 0,
         ..pace
     };
-    let railed: Vec<(usize, (i16, i16))> = (0..40).map(|k| (p + k, (HI, LO))).collect();
+    let railed: Vec<Swap> = (0..40).map(|k| (p + k, (HI, LO))).collect();
     let log = go(&with(&adc, &railed), off);
     assert_eq!(log.acquired, plain.acquired);
     assert_eq!(log.holds(), kept);
