@@ -2519,6 +2519,16 @@ radio). The rails are the ADC's: a radio that clips before its ADC needs its own
 weaker frame under the frame has the same rate, length and channel; the burst is white
 noise through the frame's channel. No float chain in the loop.
 
+**The `stream` column with the release** (`rxagc dc`, `level`, `per` at commit 5a9a9fa,
+whose `stream` path is that of ffc8af5; 2000 frames per row; the three reports replaced).
+The old columns are identical cell for cell. The `stream` column, against the run with the
+hold alone: `level` no cell of 35 changed; `dc` one of 49, by one frame; `per` 12 of 126,
+every one upward: one frame in seven cells, and through TGn D above the noise's reach
+6 Mb/s 50 and 60 dB 5 and 2 of 2000 (0 and 0 before), 24 Mb/s 30, 50 and 60 dB 3, 2 and 4
+(1, 0, 1). So in a fading channel at a high level the release costs a few frames of 2000
+that the hold alone kept (a frame's own peaks at a gain held a little high). The SNR at
+10 % PER moves in one line, by 0.01 dB.
+
 **Rules in between, in the tool only** (`rxagc release`, commit of the tool after
 ffc8af5, 2000 frames per row on `loop`'s frames; `reports/rx_front_agc_release.txt`). The
 founder asked for something between the hold alone and the release as it is. Tried: other

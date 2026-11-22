@@ -10,7 +10,7 @@
 #               CFO word and the register fs/fc (FixedTracking::from_cfo_word): no float
 #               between the ADC and the PSDU; the int columns of a row share one acquisition;
 #   stream    = where a command has it: the receiver of ADR 0008 in a closed loop with the
-#               gain control, a sample at a time (the column `front alone` of `loop`): the
+#               gain control, a sample at a time (the column `front + release` of `loop`): the
 #               streaming front (RxHandoffFixed), its own hold in place of the assumed one,
 #               the offset of the two long training symbols removed, 13 bits, the decoder
 #               at its defaults reading the beats; the front searches all through and the
@@ -26,7 +26,9 @@
 # The rows of one rate and SNR are the same frames at every offset.
 # Each cell: frames lost (not decoded to the PSDU), then +a−b: lost by this column alone and
 # by the column 'float' alone (the same frames). A lost frame is one not acquired, acquired
-# wrongly (the first acquisition of the stream is the only one tried) or not decoded.
+# wrongly (the first acquisition of the stream is the only one tried; a column 'stream' tries
+# every one) or not decoded. level, chg and held describe the assumed hold of the other
+# columns, not the loop of a column 'stream', which also ignores a row's own hold.
 # level: signal and noise of the frame's span at the settled gain, before the ADC clips and
 # without the DC offset, dBFS, the mean of the powers over the frames. chg: gain changes per
 # frame up to the hold (with no lock inside the packet: all of the stream's). held: frames in
@@ -76,7 +78,7 @@
   per index −30 dBFS, 60 dB                      2000  -10.0 10.52   580                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
   per index −20 dBFS, 10 dB                      2000  -19.6  0.00     0                0       179 +179−0           0 +0−0           0 +0−0       177 +177−0           0 +0−0
   per index −20 dBFS, 30 dB                      2000  -10.0  3.09   983                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
-  per index −20 dBFS, 60 dB                      2000  -10.0 10.72   979                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+  per index −20 dBFS, 60 dB                      2000  -10.0 10.72   979                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0           1 +1−0
   before the gain, −30 dBFS at the largest, 10 dB   2000  -19.6  0.00     0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
   before the gain, −30 dBFS at the largest, 30 dB   2000  -10.0  2.98   568                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
   before the gain, −30 dBFS at the largest, 60 dB   2000  -10.0 10.49   547                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
