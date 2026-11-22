@@ -2603,8 +2603,8 @@ Command: `cargo test -p radio-phy --test g1_signal_check` — 4 passed.
   form of the check, which had this count alone).
 - `agree` does. The frame's own SIGNAL: 48 in every one of 2000 in AWGN at 30 dB and
   more; 44 or more in 1999 of 2000 at 6 Mb/s 5 dB; through TGn D 40 or more in 1999 of
-  2000 at 6 Mb/s 30 dB and in all at 54 Mb/s 40 dB (one at 36 to 39). The others (SIGNALs
-  read behind a preamble alone): 16 to 35 in quiet noise (488 and 495 of them), up to 43
+  2000 at 6 Mb/s 30 dB (one at 36 to 39) and in all at 54 Mb/s 40 dB. The others (SIGNALs
+  read behind a preamble alone): 16 to 35 in quiet noise (488 and 495 of them), 12 to 43
   in loud noise (4 of 518 at 40 to 43, none above).
 
 **A release by the rate, in the tool only** (`reports/rx_front_agc_release.txt`, commit
