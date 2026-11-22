@@ -536,6 +536,10 @@ struct Trial {
     /// The fewest agreeing coded bits of SIGNAL (`SignalCheck::agree`) at which its rate is
     /// believed.
     trust: usize,
+    /// A declaration under a hold that is up and patient (the stream it replaces had named
+    /// a robust rate, and nothing was released) leaves the hold patient until its own
+    /// SIGNAL's verdict, instead of going back to `fast` at once.
+    inherit: bool,
 }
 
 /// The longest window a [`Trial`] looks back over.
@@ -634,6 +638,8 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
     // rate, and whether a declaration still waits for its stream's first beat.
     let mut rails: VecDeque<bool> = VecDeque::new();
     let (mut given_up, mut robust, mut unopened) = (false, false, false);
+    // The front's hold after the sample before.
+    let mut held_on = false;
     let (mut gain, mut phase) = (f64::NAN, 0.0);
     let mut z: Vec<IQ> = Vec::new();
     let (mut word, mut tag) = (0i64, 0u8);
@@ -673,7 +679,8 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
             rails.pop_front();
         }
         if got.acquired.is_some() {
-            (given_up, robust, unopened) = (false, false, true);
+            let keep = k.trial.is_some_and(|t| t.inherit) && robust && held_on && !given_up;
+            (given_up, robust, unopened) = (false, keep, true);
         }
         for beat in got.beats {
             match beat {
@@ -718,7 +725,9 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
             due = None;
             hand.signal(of, verdict);
             // The verdict is the open stream's: no declaration since its first beat.
-            robust |= slow && of == tag && !unopened;
+            if of == tag && !unopened {
+                robust = slow;
+            }
         }
         if delay.is_some() {
             let hold = hand.hold();
@@ -733,6 +742,7 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
                         rails.iter().rev().take(w).filter(|r| **r).count() >= c
                     });
             }
+            held_on = hold;
             line.push_back(hold && !given_up);
         }
     }
@@ -852,6 +862,7 @@ fn hold_loop(frames: usize, trials: bool) {
             fast,
             robust,
             trust,
+            inherit: false,
         }),
         ..keeper(name, 0, true, front)
     };
@@ -873,6 +884,24 @@ fn hold_loop(frames: usize, trials: bool) {
         trial("slow 24/32, agree>=40", (2, 4), slow, 40),
         trial("slow 24/32, agree>=44", (2, 4), slow, 44),
         trial("slow none, agree>=40", (2, 4), Some(None), 40),
+        Keeper {
+            trial: Some(Trial {
+                fast: (2, 4),
+                robust: slow,
+                trust: 40,
+                inherit: true,
+            }),
+            ..keeper("24/32, >=40, inherited", 0, true, front)
+        },
+        Keeper {
+            trial: Some(Trial {
+                fast: (2, 4),
+                robust: Some(None),
+                trust: 40,
+                inherit: true,
+            }),
+            ..keeper("none, >=40, inherited", 0, true, front)
+        },
     ];
     let keepers: &[Keeper] = if trials { &tried } else { &keepers };
     const IDLE: f64 = -30.0;
@@ -944,6 +973,8 @@ fn hold_loop(frames: usize, trials: bool) {
              #   slow X, agree>=N = the same, the rate believed only when N or more of SIGNAL's 48 coded bits agree\n\
              #                      with the decoded field encoded again (rx_ofdm::SignalCheck; a soft value of 0 agrees\n\
              #                      with nothing).\n\
+             #   X, >=N, inherited = slow X, agree>=N, and a declaration under a hold that is up and patient (nothing\n\
+             #                      released since a believed slow rate) leaves it patient until its own verdict.\n\
              # Under each row: the SIGNALs that decoded in the column front + release, by agreeing bits in fours (0 to 3,\n\
              # 4 to 7, ... 44 to 47, 48): 'own' has the frame's rate and its length (or the 100 octets of the frame\n\
              # before it).\n\
