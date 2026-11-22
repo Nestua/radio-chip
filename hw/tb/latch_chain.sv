@@ -27,7 +27,7 @@ module latch_chain
     output logic signed [Z_BITS-1:0]          z_re,
     output logic signed [Z_BITS-1:0]          z_im
 );
-    logic                         y_valid, c_valid, fire;
+    logic                         y_valid, c_valid, fire, ev_s;
     logic signed [Y_BITS-1:0]     y_re, y_im, n_re, n_im;
     logic signed [2*DET_BITS+5:0] c_re, c_im;
     logic [3:0]                   clr;
@@ -48,7 +48,8 @@ module latch_chain
     rx_latch #(.D_SAMPLES(D_SAMPLES)) u_latch (
         .clk, .rst_n, .y_valid, .y_re, .y_im, .c_valid, .c_re, .c_im,
         .d_valid, .event_i(event_o),
-        .out_valid(s_valid), .out_re(n_re), .out_im(n_im), .out_step(s_step)
+        .out_valid(s_valid), .out_re(n_re), .out_im(n_im), .out_step(s_step),
+        .out_event(ev_s)       // gated with the search (make -C hw search)
     );
     nco u_nco (
         .clk, .rst_n, .in_valid(s_valid), .in_re(n_re), .in_im(n_im), .in_step(s_step),
@@ -56,7 +57,7 @@ module latch_chain
     );
 
     logic unused;
-    assign unused = fire;
+    assign unused = &{1'b0, fire, ev_s};
 endmodule
 
 `default_nettype wire

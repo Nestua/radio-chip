@@ -22,7 +22,8 @@ use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::{modulate_symbol, IfftConfig};
 use radio_phy::ppdu::{build_ppdu, frame_hash, Rate};
 use radio_phy::rx_front::{
-    RxConfig, AUTOCORR_LEN, COARSE_LEN, LATCH_LAG, LTF_SYMBOL_LEN, PAIR_LEN, STF_PERIOD,
+    backoff_samples, RxConfig, AUTOCORR_LEN, COARSE_LEN, DECISION_LATENCY, GI_LEN, HISTORY,
+    LATCH_LAG, LTF_SYMBOL_LEN, PAIR_LEN, SEARCH_LEN, SEARCH_OFFSET, STF_PERIOD,
 };
 use radio_phy::rx_front_fixed::{
     cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
@@ -331,6 +332,11 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
         .dc_shift
         .ok_or_else(|| io::Error::other("the default receiver has no DC blocker"))?;
     let det_run = rx.run;
+    let search_w = GI_LEN.saturating_sub(backoff_samples(&rx));
+    let decision_latency = rx.decision_latency;
+    if decision_latency != DECISION_LATENCY {
+        return Err(io::Error::other("the default decision latency moved"));
+    }
     let taps = ltf_taps(&fx);
     let hermitian = taps[0].1 == 0
         && taps[32].1 == 0
@@ -370,6 +376,16 @@ fn rx_front_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   // Provisional latch: COARSE_LEN lag-16 products ending LATCH_LAG samples back.\n\
          \x20   localparam int LATCH_LAG      = {LATCH_LAG};\n\
          \x20   localparam int COARSE_LEN     = {COARSE_LEN};\n\
+         \x20   // LTF search: positions from SEARCH_OFFSET after the opening event to SEARCH_LEN\n\
+         \x20   // after the latest; SEARCH_W = GI_LEN - back-off energy positions (RxConfig::new);\n\
+         \x20   // a decision's result DECISION_LATENCY samples after its acceptance.\n\
+         \x20   localparam int LTF_SYMBOL_LEN   = {LTF_SYMBOL_LEN};\n\
+         \x20   localparam int GI_LEN           = {GI_LEN};\n\
+         \x20   localparam int SEARCH_OFFSET    = {SEARCH_OFFSET};\n\
+         \x20   localparam int SEARCH_LEN       = {SEARCH_LEN};\n\
+         \x20   localparam int SEARCH_W         = {search_w};\n\
+         \x20   localparam int DECISION_LATENCY = {decision_latency};\n\
+         \x20   localparam int HISTORY          = {HISTORY};\n\
          \n\
          \x20   // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().",
         fx.z_bits,
@@ -814,57 +830,31 @@ fn latch_segment(
     Ok((events, latched, acqs))
 }
 
-/// Vectors for the provisional latch and the NCO path (gate G3: `make -C hw latch`):
-/// `dc_block` → `det_a` → `rx_latch` → `nco` against `RxFrontFixed` sample by sample (the
-/// NCO step after each sample's latch, and the rotated sample z). Segments: the four received
-/// frames of `det`; a CW tone 10 dB over the noise from sample 0 (events before the latch's
-/// first sample 135, which must not latch, and a step that keeps changing); clean tones timed to
-/// put an event exactly at sample 135 (the first that latches) and at 134 (the last that does
-/// not); two frames under a tone (acquisitions, then events again on the tone); a frame under a
-/// tone 3 dB above it (an acquisition inside a run of fires: the counter reset moves the events
-/// after it); full-scale random samples and full-scale steps (the widest C).
-fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
-    let fx = FixedRxConfig::default();
-    writeln!(
-        out,
-        "# rvec latch — generated, do not edit. Regenerate: make -C hw vectors"
-    )?;
-    writeln!(
-        out,
-        "# RxFrontFixed (default widths, D = {}, A = {}, P = {}, Z = {}) per sample.",
-        fx.det_bits, fx.angle_bits, fx.nco_phase_bits, fx.z_bits
-    )?;
-    writeln!(
-        out,
-        "# reset <label> starts a segment; then <x re> <x im> <acq> <event> <step> <z re> <z im>"
-    )?;
-    let mut total = (0, 0, 0);
-    let mut early = 0;
-    let mut seg = |out: &mut dyn Write, label: &str, x: &[(i16, i16)]| -> io::Result<()> {
-        let (e, l, a) = latch_segment(out, label, x)?;
-        total = (total.0 + e, total.1 + l, total.2 + a);
-        early += e - l;
-        Ok(())
-    };
-    let scenes = [
+/// A labelled stream of ADC samples.
+type Scene = (String, Vec<(i16, i16)>);
+
+/// The scenes of the latch gate (and, with others, of the search gate): see [`latch_vectors`].
+fn latch_scenes(fx: &FixedRxConfig) -> io::Result<Vec<Scene>> {
+    let fx = *fx;
+    let mut scenes = Vec::new();
+    let frames = [
         ("frame_awgn_25dB", 25.0, -15.0, false, 0x6301u64),
         ("frame_awgn_4dB", 4.0, -15.0, false, 0x6302),
         ("frame_tgn_d_9dB", 9.0, -15.0, true, 0x6303),
         ("frame_hot_-3dBFS", 30.0, -3.0, false, 0x6304),
     ];
-    for (label, snr, dbfs, tgn, seed) in scenes {
-        seg(out, label, &rx_scene(snr, dbfs, tgn, seed)?)?;
+    for (label, snr, dbfs, tgn, seed) in frames {
+        scenes.push((label.to_string(), rx_scene(snr, dbfs, tgn, seed)?));
     }
     let fs = 20e6;
     let full = f64::from(ADC_FULL_SCALE);
     let mut rng = Rng::new(0x1A7C_0001);
     let pn = (full * 10f64.powf(-30.0 / 20.0)).powi(2);
     let noise = awgn(&vec![(0.0, 0.0); 3000], 0.0, pn, &mut rng);
-    seg(
-        out,
-        "tone_10dB_from_0",
-        &to_adc(&add_tone(&noise, 10.0 * pn, 0.9e6, fs, 0.3), 1.0),
-    )?;
+    scenes.push((
+        "tone_10dB_from_0".to_string(),
+        to_adc(&add_tone(&noise, 10.0 * pn, 0.9e6, fs, 0.3), 1.0),
+    ));
     // An event at exactly the first latching sample (n = gate − 1) and one just before it. A
     // clean tone fires from the first full window whatever its start, with events every
     // DET_RUN samples; eight full-scale samples break the run, and their position sets the
@@ -898,7 +888,7 @@ fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
         });
         let x = scene
             .ok_or_else(|| io::Error::other(format!("no burst position puts an event at {at}")))?;
-        seg(out, label, &x)?;
+        scenes.push((label.to_string(), x));
     }
     let mut two: Vec<(f64, f64)> = Vec::new();
     for seed in [0x1A7C_0002u64, 0x1A7C_0003] {
@@ -909,11 +899,10 @@ fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
         );
     }
     let p_two = mean_power(&two);
-    seg(
-        out,
-        "two_frames_under_tone",
-        &to_adc(&add_tone(&two, 0.05 * p_two, -1.7e6, fs, 2.0), 1.0),
-    )?;
+    scenes.push((
+        "two_frames_under_tone".to_string(),
+        to_adc(&add_tone(&two, 0.05 * p_two, -1.7e6, fs, 2.0), 1.0),
+    ));
     // An acquisition in the middle of a run of fires: a tone 3 dB over the frame keeps detector
     // A firing through the preamble (5.1 MHz is near a multiple of fs/16, so the search still
     // finds the LTF). The counter reset at the acquisition then moves the later events: this
@@ -941,7 +930,7 @@ fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
                 "the acquisition's counter reset changes no event in frame_under_strong_tone",
             ));
         }
-        seg(out, "frame_under_strong_tone", &x)?;
+        scenes.push(("frame_under_strong_tone".to_string(), x));
     }
     let mut bits = XorShift32(0x1A7C_0004);
     let mut word = || (0..32).fold(0u32, |acc, _| (acc << 1) | u32::from(bits.next_bit()));
@@ -952,7 +941,7 @@ fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
             (v(word()), v(word()))
         })
         .collect();
-    seg(out, "random_full_scale", &random)?;
+    scenes.push(("random_full_scale".to_string(), random));
     let hi = (ADC_FULL_SCALE - 1) as i16;
     let steps: Vec<(i16, i16)> = (0..1200)
         .map(|k| match (k / 150) % 4 {
@@ -962,7 +951,41 @@ fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
             _ => (-hi - 1, -hi - 1),
         })
         .collect();
-    seg(out, "full_scale_steps", &steps)?;
+    scenes.push(("full_scale_steps".to_string(), steps));
+    Ok(scenes)
+}
+
+/// Vectors for the provisional latch and the NCO path (gate G3: `make -C hw latch`):
+/// `dc_block` → `det_a` → `rx_latch` → `nco` against `RxFrontFixed` sample by sample (the
+/// NCO step after each sample's latch, and the rotated sample z). Segments: the four received
+/// frames of `det`; a CW tone 10 dB over the noise from sample 0 (events before the latch's
+/// first sample 135, which must not latch, and a step that keeps changing); clean tones timed to
+/// put an event exactly at sample 135 (the first that latches) and at 134 (the last that does
+/// not); two frames under a tone (acquisitions, then events again on the tone); a frame under a
+/// tone 3 dB above it (an acquisition inside a run of fires: the counter reset moves the events
+/// after it); full-scale random samples and full-scale steps (the widest C).
+fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    writeln!(
+        out,
+        "# rvec latch — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# RxFrontFixed (default widths, D = {}, A = {}, P = {}, Z = {}) per sample.",
+        fx.det_bits, fx.angle_bits, fx.nco_phase_bits, fx.z_bits
+    )?;
+    writeln!(
+        out,
+        "# reset <label> starts a segment; then <x re> <x im> <acq> <event> <step> <z re> <z im>"
+    )?;
+    let mut total = (0, 0, 0);
+    let mut early = 0;
+    for (label, x) in latch_scenes(&fx)? {
+        let (e, l, a) = latch_segment(out, &label, &x)?;
+        total = (total.0 + e, total.1 + l, total.2 + a);
+        early += e - l;
+    }
     // The gate needs every case it claims to cover.
     if total.1 == 0 || early == 0 || total.2 == 0 {
         return Err(io::Error::other(format!(
@@ -975,6 +998,431 @@ fn latch_vectors(out: &mut impl Write) -> io::Result<()> {
         "# totals: {} events, {} latched, {early} before the latch start, {} acquisitions",
         total.0, total.1, total.2
     )?;
+    Ok(())
+}
+
+/// What a search segment exercises (the cases `rvec search` refuses to do without).
+#[derive(Debug, Default, Clone, Copy)]
+struct SearchCover {
+    samples: usize,
+    events: usize,
+    /// Events before the first correlator output.
+    early_events: usize,
+    /// Events while a search is open (the deadline moves).
+    extensions: usize,
+    acceptances: usize,
+    acquisitions: usize,
+    /// Searches closed by their deadline.
+    deadline_closes: usize,
+    /// An event at the very sample the deadline would have closed the search.
+    event_at_last_position: usize,
+    /// An event at the sample after a deadline's close.
+    event_after_close: usize,
+    /// An event at the sample an acquisition is applied.
+    event_at_acquisition: usize,
+    /// A search opened by an event at the very sample an acquisition is applied (and closed
+    /// by it).
+    opened_at_acquisition: usize,
+    /// An accepted maximum at a position below 2^9 and one at or above (the hand-over's
+    /// numbers are modulo 2^9, with a flag).
+    maximum_before_wrap: usize,
+    maximum_after_wrap: usize,
+    /// An acceptance at the search's last position.
+    acceptance_at_last_position: usize,
+    /// An accepted maximum at the search's first position.
+    maximum_at_first: usize,
+    /// A larger energy just before the first position than the first accepted maximum.
+    larger_before_first: usize,
+    /// An accepted maximum with an equal energy after it (the first of equals is kept).
+    ties: usize,
+    /// An acceptance in a search that already had one (the restart after a candidate).
+    restarts: usize,
+    /// The largest energy, in bits.
+    energy_bits: u32,
+}
+
+impl SearchCover {
+    fn add(&mut self, o: &Self) {
+        self.samples += o.samples;
+        self.events += o.events;
+        self.early_events += o.early_events;
+        self.extensions += o.extensions;
+        self.acceptances += o.acceptances;
+        self.acquisitions += o.acquisitions;
+        self.deadline_closes += o.deadline_closes;
+        self.event_at_last_position += o.event_at_last_position;
+        self.event_after_close += o.event_after_close;
+        self.event_at_acquisition += o.event_at_acquisition;
+        self.opened_at_acquisition += o.opened_at_acquisition;
+        self.maximum_before_wrap += o.maximum_before_wrap;
+        self.maximum_after_wrap += o.maximum_after_wrap;
+        self.acceptance_at_last_position += o.acceptance_at_last_position;
+        self.maximum_at_first += o.maximum_at_first;
+        self.larger_before_first += o.larger_before_first;
+        self.ties += o.ties;
+        self.restarts += o.restarts;
+        self.energy_bits = self.energy_bits.max(o.energy_bits);
+    }
+
+    /// The cases every build's segments must hold.
+    fn missing(&self) -> Vec<&'static str> {
+        [
+            (
+                self.early_events,
+                "an event before the first correlator output",
+            ),
+            (self.extensions, "an event in an open search"),
+            (self.acquisitions, "an acquisition"),
+            (
+                self.acceptances.saturating_sub(self.acquisitions),
+                "a failed candidate",
+            ),
+            (self.deadline_closes, "a search closed by its deadline"),
+            (
+                self.event_at_last_position,
+                "an event at a search's last position",
+            ),
+            (self.event_after_close, "an event just after a close"),
+            (
+                self.event_at_acquisition,
+                "an event at the sample of an acquisition",
+            ),
+            (
+                self.opened_at_acquisition,
+                "a search opened at the sample of an acquisition",
+            ),
+            (self.maximum_before_wrap, "a maximum below position 512"),
+            (
+                self.maximum_after_wrap,
+                "a maximum at or above position 512",
+            ),
+            (
+                self.acceptance_at_last_position,
+                "an acceptance at a search's last position",
+            ),
+            (
+                self.maximum_at_first,
+                "a maximum at a search's first position",
+            ),
+            (
+                self.larger_before_first,
+                "a larger energy just before a search's first position",
+            ),
+            (self.ties, "equal energies after a maximum"),
+            (self.restarts, "a second acceptance in one search"),
+        ]
+        .iter()
+        .filter_map(|&(n, what)| (n == 0).then_some(what))
+        .collect()
+    }
+}
+
+/// The receiver configuration of a search segment: GI − B = `w` positions in the energy sum.
+fn search_config(w: usize) -> RxConfig {
+    let mut cfg = RxConfig::new(20e6);
+    cfg.backoff_ns = (GI_LEN - w) as f64 * 50.0;
+    cfg
+}
+
+/// The lines of one search segment (see [`search_vectors`]) and what it exercises.
+fn search_trace(x: &[(i16, i16)], w: usize) -> (Vec<String>, SearchCover) {
+    let cfg = search_config(w);
+    let mut rx = RxFrontFixed::new(cfg, FixedRxConfig::default());
+    let mut c = SearchCover {
+        samples: x.len(),
+        ..SearchCover::default()
+    };
+    let mut lines = Vec::with_capacity(x.len());
+    let mut energy: Vec<i128> = Vec::new();
+    let mut was_open = false;
+    let mut last_event: Option<usize> = None;
+    let mut closed_at: Option<usize> = None;
+    // Of the open search: the opening event, and its acceptances so far.
+    let mut accepted_in_search = 0;
+    let last_position = PAIR_LEN - 2 + w + SEARCH_OFFSET + SEARCH_LEN - 1;
+    for (n, s) in x.iter().enumerate() {
+        let (acq, t) = rx.push_traced(*s);
+        let open = rx.searching();
+        if let Some(e) = t.energy {
+            energy.push(e);
+            c.energy_bits = c.energy_bits.max(128 - e.leading_zeros());
+        }
+        if t.event {
+            c.events += 1;
+            c.early_events += usize::from(n + 1 < PAIR_LEN);
+            c.extensions += usize::from(was_open);
+            c.event_at_last_position +=
+                usize::from(was_open && last_event.is_some_and(|l| n - l == last_position));
+            c.event_after_close += usize::from(closed_at.is_some_and(|k| n == k + 1));
+            c.event_at_acquisition += usize::from(acq.is_some());
+            c.opened_at_acquisition += usize::from(acq.is_some() && !was_open);
+            if !was_open {
+                accepted_in_search = 0;
+            }
+            last_event = Some(n);
+        }
+        if let Some(a) = t.accepted {
+            let j = energy.len() - 1;
+            c.acceptances += 1;
+            c.acceptance_at_last_position += usize::from(!open && acq.is_none());
+            let first = a.opened_by + SEARCH_OFFSET;
+            c.maximum_at_first += usize::from(a.imax == first);
+            c.maximum_before_wrap += usize::from(a.imax < HISTORY);
+            c.maximum_after_wrap += usize::from(a.imax >= HISTORY);
+            c.larger_before_first +=
+                usize::from(accepted_in_search == 0 && first > 0 && energy[first - 1] > a.emax);
+            c.ties += usize::from(energy[a.imax + 1..=j].contains(&a.emax));
+            c.restarts += usize::from(accepted_in_search > 0);
+            accepted_in_search += 1;
+        }
+        c.acquisitions += usize::from(acq.is_some());
+        if (was_open || t.event) && !open && acq.is_none() {
+            c.deadline_closes += 1;
+            closed_at = Some(n);
+        }
+        was_open = open;
+        let e = t.energy.map_or("-".to_string(), |e| e.to_string());
+        let a = t.accepted.map_or("- - -".to_string(), |a| {
+            format!("{} {} {}", a.imax, a.emax, a.opened_by)
+        });
+        lines.push(format!(
+            "{} {} {} {} {} {e} {a}",
+            s.0,
+            s.1,
+            u8::from(acq.is_some()),
+            u8::from(t.event),
+            u8::from(open)
+        ));
+    }
+    (lines, c)
+}
+
+/// A burst of a clean tone (`len` samples from `at`) over noise 40 dB below full scale: a
+/// handful of detection events and then a search over noise alone.
+fn tone_burst_scene(total: usize, bursts: &[(usize, usize)], seed: u64) -> Vec<(i16, i16)> {
+    let fs = 20e6;
+    let full = f64::from(ADC_FULL_SCALE);
+    let mut rng = Rng::new(seed);
+    let pn = (full * 10f64.powf(-40.0 / 20.0)).powi(2);
+    let mut x = awgn(&vec![(0.0, 0.0); total], 0.0, pn, &mut rng);
+    for &(at, len) in bursts {
+        let tone = add_tone(&vec![(0.0, 0.0); len], 0.01 * full * full, 0.9e6, fs, 0.3);
+        for (v, t) in x.iter_mut().skip(at).zip(tone) {
+            *v = (v.0 + t.0, v.1 + t.1);
+        }
+    }
+    to_adc(&x, 1.0)
+}
+
+/// Vectors for the LTF search (gate G3: `make -C hw search`): dc_block → det_a → rx_latch →
+/// nco → ltf_corr → rx_search against `RxFrontFixed` sample by sample — whether a search is
+/// open after the sample, the energy completed at it, and the candidate accepted at it. A
+/// segment is for one GI − B (`w`, in its `reset` line); the testbench of a build runs the
+/// segments of its `W`. For w = 12 (the default back-off), 16 (none) and 8 (400 ns): the
+/// latch gate's scenes; a tone burst, then silence (equal energies); two bursts placed so
+/// that an event falls on a search's last position, and one sample later; lone bursts chosen
+/// by their seed for an acceptance at a search's last position, a maximum at its first, and
+/// a larger energy just before the first; a frame with a strong tone beginning in its data,
+/// placed for an event at the sample of the acquisition; a bare long training field between
+/// two tones, placed so that the acquisition closes a search opened at its very sample; the long symbol's signs at full scale (the largest energy
+/// the chain reaches).
+fn search_vectors(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedRxConfig::default();
+    writeln!(
+        out,
+        "# rvec search — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# RxFrontFixed (default widths, K = {}, decision latency {}) per sample.",
+        fx.corr_bits,
+        RxConfig::new(20e6).decision_latency
+    )?;
+    writeln!(
+        out,
+        "# reset <label> <w> starts a segment at GI - B = w; then <x re> <x im> <acq> <event>"
+    )?;
+    writeln!(
+        out,
+        "# <searching> <energy | -> <imax> <emax> <opened by> (- - - without an acceptance)"
+    )?;
+    let base = latch_scenes(&fx)?;
+    for w in [12usize, 16, 8] {
+        let mut scenes: Vec<Scene> = base.clone();
+        // Silence after a burst: the energies are equal (zero) once the burst has left the
+        // correlator's window.
+        let mut quiet = tone_burst_scene(900, &[(150, 120)], 0x5EA2_0001);
+        for v in quiet.iter_mut().skip(270) {
+            *v = (0, 0);
+        }
+        scenes.push(("burst_then_silence".to_string(), quiet));
+        // Two bursts: the first event of the second on the last position of the first's
+        // search, and on the sample after its close.
+        let last_position = PAIR_LEN - 2 + w + SEARCH_OFFSET + SEARCH_LEN - 1;
+        for (label, want_last) in [
+            ("event_at_last_position", true),
+            ("event_after_close", false),
+        ] {
+            // (The last event of a burst comes some 40 samples after its end, the first some
+            // 25 after its start.)
+            // The noise moves the events by a sample or two: seeds as well as shifts.
+            let scene = (0..16 * STF_PERIOD).find_map(|k| {
+                let x = tone_burst_scene(
+                    1500,
+                    &[(150, 100), (150 + last_position + 96 + k % 32, 100)],
+                    0x5EA2_0002 + (k / 32) as u64,
+                );
+                let c = search_trace(&x, w).1;
+                let hit = if want_last {
+                    c.event_at_last_position
+                } else {
+                    c.event_after_close
+                };
+                (hit > 0).then_some(x)
+            });
+            let x = scene.ok_or_else(|| io::Error::other(format!("w = {w}: no scene {label}")))?;
+            scenes.push((label.to_string(), x));
+        }
+        type Want = fn(&SearchCover) -> usize;
+        let lone: [(&str, Want); 3] = [
+            ("acceptance_at_last_position", |c| {
+                c.acceptance_at_last_position
+            }),
+            ("maximum_at_first_position", |c| c.maximum_at_first),
+            ("larger_before_first_position", |c| c.larger_before_first),
+        ];
+        for (label, want) in lone {
+            let scene = (0..4000u64).find_map(|k| {
+                let x = tone_burst_scene(760, &[(150, 100)], 0x5EA2_1000 + k);
+                (want(&search_trace(&x, w).1) > 0).then_some(x)
+            });
+            let x = scene.ok_or_else(|| io::Error::other(format!("w = {w}: no scene {label}")))?;
+            scenes.push((label.to_string(), x));
+        }
+        // A frame, and a tone 10 dB above it that begins in its data: the decision is taken
+        // from samples before the tone, and the events the tone causes fall around the sample
+        // the acquisition is applied at; a start and a seed that put one exactly there.
+        {
+            let cfg = IfftConfig::tx_default();
+            let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+            let frame: Vec<(f64, f64)> = build_ppdu(&[0x5a; 3], Rate::R6, 0x5d, &cfg)
+                .map_err(io::Error::other)?
+                .iter()
+                .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+                .collect();
+            let p = mean_power(&frame);
+            let full = f64::from(ADC_FULL_SCALE);
+            let lead = 300;
+            let scene = (0..640usize).find_map(|k| {
+                let mut x = vec![(0.0, 0.0); lead];
+                x.extend_from_slice(&frame);
+                x.extend(vec![(0.0, 0.0); 300]);
+                let mut rng = Rng::new(0x5EA2_2000 + (k / 64) as u64);
+                let mut x = awgn(&x, 25.0, p, &mut rng);
+                let start = lead + 192 + 190 + k % 64;
+                let tone = add_tone(&vec![(0.0, 0.0); 200], 10.0 * p, 5.1e6, 20e6, 0.7);
+                for (v, t) in x.iter_mut().skip(start).zip(tone) {
+                    *v = (v.0 + t.0, v.1 + t.1);
+                }
+                let x = to_adc(&x, 0.1 * full / (11.0 * p).sqrt());
+                (search_trace(&x, w).1.event_at_acquisition > 0).then_some(x)
+            });
+            let x = scene
+                .ok_or_else(|| io::Error::other(format!("w = {w}: no event at an acquisition")))?;
+            scenes.push(("event_at_acquisition".to_string(), x));
+        }
+        // An acquisition that closes a search opened at its very sample (the independent
+        // review's scene): a tone burst opens a search; a frame follows whose short training
+        // field is 3 dB under the noise (no event) and whose long one is 17 dB over it; the
+        // search accepts it and closes by its deadline while the decision is in flight; a
+        // tone then begins, placed so that its first event falls on the sample the
+        // acquisition is applied at.
+        {
+            let cfg = IfftConfig::tx_default();
+            let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+            let frame: Vec<(f64, f64)> = build_ppdu(&[0x5a; 3], Rate::R6, 0x5d, &cfg)
+                .map_err(io::Error::other)?
+                .iter()
+                .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+                .collect();
+            let p = mean_power(&frame);
+            let full = f64::from(ADC_FULL_SCALE);
+            let sigma2 = (0.1 * full).powi(2) * 10f64.powf(-17.0 / 10.0);
+            let amp = 0.1 * full / p.sqrt();
+            let amp_stf = (sigma2 * 10f64.powf(-3.0 / 10.0) / p).sqrt();
+            // The acceptance is at about T1 + 189 + 2·w and the tone's first event some 27
+            // samples after its start: the long field's place g must put the first search's
+            // deadline between the acceptance and its result, the tone's start t the event
+            // on the result's sample. Seeds, since the noise decides the confirmation.
+            let scene = (0..70 * 13 * 12usize).filter(|_| w != 8).find_map(|k| {
+                let (g, t) = (130 + k % 70, 92 + 2 * w + (k / 70) % 13);
+                let mut rng = Rng::new(0x5EA2_3000 + k as u64);
+                let mut x = awgn(&vec![(0.0, 0.0); 1500], 0.0, sigma2, &mut rng);
+                let mut add = |at: usize, y: &[(f64, f64)], gain: f64| {
+                    for (v, q) in x.iter_mut().skip(at).zip(y) {
+                        *v = (v.0 + q.0 * gain, v.1 + q.1 * gain);
+                    }
+                };
+                let tone = |len: usize| {
+                    add_tone(&vec![(0.0, 0.0); len], 0.01 * full * full, 0.9e6, 20e6, 0.3)
+                };
+                let ltf = 250 + g;
+                add(150, &tone(100), 1.0);
+                add(ltf - 160, &frame[..160], amp_stf);
+                add(ltf, &frame[160..320], amp);
+                let start = ltf + 160 + t;
+                add(start, &tone(1500 - start), 1.0);
+                let x = to_adc(&x, 1.0);
+                (search_trace(&x, w).1.opened_at_acquisition > 0).then_some(x)
+            });
+            // With a back-off of 400 ns none of these placements acquires (the candidate is
+            // taken ten positions early and w = 8 does not reach T1), so they are not tried:
+            // the case is required of the other two builds.
+            match scene {
+                Some(x) => scenes.push(("opened_at_acquisition".to_string(), x)),
+                None if w == 8 => {}
+                None => {
+                    return Err(io::Error::other(format!(
+                        "w = {w}: no search opened at an acquisition"
+                    )))
+                }
+            }
+        }
+        // The long symbol's component signs at full scale: the largest energy the chain
+        // reaches (32 bits of the 44: the detector's events turn the NCO, and the match is
+        // lost).
+        let taps = ltf_taps(&fx);
+        let hi = (ADC_FULL_SCALE - 1) as i16;
+        let lo = -ADC_FULL_SCALE as i16;
+        let matched: Vec<(i16, i16)> = (0..6 * LTF_SYMBOL_LEN)
+            .map(|k| {
+                let t = taps[k % LTF_SYMBOL_LEN];
+                (if t.0 < 0 { lo } else { hi }, if t.1 < 0 { lo } else { hi })
+            })
+            .collect();
+        scenes.push(("long_symbol_signs_full_scale".to_string(), matched));
+
+        let mut total = SearchCover::default();
+        for (label, x) in &scenes {
+            let (lines, c) = search_trace(x, w);
+            total.add(&c);
+            writeln!(out, "reset {label} {w}")?;
+            for l in lines {
+                writeln!(out, "{l}")?;
+            }
+        }
+        let mut missing = total.missing();
+        if w == 8 {
+            missing.retain(|m| *m != "a search opened at the sample of an acquisition");
+        }
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "search vectors at w = {w} miss: {}",
+                missing.join("; ")
+            )));
+        }
+        writeln!(out, "# w = {w}: {total:?}")?;
+    }
     Ok(())
 }
 
@@ -1036,9 +1484,10 @@ fn main() -> ExitCode {
         "nco" => nco_vectors(&mut out),
         "det" => det_vectors(&mut out),
         "latch" => latch_vectors(&mut out),
+        "search" => search_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
