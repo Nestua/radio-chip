@@ -2359,3 +2359,213 @@ the block beyond its vectors (G4 is not started); the early-sample rule is exerc
 spacing (5 clocks). The decision's own correlator (a window of 64 folded over 4) is a
 separate block of part d.
 
+## 2026-11-22 · G0 + model gate + measurement · the hold given up on a clipping ADC (ADR 0008, decision 2, third amendment)
+
+Decision: the founder, 2026-11-22, on findings 3 and 4 of the entry of 2026-11-21 ("`rxagc`
+on the streaming hand-off"): the release goes into the model and into ADR 0008, with its own
+gate and the scenes the candidate had not seen.
+
+**G0 (the rule; ADR 0008, decision 2, amendment of 2026-11-22).**
+- A *rail sample* is an ADC sample with I or Q at −2048 or 2047 (`ADC_FULL_SCALE`).
+- The front keeps the rail flags of the last `clip_window` = 4 ADC samples (sample n − 3
+  to n), from reset on and whatever the hold is.
+- After the push of a sample that makes `clip_count` = 2 of them set, the hold is down. In
+  the order of one push: the hold's end by length, a new declaration (raises the hold), the
+  release. So a declaration with two rail samples in its window shows no hold at all.
+- Nothing else changes: the stream, its marks, the verdict's handling, the watchdog. A
+  verdict after the release leaves the hold down. Only a new declaration raises it.
+- `clip_count` = 0: no release. A count above the window: never reached.
+- Interface: `HandoffConfig::clip_window`, `clip_count`; the hold is still
+  `HandoffStep::hold` / `RxHandoffFixed::hold`.
+
+**Gate** (`crates/radio-phy/tests/g2_rx_handoff.rs`, three tests; reference: the rule
+worked by hand on streams with chosen samples replaced by rail values).
+- `two_of_four_samples_on_a_rail_give_up_the_hold_and_the_stream_goes_on`: twelve
+  placements (one rail sample; two that never share a window; two at distances 1, 2, 3;
+  each rail of each part; one count short of a rail; the hold's first sample its last),
+  the hold's stretch exact in each, the beats in the same periods and equal to
+  `handoff_fixed` of the altered samples, no end mark; a count of 0 with 40 rail samples;
+  3 of 8; a count the window cannot reach.
+- `a_hold_given_up_stays_down_through_the_verdict_and_a_new_declaration_raises_it`.
+- `rail_samples_before_the_declaration_count_in_the_window`.
+
+Seen to fail first: with the two fields in `HandoffConfig` and no rule, all three fail
+(the hold's stretch `[(1162, 4420)]` against `[(1162, 1265)]` in the first).
+Command: `cargo test -p radio-phy --test g2_rx_handoff` — 15 passed (commit 58fe414).
+
+**Mutations** (each applied to `rx_front_fixed.rs`, the gate run, the file restored with
+`cp` and `touch`; all eleven fail the gate):
+
+| Mutant | Fails |
+|---|---|
+| window of 3 | test 1 |
+| count + 1 | all three |
+| upper rail one count lower | test 1 |
+| lower rail never | all three |
+| Q not looked at, upper rail; lower rail | test 1; tests 1 and 3 |
+| the window starts with the hold | test 3 |
+| the window cleared at a declaration | test 3 |
+| a count of 0 does not switch it off | test 1 |
+| the release ends the stream | tests 1 and 2 |
+| the verdict raises the hold again | test 2 |
+
+**The tool on the model's rule.** `rxagc loop`'s candidate column was the tool's own
+code; it is `RxHandoffFixed`'s now ("front + release"; "front alone" runs the model with
+`clip_count` 0). Check: the binary before the change against the binary after it, `loop`
+at 100 frames, the 23 rows of the old report: every data row identical in every column.
+The `stream` column of `per`, `level` and `dc` runs the model's default, the release on.
+
+**Review's additions to the gate** (below): a fourth test,
+`the_release_acts_anywhere_under_the_hold_and_for_any_window` — the release 1000 and
+20 000 samples after a verdict with a length and two samples before the hold's end, 20 000
+samples into the watchdog's hold, samples beyond the rails (the input is 16 bits wide),
+windows of 16, 63, 64, 65, 1000 and `usize::MAX` at the distance that just fits and the one
+that just does not, windows of 1 and 0, 64 of 64. 16 passed (commit ffc8af5).
+
+**Measurement: `rxagc loop`** (commit ffc8af5, the build server, 2000 frames per row;
+`reports/rx_front_agc_loop.txt`). New rows: a weaker frame of the same rate and length
+being received when the frame begins 1200 samples into it ("under"), and white noise
+added over L samples 1000 samples into the frame ("hit"). New column: the release acting
+40 samples (2 µs) late with its hold. Frames lost of 2000:
+
+| Row | from the lock | front alone (no release) | **front + release** | release 2 µs late | nothing |
+|---|---|---|---|---|---|
+| the 23 rows of the report of 2026-11-21 | as there | as there | as the candidate there | | as there |
+| preamble alone, then 54 Mb/s 30 dB (idle; loud noise; DC per index; DC before the gain) | 0; 0; 19; 0 | 477; 508; 375; 472 | **1; 2; 5; 4** | 3; 85; 6; 8 | 70; 63; 163; 125 |
+| under −25 dB: 54 Mb/s 50 dB | 0 | **2000** | **2** | 279 | 59 |
+| under −25 dB: 6 Mb/s 50 dB | 0 | 43 | 1 | 246 | 11 |
+| under −10 dB: 6 Mb/s 50 dB | 0 | 0 | 9 | 188 | 62 |
+| hit 4, +10 dB: 54 Mb/s 30 dB | 2000 | 2000 | 2000 | 2000 | 2000 |
+| hit 4, +20 dB: 6 Mb/s 30 dB | 91 | 91 | 94 | 91 | 141 |
+| hit 8, +20 dB: 6 Mb/s 30 dB | 710 | 710 | **1010** | 709 | 1249 |
+| hit 8, +10 dB: 6 Mb/s 30 dB | 21 | 21 | **54** | 21 | 116 |
+| hit 16, +10 dB: 6 Mb/s 30 dB | 384 | 383 | **766** | 384 | 950 |
+
+1. **The model's rule is the candidate, to the frame.** All 23 rows of the old report are
+   identical in all nine old columns at 2000 frames (and at 100 frames against the binary
+   before the change): the plain rows, the SIFS rows and the loud-noise rows are untouched
+   by the release, TGn D 54 Mb/s 40 dB is 4 against 2 as before, and the four rows after a
+   preamble alone are 1, 2, 5 and 4 of 2000 against 477, 508, 375 and 472.
+2. **A stronger frame inside a weaker one is the same failure, and complete.** With the
+   hold alone every one of 2000 frames at 54 Mb/s is lost: the gain is held for a frame
+   25 dB weaker. With the release 2 are lost; the front declares the stronger frame
+   (4000 declarations, 2000 streams aborted by the second). At 6 Mb/s the frame mostly
+   survives the clipping (43 lost) and the release still helps (1). With the weaker frame
+   only 10 dB below, at 6 Mb/s, the hold alone loses none and the release 9: the gain
+   moves in 97 frames and the weaker frame is then interference at 10 dB.
+3. **The cost: a clipping burst inside a 6 Mb/s frame.** A frame at 6 Mb/s often survives
+   a short burst under a still gain; with the release the gain moves under it (in 1299 to
+   2000 of the 2000 frames) and with it the carrier's phase and the offset. 8 samples
+   20 dB above the frame: 1010 lost against 710; 8 samples at +10 dB: 54 against 21; 16
+   samples at +10 dB: 766 against 383; 4 samples at +20 dB: 94 against 91. Of the frames
+   that the burst alone spares, the release loses up to a quarter (300 of 1290; 383 of
+   1617).
+   At 54 Mb/s the burst loses the frame in every column, with and without a hold.
+   No hold at all is worse than either in every one of these rows (116 to 1249).
+4. **A release that acts 2 µs late is a different rule.** It costs nothing in the burst
+   rows (the burst is over when it acts; the gain still moves in as many frames, and why
+   that then costs no frame was not looked into) — and it loses 279, 246 and
+   188 of 2000 in the "under" rows and 85 after a preamble in loud noise, because the
+   stronger frame's short training field is half over before the control may answer. So
+   the release wants the same speed as the control's own overload detector for what it is
+   for, and a burst is what that speed costs. Both cannot be had by a delay.
+5. **Where it does not matter:** every row without a burst, a preamble before it or a
+   frame under it differs by single frames between the three columns with the front's
+   hold.
+
+**Reading for the decision.** The release trades frames lost for certain (a quarter of
+those after an aborted preamble, all of the stronger-inside-weaker ones at 54 Mb/s)
+against a higher loss among 6 Mb/s frames that a clipping burst hits. How often each
+happens on air is not something this model knows: capture effect (a stronger frame over a
+weaker one) is ordinary in a busy channel; a burst of 0.4 to 0.8 µs that clips the ADC
+without being a frame is radar or an impulsive interferer. The founder decided for the
+release before these rows existed; the rows are for R1 to weigh against captures.
+
+**Independent review (fresh agent, the diff of 27b2e30..58fe414 and ADR 0008, not the
+conclusions).** No defect found in the rule: order inside `push`, `signal`, `close`, the
+watchdog, an overrun, windows of 0, 1, 64 and above, no panic path; a randomized
+differential test of its own (600 trials, 102 with a release; slow and stalled readers,
+all four verdicts, windows and counts from 0 to `usize::MAX`) found the beats and the
+acquisitions identical to a run with the release off in every trial and the hold equal to
+an independent oracle. Old binary against new, `loop` at 40 frames: the 23 old rows
+identical. Found and corrected:
+- *holes in the gate:* of its 32 mutants 8 survived, 7 of them real — no release once the
+  verdict is in; none later than 200 samples after the stream's opening; `==` on the
+  rails; a window of 64 or more seeing nothing; windows from 16 up treated as 64; a rail
+  register of 8 bits; a shift by 64 at a window of 64; a window of 0 treated as 1. The
+  fourth test (above) was added and all eight now fail it; the ninth survivor (the release
+  only while a stream is open) is equivalent;
+- the ADR's amendment was cited by the code and not yet written (it is in this PR);
+- "under": the frame began 1152 to 1197 samples into the weaker one, not 1200 (the weaker
+  frame was placed at a fixed sample): placed at the frame's own lead now; a dead branch
+  removed;
+- "hit": the text did not say the burst is added, that its power is one draw (2.6 to
+  11.9 dB measured for "4, +10 dB" over 6 frames) and that it goes through the channel's
+  delay and clock offset;
+- the header did not say the release is off in the timer columns; stale comments
+  (`Chain::Stream`, "the hold stays up", the window's limit).
+Noted and left: the row "hit 4 +10 dB, 54 Mb/s" is saturated in every column (kept: it
+says a clipping burst costs the 54 Mb/s frame whatever holds the gain); a burst row has
+no row with the same frames and no burst; `Burst::Frame`'s "650 samples into the stream"
+is 600 to 649.
+Not checked by it: any 2000-frame number, `per`/`level`/`dc`, how far a burst spreads
+after the fractional delay, `rxper stream` before and after (argued from the code: it
+never reads the hold), `scripts/check.sh`.
+
+**What this is not.** One seed per row, one run. The numbers 4 and 2 were chosen on the
+preamble rows at 200 frames; nothing here searched for better ones against the burst rows.
+The released control returns to the largest gain and searches (an assumption about a
+radio). The rails are the ADC's: a radio that clips before its ADC needs its own flag. The
+weaker frame under the frame has the same rate, length and channel; the burst is white
+noise through the frame's channel. No float chain in the loop.
+
+**The `stream` column with the release** (`rxagc dc`, `level`, `per` at commit 5a9a9fa,
+whose `stream` path is that of ffc8af5; 2000 frames per row; the three reports replaced).
+The old columns are identical cell for cell. The `stream` column, against the run with the
+hold alone: `level` no cell of 35 changed; `dc` one of 49, by one frame; `per` 12 of 126,
+every one upward: one frame in seven cells, and through TGn D above the noise's reach
+6 Mb/s 50 and 60 dB 5 and 2 of 2000 (0 and 0 before), 24 Mb/s 30, 50 and 60 dB 3, 2 and 4
+(1, 0, 1). So in a fading channel at a high level the release costs a few frames of 2000
+that the hold alone kept (a frame's own peaks at a gain held a little high). The SNR at
+10 % PER moves in one line, by 0.01 dB.
+
+**Rules in between, in the tool only** (`rxagc release`, commit of the tool after
+ffc8af5, 2000 frames per row on `loop`'s frames; `reports/rx_front_agc_release.txt`). The
+founder asked for something between the hold alone and the release as it is. Tried: other
+counts and windows, and a rule by the rate — 2 of 4 until the verdict on SIGNAL of the open
+stream names 6, 9 or 12 Mb/s, another rule from then on. Frames lost of 2000:
+
+| Row | hold alone | **2 of 4 (the model)** | 4 of 8 | 8 of 16 | 24 of 32 | by rate: none | by rate: 8/16 | by rate: 24/32 |
+|---|---|---|---|---|---|---|---|---|
+| preamble alone, then 54 Mb/s | 477 | 1 | 100 | 290 | 477 | 175 | 101 | 175 |
+| preamble alone, then 6 Mb/s | 3 | 0 | 41 | 136 | 3 | 1 | 48 | 1 |
+| the same at 54 Mb/s in loud noise | 508 | 2 | 2 | 2 | 5 | 189 | 2 | 3 |
+| under −25 dB, 54 Mb/s | 2000 | 2 | 2 | 2 | 4 | 2 | 2 | 2 |
+| under −25 dB, 6 Mb/s | 43 | 1 | 1 | 1 | 2 | 23 | 1 | 2 |
+| under −10 dB, 6 Mb/s | 0 | 9 | 19 | 40 | 8 | 62 | 39 | 69 |
+| hit 4, +20 dB, 6 Mb/s | 91 | 94 | 67 | 91 | 91 | 91 | 91 | 91 |
+| hit 8, +20 dB, 6 Mb/s | 710 | 1010 | 795 | 529 | 710 | 711 | 530 | 711 |
+| hit 8, +10 dB, 6 Mb/s | 21 | 54 | 19 | 21 | 21 | 21 | 21 | 21 |
+| hit 16, +10 dB, 6 Mb/s | 383 | 766 | 496 | 383 | 383 | 384 | 383 | 384 |
+
+(6 of 8 and 12 of 16 are in the report: 477 after a preamble, 530 and 303 in "under
+−10 dB". The four rows without a burst, a preamble or a frame under are 0 to 4 in every
+column; "hit 4, +10 dB, 54 Mb/s" is 2000 in every column.)
+
+6. **No rule tried has both ends.** The preamble row wants the release within a few
+   samples (the gain stands at its largest and the control needs the whole short training
+   field to come down): 2 of 4 loses 1, 4 of 8 loses 100, 8 of 16 loses 290, 24 of 32
+   all 477. The burst rows want patience: 24 of 32 costs nothing there, 4 of 8 a quarter
+   of what 2 of 4 costs.
+7. **The rule by the rate removes the burst's cost and keeps the stronger-frame case, and
+   pays 175 of 2000 after a preamble alone:** the SIGNALs read from noise that name 6, 9
+   or 12 Mb/s (three rates of eight, of the 470 that pass) put the front into its patient
+   rule just when the frame arrives at the largest gain. What it would need is fewer
+   noise SIGNALs believed: a quality threshold on SIGNAL's decoding. Not built.
+8. **A frame 10 dB under at 6 Mb/s is lost more by every slower rule** (19 to 530
+   against 9): a release that comes during the frame's training fields is worse than one
+   at its first samples or none.
+9. A release some samples after an 8-sample burst (6 of 8: 485; 8 of 16: 529) loses
+   fewer frames than no release (710). Not looked into.
+
+Nothing of this is in the model: it runs 2 of 4, as decided.

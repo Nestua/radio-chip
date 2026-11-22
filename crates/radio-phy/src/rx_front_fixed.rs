@@ -1017,8 +1017,9 @@ const SIGNAL_END: usize = PAIR_LEN + GI_LEN + LTF_SYMBOL_LEN;
 /// Samples of one data symbol.
 const SYMBOL: usize = GI_LEN + LTF_SYMBOL_LEN;
 
-/// The pace of the replay (ADR 0008, decision 3). Neither number changes a sample of the
-/// stream; they decide when a slow reader loses it.
+/// The pace of the replay (ADR 0008, decision 3) and the release of the hold (decision 2 as
+/// amended 2026-11-22). No number here changes a sample of the stream: the pace decides
+/// when a slow reader loses it, the release when the hold stops keeping the gain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandoffConfig {
     /// Beats the stream can hand on in one sample period: the clocks per sample (8 at
@@ -1027,6 +1028,13 @@ pub struct HandoffConfig {
     /// Sample periods from the declaration to the first beat: the DC estimate's 128 reads,
     /// multiplication and division (≈ 160 clocks, 20 periods).
     pub start_delay: usize,
+    /// The ADC samples the release looks back over, the newest included. A number above 64
+    /// is 64; 0 sees no sample.
+    pub clip_window: usize,
+    /// The hold is given up when this many samples of the window sit on a rail of the ADC
+    /// (I or Q at or beyond −[`ADC_FULL_SCALE`] or [`ADC_FULL_SCALE`] − 1). 0, or a count
+    /// above the window: never.
+    pub clip_count: usize,
 }
 
 impl Default for HandoffConfig {
@@ -1034,6 +1042,8 @@ impl Default for HandoffConfig {
         Self {
             rate: 8,
             start_delay: 20,
+            clip_window: 4,
+            clip_count: 2,
         }
     }
 }
@@ -1121,8 +1131,13 @@ struct Replay {
 /// The hold lasts to the frame's last sample: [`RxHandoffFixed::signal`] tells it the
 /// length; without it the watchdog ends it at the longest PPDU. The stream runs
 /// [`HANDOFF_TAIL`] samples further and closes with an end mark. A new acquisition while a
-/// packet is open ends it with an abort mark and opens its own (the hold stays up); a reader
-/// that falls [`ADC_HISTORY`] samples behind loses the stream and the hold. Every packet
+/// packet is open ends it with an abort mark and opens its own (the hold stays up, unless
+/// the release takes it in the same period); a reader
+/// that falls [`ADC_HISTORY`] samples behind loses the stream and the hold. The hold is
+/// also given up, and the stream left as it is, when `clip_count` of the last `clip_window`
+/// ADC samples sit on a rail: the gain it keeps is not the gain of what is arriving (a
+/// declaration on a burst that has ended, a stronger packet over the one being read). Only a
+/// new acquisition raises it again. Every packet
 /// opened ends in one mark, also one whose first sample was never taken; a mark that finds
 /// the one before it still waiting for the reader is not sent. A new acquisition and an
 /// overrun in the same period give the acquisition's mark. A packet whose last sample was
@@ -1137,6 +1152,8 @@ pub struct RxHandoffFixed {
     x: Ring<(i16, i16)>,
     replay: Option<Replay>,
     hold: bool,
+    /// Which of the last 64 ADC samples sat on a rail, the newest in bit 0.
+    rails: u64,
     mark: Option<HandoffEnd>,
     opened: u8,
 }
@@ -1150,6 +1167,7 @@ impl RxHandoffFixed {
             x: Ring::new(ADC_HISTORY, (0, 0)),
             replay: None,
             hold: false,
+            rails: 0,
             mark: None,
             opened: 0,
         }
@@ -1208,6 +1226,20 @@ impl RxHandoffFixed {
         }
         if let Some(a) = acquired {
             self.open(&a, n);
+        }
+        // The release (decision 2 as amended): an ADC that clips this much is not receiving
+        // the packet the hold was raised for. The window runs whatever the hold is, so a
+        // hold raised by this sample can be given up by it.
+        let full = i32::from(x.0).min(i32::from(x.1)) <= -ADC_FULL_SCALE
+            || i32::from(x.0).max(i32::from(x.1)) >= ADC_FULL_SCALE - 1;
+        self.rails = self.rails << 1 | u64::from(full);
+        let window = match self.pace.clip_window {
+            w if w >= 64 => u64::MAX,
+            w => (1u64 << w) - 1,
+        };
+        let clipped = (self.rails & window).count_ones() as usize;
+        if self.pace.clip_count > 0 && clipped >= self.pace.clip_count {
+            self.hold = false;
         }
         // The oldest sample the history still holds is n + 1 − ADC_HISTORY.
         if self

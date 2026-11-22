@@ -129,7 +129,25 @@ enum Burst {
     /// the stream (after the timer of the control's first lock on noise has run out), and
     /// the frame itself a SIFS (320 samples) after its last sample.
     Frame,
+    /// A weaker frame of the same rate and length (zeros), `db` below the frame, 600 to 650
+    /// samples into the stream; the frame itself begins [`UNDER_AT`] samples into it, in its
+    /// data.
+    Under {
+        db: f64,
+    },
+    /// White noise added to the frame over `len` samples, [`HIT_AT`] samples into it (in its
+    /// data), nominally `db` above the frame's mean power (one draw of `len` samples: a few
+    /// dB either way for a short one), before the channel: an interferer's burst.
+    Hit {
+        len: usize,
+        db: f64,
+    },
 }
+
+/// Where the frame begins inside the weaker one of [`Burst::Under`].
+const UNDER_AT: usize = 1200;
+/// Where the burst of [`Burst::Hit`] begins inside the frame.
+const HIT_AT: usize = 1000;
 
 /// A receiver chain on the ADC's samples.
 #[derive(Clone, Copy, PartialEq)]
@@ -140,8 +158,8 @@ enum Chain {
     /// with `in_bits = out_bits` and this `in_shift`.
     Int { out_bits: u32, in_shift: u32 },
     /// The receiver as ADR 0008 has it, in a closed loop with the gain control ([`keep`]
-    /// with the front's hold alone): the column's other fields do not apply, nor does the
-    /// row's assumed hold.
+    /// with the front's hold and its release, no timer): the column's other fields do not
+    /// apply, nor does the row's assumed hold.
     Stream,
 }
 
@@ -235,6 +253,7 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
     let f = frame(&psdu, pt.rate);
     let mut lead = 600 + (rng.uniform() * 50.0) as usize;
     let mut x = vec![(0.0, 0.0); lead];
+    let mut under = None;
     match pt.burst {
         Burst::None => {}
         Burst::Preamble => x[..320].copy_from_slice(&f[..320]),
@@ -244,9 +263,34 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
             x.extend(vec![(0.0, 0.0); 320]);
             lead = x.len();
         }
+        Burst::Under { .. } => {
+            // The weaker frame takes the frame's place and the frame moves into it.
+            under = Some(lead);
+            x.extend(vec![(0.0, 0.0); UNDER_AT]);
+            lead = x.len();
+        }
+        Burst::Hit { .. } => {}
     }
     x.extend_from_slice(&f);
     x.extend(vec![(0.0, 0.0); 200]);
+    match pt.burst {
+        Burst::Under { db } => {
+            let a = 10f64.powf(-db / 20.0);
+            let weak = frame(&[0u8; OCTETS], pt.rate);
+            // The frame ends UNDER_AT samples after the weaker one: `x` holds both.
+            for (o, w) in x[under.unwrap_or(0)..].iter_mut().zip(&weak) {
+                *o = (o.0 + a * w.0, o.1 + a * w.1);
+            }
+        }
+        Burst::Hit { len, db } => {
+            // Its own generator: the frame's own draws do not depend on the burst.
+            let mut hit = Rng::new(mix(mix(pt.scene, number), 0x6869_7421));
+            let at = lead + HIT_AT;
+            let noise = awgn(&x[at..at + len], -db, mean_power(&f), &mut hit);
+            x[at..at + len].copy_from_slice(&noise);
+        }
+        _ => {}
+    }
     let x = match pt.ch {
         Channel::Awgn => fractional_delay(&x, rng.uniform()),
         Channel::Tgn(m) => {
@@ -298,7 +342,8 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
             lock_hold: 0,
             at_max: true,
             hold: Hold::Front { delay: 0 },
-            clip_release: false,
+            clip_release: true,
+            trial: None,
         };
         // The loop's phase jumps are drawn apart from the frame's and the other columns'.
         keep(&st, agc, &front, mix(mix(pt.scene, number), 0x6a75_6d70)).ok
@@ -466,16 +511,29 @@ struct Keeper {
     at_max: bool,
     /// How the hold is driven.
     hold: Hold,
-    /// A candidate, in this tool only (not in the model, not in ADR 0008): the front's hold
-    /// stops acting on the control once [`CLIP_COUNT`] of the last [`CLIP_WINDOW`] ADC
-    /// samples under it sit on a rail, until the front declares again or its hold falls.
+    /// The front gives up its hold on a clipping ADC (ADR 0008, decision 2 as amended
+    /// 2026-11-22: [`HandoffConfig::clip_count`] of the last [`HandoffConfig::clip_window`]
+    /// samples on a rail). Off: the hold as it was before that amendment.
     clip_release: bool,
+    /// A release tried in this tool only, in place of the model's (`rxagc release`).
+    trial: Option<Trial>,
 }
 
-/// The candidate release of [`Keeper::clip_release`]: an ADC that clips this much is not
-/// receiving the packet the hold was raised for.
-const CLIP_WINDOW: usize = 4;
-const CLIP_COUNT: usize = 2;
+/// A release that is in this tool only: the front's hold stops acting on the control once
+/// `count` of the last `window` ADC samples sit on a rail, until the front declares again.
+#[derive(Clone, Copy, PartialEq)]
+struct Trial {
+    /// (count, window) until the decoder's verdict on SIGNAL names a robust rate, and all
+    /// through when `robust` is `None`.
+    fast: (usize, usize),
+    /// What holds once SIGNAL has decoded to 6, 9 or 12 Mb/s (a frame that survives a few
+    /// clipped samples under a still gain): `None` is `fast` all through, `Some(None)` no
+    /// release at all, `Some(Some(rule))` that rule.
+    robust: Option<Option<(usize, usize)>>,
+}
+
+/// The longest window a [`Trial`] looks back over.
+const TRIAL_WINDOW: usize = 32;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hold {
@@ -541,23 +599,32 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
         Hold::Front { delay } => Some(delay),
         _ => None,
     };
+    let pace = HandoffConfig::default();
     let mut control = agc.start(Some(st.dc));
     let mut hand = RxHandoffFixed::new(
         RxConfig::new(FS),
         FixedRxConfig::default(),
-        HandoffConfig::default(),
+        HandoffConfig {
+            clip_count: if k.clip_release && k.trial.is_none() {
+                pace.clip_count
+            } else {
+                0
+            },
+            ..pace
+        },
     );
     // The front's hold after each sample not yet acted on, oldest first.
     let mut line: VecDeque<bool> = VecDeque::new();
-    // The candidate release: which of the last ADC samples sat on a rail, and whether the
-    // hold in force has been given up for it.
+    // The trial release: the last ADC samples' rail flags (the newest last), whether the
+    // hold in force has been given up, whether SIGNAL of the open stream named a robust
+    // rate, and whether a declaration still waits for its stream's first beat.
     let mut rails: VecDeque<bool> = VecDeque::new();
-    let mut given_up = false;
+    let (mut given_up, mut robust, mut unopened) = (false, false, false);
     let (mut gain, mut phase) = (f64::NAN, 0.0);
     let mut z: Vec<IQ> = Vec::new();
     let (mut word, mut tag) = (0i64, 0u8);
     // The verdict that is due: its period, the stream's tag and what SIGNAL said.
-    let mut due: Option<(usize, u8, Option<usize>)> = None;
+    let mut due: Option<(usize, u8, Option<usize>, bool)> = None;
     let mut out = Kept::default();
     for (n, &s) in st.xs.iter().enumerate() {
         let held = match delay {
@@ -588,23 +655,28 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
         out.declared += usize::from(got.acquired.is_some());
         let rail = |v: i16| i32::from(v) <= -ADC_FULL_SCALE || i32::from(v) >= ADC_FULL_SCALE - 1;
         rails.push_back(rail(sample.0) || rail(sample.1));
-        if rails.len() > CLIP_WINDOW {
+        if rails.len() > TRIAL_WINDOW {
             rails.pop_front();
         }
-        given_up &= got.acquired.is_none();
+        if got.acquired.is_some() {
+            (given_up, robust, unopened) = (false, false, true);
+        }
         for beat in got.beats {
             match beat {
                 HandoffBeat::Sample { z: v, first } => {
                     if let Some(f) = first {
                         z.clear();
                         (word, tag) = (f.cfo_phase, f.packet);
+                        unopened = false;
                     }
                     z.push(v);
                     if z.len() == SIGNAL_END {
-                        let verdict = decode_signal_fixed(&z, 0, &ofdm, &fo, start(word))
-                            .ok()
-                            .map(|s| data_symbols(s.rate, s.length));
-                        due = Some((n + VERDICT_LATENCY, tag, verdict));
+                        let signal = decode_signal_fixed(&z, 0, &ofdm, &fo, start(word)).ok();
+                        let slow = signal
+                            .as_ref()
+                            .is_some_and(|s| matches!(s.rate, Rate::R6 | Rate::R9 | Rate::R12));
+                        let verdict = signal.map(|s| data_symbols(s.rate, s.length));
+                        due = Some((n + VERDICT_LATENCY, tag, verdict, slow));
                     }
                 }
                 HandoffBeat::End(end) => {
@@ -620,15 +692,25 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
                 }
             }
         }
-        if let Some((_, tag, verdict)) = due.filter(|d| d.0 == n) {
+        if let Some((_, of, verdict, slow)) = due.filter(|d| d.0 == n) {
             due = None;
-            hand.signal(tag, verdict);
+            hand.signal(of, verdict);
+            // The verdict is the open stream's: no declaration since its first beat.
+            robust |= slow && of == tag && !unopened;
         }
         if delay.is_some() {
             let hold = hand.hold();
-            given_up &= hold;
-            given_up |=
-                k.clip_release && hold && rails.iter().filter(|r| **r).count() >= CLIP_COUNT;
+            if let Some(t) = k.trial {
+                let rule = match t.robust {
+                    Some(r) if robust => r,
+                    _ => Some(t.fast),
+                };
+                given_up &= hold;
+                given_up |= hold
+                    && rule.is_some_and(|(c, w)| {
+                        rails.iter().rev().take(w).filter(|r| **r).count() >= c
+                    });
+            }
             line.push_back(hold && !given_up);
         }
     }
@@ -702,13 +784,14 @@ fn run_loop(pt: &Point, keepers: &[Keeper], frames: usize) -> LoopTally {
 
 /// Decision 2 of ADR 0008 as a closed loop: the control's timer and the front's own hold
 /// against the hold the earlier commands assumed.
-fn hold_loop(frames: usize) {
+fn hold_loop(frames: usize, trials: bool) {
     let keeper = |name: &'static str, lock_hold: usize, at_max: bool, hold: Hold| Keeper {
         name,
         lock_hold,
         at_max,
         hold,
         clip_release: false,
+        trial: None,
     };
     let front = Hold::Front { delay: 0 };
     let keepers = [
@@ -722,11 +805,45 @@ fn hold_loop(frames: usize) {
         keeper("t<max + front +400", 512, false, Hold::Front { delay: 400 }),
         Keeper {
             clip_release: true,
-            ..keeper("front, clip release", 0, true, front)
+            ..keeper("front + release", 0, true, front)
+        },
+        Keeper {
+            clip_release: true,
+            ..keeper("front + release +40", 0, true, Hold::Front { delay: 40 })
         },
     ];
+    // `release`: the model's rule against rules that are in this tool only.
+    let trial = |name: &'static str, fast, robust| Keeper {
+        trial: Some(Trial { fast, robust }),
+        ..keeper(name, 0, true, front)
+    };
+    let tried = [
+        keeper("from the lock", 0, true, Hold::FromLock),
+        keeper("front alone", 0, true, front),
+        Keeper {
+            clip_release: true,
+            ..keeper("front + release", 0, true, front)
+        },
+        trial("4 of 8", (4, 8), None),
+        trial("6 of 8", (6, 8), None),
+        trial("8 of 16", (8, 16), None),
+        trial("12 of 16", (12, 16), None),
+        trial("24 of 32", (24, 32), None),
+        trial("2/4; slow rate: none", (2, 4), Some(None)),
+        trial("2/4; slow rate: 8/16", (2, 4), Some(Some((8, 16)))),
+        trial("2/4; slow rate: 12/16", (2, 4), Some(Some((12, 16)))),
+        trial("2/4; slow rate: 24/32", (2, 4), Some(Some((24, 32)))),
+    ];
+    let keepers: &[Keeper] = if trials { &tried } else { &keepers };
     const IDLE: f64 = -30.0;
     const LOUD: f64 = -5.0;
+    // The rows `release` runs: indices into `points`.
+    const TRIED: [usize; 16] = [2, 4, 6, 8, 10, 11, 12, 15, 17, 18, 19, 20, 21, 22, 23, 24];
+    let HandoffConfig {
+        clip_window,
+        clip_count,
+        ..
+    } = HandoffConfig::default();
     println!(
         "# rxagc loop: ADR 0008, decision 2, as a closed loop a sample at a time. {frames} frames of {OCTETS} octets per row, the\n\
          # frames of `hold` (the same scenes); noise at {IDLE} dBFS at the largest gain unless the row says, no DC offset unless the\n\
@@ -746,13 +863,15 @@ fn hold_loop(frames: usize) {
          #                      to the longest PPDU's end with no verdict) holds the control from the sample after;\n\
          #   timer<max + front = the same, the timer keeping only a lock taken below the largest gain\n\
          #                      (a lock on noise is left at the first overload);\n\
-         #   front alone      = the front's hold without any timer (decision 2 as amended);\n\
+         #   front alone      = the front's hold without any timer and without the release (decision 2 before 2026-11-22);\n\
          #   timer<max alone  = that timer and no hold;   nothing = neither;\n\
          #   t<max + front +40/+400 = timer<max + front with the hold acting 40 and 400 samples (2 and 20 µs) later, at\n\
          #                      both its edges: the control stays held that long past the hold's end;\n\
-         #   front, clip release = a candidate that is in this tool only (not in the model, not in ADR 0008): front\n\
-         #                      alone, and the hold stops acting on the control once {CLIP_COUNT} of the last {CLIP_WINDOW} ADC samples\n\
-         #                      under it sit on a rail, until the front declares again or its hold falls.\n\
+         #   front + release  = decision 2 as amended 2026-11-22, the model's default: front alone, and the front\n\
+         #                      gives up its hold when {clip_count} of the last {clip_window} ADC samples sit on a rail\n\
+         #                      (RxHandoffFixed; the stream goes on, only a new declaration raises the hold again);\n\
+         #   front + release +40 = the same with the hold acting 40 samples (2 µs) later, its release with it.\n\
+         # The release is off in every column but the last two.\n\
          # A released control returns to the largest gain and searches (an assumption).\n\
          # Rows 'preamble +': the frame's two training fields alone (320 samples, nothing after them)\n\
          # are sent first, 280 to 330 samples before the frame: an acquisition whose SIGNAL is noise.\n\
@@ -762,11 +881,27 @@ fn hold_loop(frames: usize) {
          # control locks on it below the largest gain.\n\
          # Rows 'DC per index -20': an offset of -20 dBFS at every gain, its direction per gain index; rows 'DC before\n\
          # gain -10': an offset of -10 dBFS at the largest gain that falls with the gain, one direction (channel::GainDc).\n\
+         # Rows 'under -D dB': a weaker frame of the same rate and length, D dB below the frame, is being received\n\
+         # (from 600 to 650 samples into the stream) when the frame begins {UNDER_AT} samples into it; the frame is the\n\
+         # one counted, and its SNR is the row's.\n\
+         # Rows 'hit L +D dB': white noise added to the frame over L samples, {HIT_AT} samples into it, nominally D dB above\n\
+         # the frame's mean power (one draw: a few dB either way at L = 4), before the channel's delay and clock offset.\n\
          # Each cell: frames lost, +a−b against 'from the lock' (lost by this column alone, by that one\n\
          # alone), then acquisitions declared / streams stopped on a failed SIGNAL / streams ended by a new\n\
          # declaration or an overrun of the history / frames whose gain changed after the short training\n\
          # field and more than 16 samples before the frame's end."
     );
+    if trials {
+        println!(
+            "# rxagc release: the rows of `loop` named below, the same frames, with other columns. Releases tried in\n\
+             # this tool only (not in the model, not in ADR 0008), each in place of the model's, on front alone:\n\
+             #   C of W           = the hold stops acting on the control once C of the last W ADC samples sit on a rail,\n\
+             #                      until the front declares again ('2 of 4' is the model's: the column front + release);\n\
+             #   2/4; slow rate: X = 2 of 4, until the decoder's verdict on SIGNAL of the open stream names 6, 9 or\n\
+             #                      12 Mb/s; from then on X (none: no release; C/W: that rule).\n\
+             # The text above is `loop`'s; its columns that are not below were not run."
+        );
+    }
     println!(
         "# {:<38} {:>6} {}",
         "point",
@@ -780,7 +915,9 @@ fn hold_loop(frames: usize) {
     let d = Channel::Tgn(TgnModel::D);
     let (n, p, f) = (Burst::None, Burst::Preamble, Burst::Frame);
     let (awgn, r54, r6) = (Channel::Awgn, Rate::R54, Rate::R6);
-    let points: [(&str, Channel, Rate, f64, Burst, f64); 17] = [
+    let under = |db| Burst::Under { db };
+    let hit = |len, db| Burst::Hit { len, db };
+    let points: [(&str, Channel, Rate, f64, Burst, f64); 25] = [
         ("AWGN 54 Mb/s 25 dB", awgn, r54, 25.0, n, IDLE),
         ("AWGN 54 Mb/s 30 dB", awgn, r54, 30.0, n, IDLE),
         ("AWGN 54 Mb/s 40 dB", awgn, r54, 40.0, n, IDLE),
@@ -819,6 +956,70 @@ fn hold_loop(frames: usize) {
             f,
             LOUD,
         ),
+        (
+            "under -25 dB: AWGN 54 Mb/s 50 dB",
+            awgn,
+            r54,
+            50.0,
+            under(25.0),
+            IDLE,
+        ),
+        (
+            "under -25 dB: AWGN 6 Mb/s 50 dB",
+            awgn,
+            r6,
+            50.0,
+            under(25.0),
+            IDLE,
+        ),
+        (
+            "under -10 dB: AWGN 6 Mb/s 50 dB",
+            awgn,
+            r6,
+            50.0,
+            under(10.0),
+            IDLE,
+        ),
+        (
+            "hit 4 +10 dB: AWGN 54 Mb/s 30 dB",
+            awgn,
+            r54,
+            30.0,
+            hit(4, 10.0),
+            IDLE,
+        ),
+        (
+            "hit 4 +20 dB: AWGN 6 Mb/s 30 dB",
+            awgn,
+            r6,
+            30.0,
+            hit(4, 20.0),
+            IDLE,
+        ),
+        (
+            "hit 8 +20 dB: AWGN 6 Mb/s 30 dB",
+            awgn,
+            r6,
+            30.0,
+            hit(8, 20.0),
+            IDLE,
+        ),
+        (
+            "hit 8 +10 dB: AWGN 6 Mb/s 30 dB",
+            awgn,
+            r6,
+            30.0,
+            hit(8, 10.0),
+            IDLE,
+        ),
+        (
+            "hit 16 +10 dB: AWGN 6 Mb/s 30 dB",
+            awgn,
+            r6,
+            30.0,
+            hit(16, 10.0),
+            IDLE,
+        ),
     ];
     // The offsets of `dc` on the frames of the 2nd, 11th and 13th rows: (name, index of the
     // row in `points`, per index, before the gain at the largest).
@@ -834,7 +1035,8 @@ fn hold_loop(frames: usize) {
         .iter()
         .enumerate()
         .map(|(pi, p)| (p.0, pi, none(), none()))
-        .chain(offsets);
+        .chain(offsets)
+        .filter(|r| !trials || (r.2.is_infinite() && r.3.is_infinite() && TRIED.contains(&r.1)));
     for (name, pi, per_index, before) in rows {
         let (_, ch, rate, snr, burst, idle) = points[pi];
         let pt = Point {
@@ -849,7 +1051,7 @@ fn hold_loop(frames: usize) {
             hold_after: None,
             burst,
         };
-        let t = run_loop(&pt, &keepers, frames);
+        let t = run_loop(&pt, keepers, frames);
         println!(
             "  {name:<38} {:>6} {}",
             t.frames,
@@ -1010,7 +1212,7 @@ fn preamble_text(what: &str, frames: usize) {
          #               CFO word and the register fs/fc (FixedTracking::from_cfo_word): no float\n\
          #               between the ADC and the PSDU; the int columns of a row share one acquisition;\n\
          #   stream    = where a command has it: the receiver of ADR 0008 in a closed loop with the\n\
-         #               gain control, a sample at a time (the column `front alone` of `loop`): the\n\
+         #               gain control, a sample at a time (the column `front + release` of `loop`): the\n\
          #               streaming front (RxHandoffFixed), its own hold in place of the assumed one,\n\
          #               the offset of the two long training symbols removed, 13 bits, the decoder\n\
          #               at its defaults reading the beats; the front searches all through and the\n\
@@ -1792,7 +1994,8 @@ fn main() -> ExitCode {
         "cfo" => cfo(n.unwrap_or(2000)),
         "cand" => cand(n.unwrap_or(2000)),
         "hold" => hold(n.unwrap_or(2000)),
-        "loop" => hold_loop(n.unwrap_or(2000)),
+        "loop" => hold_loop(n.unwrap_or(2000), false),
+        "release" => hold_loop(n.unwrap_or(2000), true),
         "edge" => edge(n.unwrap_or(2000)),
         _ => {
             eprintln!("usage: rxagc per|level|dc|pole|cfo|cand|hold|edge|loop [frames]");

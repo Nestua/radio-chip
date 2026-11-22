@@ -1035,3 +1035,334 @@ fn an_invalid_configuration_hands_on_nothing_and_builds_no_table() {
         assert!(log.acquired.is_empty() && log.beats.is_empty() && log.holds().is_empty());
     }
 }
+
+/// The 12-bit ADC's rails.
+const LO: i16 = -2048;
+const HI: i16 = 2047;
+
+/// A sample's index and what is put there.
+type Swap = (usize, (i16, i16));
+
+/// `adc` with the samples at `at` replaced.
+fn with(adc: &[(i16, i16)], at: &[Swap]) -> Vec<(i16, i16)> {
+    let mut out = adc.to_vec();
+    for &(n, v) in at {
+        out[n] = v;
+    }
+    out
+}
+
+#[test]
+fn two_of_four_samples_on_a_rail_give_up_the_hold_and_the_stream_goes_on() {
+    // ADR 0008, decision 2 as amended 2026-11-22. By hand: the window is the last four ADC
+    // samples (n − 3 to n); the hold is down after the push of the sample that makes two of
+    // them rail samples; a rail sample has I or Q at −2048 or 2047.
+    assert_eq!(
+        (i32::from(LO), i32::from(HI)),
+        (-ADC_FULL_SCALE, ADC_FULL_SCALE - 1)
+    );
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    assert_eq!((pace.clip_window, pace.clip_count), (4, 2));
+    // No verdict: the watchdog's hold lasts beyond this stream.
+    let (adc, _) = scene(&[SHORT], 700, 3000, 12.5, 21);
+    let go =
+        |adc: &[(i16, i16)], pace: HandoffConfig| run(adc, fx, pace, |_| usize::MAX, |_, _| None);
+    let plain = go(&adc, pace);
+    assert_eq!(plain.acquired.len(), 1);
+    let a = plain.acquired[0];
+    assert_eq!(plain.holds(), [(a.decided_at, adc.len())]);
+    // The scene itself has no rail sample under the hold.
+    assert!(adc[a.decided_at - 3..]
+        .iter()
+        .all(|s| s.0 > LO && s.0 < HI && s.1 > LO && s.1 < HI));
+
+    let p = a.decided_at + 100;
+    let kept = [(a.decided_at, adc.len())];
+    let cases: [(&[Swap], Option<usize>); 12] = [
+        // One rail sample is not enough.
+        (&[(p, (HI, 0))], None),
+        // Two that never share a window of four.
+        (&[(p, (HI, 0)), (p + 4, (HI, 0))], None),
+        (&[(p, (LO, LO)), (p + 4, (HI, HI)), (p + 8, (0, LO))], None),
+        // Two in one window: down with the second, wherever it is in the window.
+        (&[(p, (HI, 0)), (p + 3, (HI, 0))], Some(p + 3)),
+        (&[(p, (HI, 0)), (p + 2, (HI, 0))], Some(p + 2)),
+        (&[(p, (HI, 0)), (p + 1, (HI, 0))], Some(p + 1)),
+        // Either rail of either part.
+        (&[(p, (LO, 5)), (p + 3, (-7, HI))], Some(p + 3)),
+        (&[(p, (9, LO)), (p + 1, (LO, HI))], Some(p + 1)),
+        // One count short of a rail is not a rail.
+        (
+            &[
+                (p, (HI - 1, LO + 1)),
+                (p + 1, (LO + 1, HI - 1)),
+                (p + 2, (HI - 1, HI - 1)),
+            ],
+            None,
+        ),
+        (
+            &[
+                (p, (HI, 0)),
+                (p + 1, (HI - 1, 0)),
+                (p + 2, (0, LO + 1)),
+                (p + 4, (HI, 0)),
+            ],
+            None,
+        ),
+        // The first pair decides; what follows changes nothing.
+        (
+            &[
+                (p, (0, HI)),
+                (p + 3, (0, HI)),
+                (p + 4, (0, HI)),
+                (p + 50, (LO, LO)),
+            ],
+            Some(p + 3),
+        ),
+        // The hold's first sample can be its last.
+        (
+            &[(a.decided_at + 1, (HI, 0)), (a.decided_at + 2, (0, LO))],
+            Some(a.decided_at + 2),
+        ),
+    ];
+    for (k, (at, down)) in cases.iter().enumerate() {
+        let x = with(&adc, at);
+        let log = go(&x, pace);
+        assert_eq!(log.acquired, plain.acquired, "case {k}");
+        match down {
+            None => assert_eq!(log.holds(), kept, "case {k}"),
+            Some(n) => assert_eq!(log.holds(), [(a.decided_at, *n)], "case {k}"),
+        }
+        // The stream does not notice: the same number of beats in the same periods, no end
+        // mark, and the samples are the hand-off's of what the ADC gave.
+        assert_eq!(log.beats.len(), plain.beats.len(), "case {k}");
+        assert!(
+            log.beats.iter().zip(&plain.beats).all(|(u, v)| u.0 == v.0),
+            "case {k}"
+        );
+        let count = log.beats.len();
+        assert_eq!(
+            log.samples(0, count),
+            reference(&x, &a, &fx)[..count],
+            "case {k}"
+        );
+    }
+
+    // A count of zero: no release, whatever the ADC does.
+    let off = HandoffConfig {
+        clip_count: 0,
+        ..pace
+    };
+    let railed: Vec<Swap> = (0..40).map(|k| (p + k, (HI, LO))).collect();
+    let log = go(&with(&adc, &railed), off);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(log.holds(), kept);
+    // The same samples with the rule on: down with the second of them.
+    assert_eq!(
+        go(&with(&adc, &railed), pace).holds(),
+        [(a.decided_at, p + 1)]
+    );
+
+    // Other numbers: three of eight.
+    let wide = HandoffConfig {
+        clip_window: 8,
+        clip_count: 3,
+        ..pace
+    };
+    let r = (HI, 0);
+    assert_eq!(
+        go(&with(&adc, &[(p, r), (p + 2, r), (p + 7, r)]), wide).holds(),
+        [(a.decided_at, p + 7)]
+    );
+    assert_eq!(
+        go(&with(&adc, &[(p, r), (p + 2, r), (p + 8, r)]), wide).holds(),
+        kept
+    );
+    assert_eq!(go(&with(&adc, &[(p, r), (p + 7, r)]), wide).holds(), kept);
+    // A count the window cannot reach never releases.
+    let never = HandoffConfig {
+        clip_window: 4,
+        clip_count: 5,
+        ..pace
+    };
+    assert_eq!(go(&with(&adc, &railed), never).holds(), kept);
+}
+
+#[test]
+fn a_hold_given_up_stays_down_through_the_verdict_and_a_new_declaration_raises_it() {
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    // The scene of `a_new_declaration_aborts…`: two frames, the first still open at the
+    // second's declaration.
+    let (adc, _) = scene(&[SHORT, SHORT], 700, 600, -33.0, 8);
+    let plain = run(&adc, fx, pace, |_| usize::MAX, |_, _| None);
+    assert_eq!(plain.acquired.len(), 2);
+    let (a, b) = (plain.acquired[0], plain.acquired[1]);
+    assert_eq!(plain.holds(), [(a.decided_at, adc.len())]);
+
+    // Two rail samples 30 samples after the first declaration (in the noise between the
+    // frames, 370 samples before the second frame).
+    let p = a.decided_at + 30;
+    assert!(p + 300 < b.fft_start);
+    let x = with(&adc, &[(p, (HI, HI)), (p + 1, (LO, LO))]);
+    let log = run(&x, fx, pace, |_| usize::MAX, |_, _| None);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(
+        log.holds(),
+        [(a.decided_at, p + 1), (b.decided_at, adc.len())]
+    );
+    // The streams are as without the rails: the first aborted by the second.
+    assert_eq!(log.beats.len(), plain.beats.len());
+    assert_eq!(
+        log.beats[b.decided_at - a.fft_start],
+        (b.decided_at, HandoffBeat::End(HandoffEnd::Acquisition))
+    );
+
+    // A verdict with a length after the release: the hold stays down, the stream ends at
+    // the length's end as it would have.
+    let (adc, _) = scene(&[SHORT], 700, 900, 12.5, 1);
+    let v = verdict_at(180, Some(SHORT_SYMBOLS));
+    let plain = run(&adc, fx, pace, |_| usize::MAX, &v);
+    let a = plain.acquired[0];
+    let p = a.decided_at + 10;
+    assert!(p + 1 < a.fft_start + SIGNAL_END + 180);
+    let x = with(&adc, &[(p, (HI, 0)), (p + 1, (HI, 0))]);
+    let log = run(&x, fx, pace, |_| usize::MAX, &v);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(log.holds(), [(a.decided_at, p + 1)]);
+    assert_eq!(log.after_verdict, [(a.fft_start + SIGNAL_END + 180, false)]);
+    assert_eq!(log.beats.len(), plain.beats.len());
+    assert_eq!(log.beats.last(), plain.beats.last());
+}
+
+#[test]
+fn rail_samples_before_the_declaration_count_in_the_window() {
+    // The window does not start with the hold: it is the ADC's last four samples.
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    let (adc, _) = scene(&[SHORT], 700, 3000, 12.5, 21);
+    let go = |adc: &[(i16, i16)]| run(adc, fx, pace, |_| usize::MAX, |_, _| None);
+    let plain = go(&adc);
+    let a = plain.acquired[0];
+    let d = a.decided_at;
+    // One before the declaration and one after it: up for one push.
+    let x = with(&adc, &[(d - 1, (HI, 0)), (d + 1, (0, LO))]);
+    let log = go(&x);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(log.holds(), [(d, d + 1)]);
+    // Three samples earlier it has left the window by then.
+    let x = with(&adc, &[(d - 3, (HI, 0)), (d + 1, (0, LO))]);
+    let log = go(&x);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(log.holds(), [(d, adc.len())]);
+    // Two in the window at the declaring sample: the hold is never shown.
+    let x = with(&adc, &[(d - 2, (HI, 0)), (d - 1, (0, LO))]);
+    let log = go(&x);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(log.holds(), []);
+}
+
+#[test]
+fn the_release_acts_anywhere_under_the_hold_and_for_any_window() {
+    // Review of 2026-11-22: the release late in a packet, after the verdict, a sample beyond
+    // the rails, and windows of 0, 1, 16, 63, 64 and more.
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    let r = (HI, 0);
+
+    // A long frame with its verdict: 1000 octets at 6 Mb/s, 16 + 8000 + 6 bits in symbols
+    // of 24, 335 data symbols. The release 1000 and 20 000 samples after the verdict.
+    let symbols = (16usize + 8000 + 6).div_ceil(24);
+    assert_eq!(symbols, 335);
+    let (adc, _) = scene(&[(Rate::R6, 1000)], 700, 900, 12.5, 31);
+    let v = verdict_at(180, Some(symbols));
+    let plain = run(&adc, fx, pace, |_| usize::MAX, &v);
+    assert_eq!(plain.acquired.len(), 1);
+    let a = plain.acquired[0];
+    let said = a.fft_start + SIGNAL_END + 180;
+    let end = a.fft_start + SIGNAL_END + 80 * symbols + B;
+    assert_eq!(plain.holds(), [(a.decided_at, end)]);
+    for p in [said + 1000, said + 20_000, end - 2] {
+        let x = with(&adc, &[(p, r), (p + 1, (0, LO))]);
+        let log = run(&x, fx, pace, |_| usize::MAX, &v);
+        assert_eq!(log.acquired, plain.acquired, "at {p}");
+        assert_eq!(log.holds(), [(a.decided_at, p + 1)], "at {p}");
+        assert_eq!(log.beats.len(), plain.beats.len(), "at {p}");
+        assert_eq!(log.beats.last(), plain.beats.last(), "at {p}");
+    }
+    // Under the watchdog's hold, with no verdict, 20 000 samples in.
+    let p = a.decided_at + 20_000;
+    let x = with(&adc, &[(p, r), (p + 3, r)]);
+    let log = run(&x, fx, pace, |_| usize::MAX, |_, _| None);
+    assert_eq!(log.acquired, plain.acquired);
+    assert_eq!(log.holds(), [(a.decided_at, p + 3)]);
+
+    // A sample beyond the rails (the input is 16 bits wide) is a rail sample.
+    let (adc, _) = scene(&[SHORT], 700, 3000, 12.5, 21);
+    let go =
+        |adc: &[(i16, i16)], pace: HandoffConfig| run(adc, fx, pace, |_| usize::MAX, |_, _| None);
+    let plain = go(&adc, pace);
+    let a = plain.acquired[0];
+    let kept = [(a.decided_at, adc.len())];
+    let p = a.decided_at + 100;
+    for far in [(i16::MAX, 0), (0, i16::MIN), (HI + 1, 0), (0, LO - 1)] {
+        let x = with(&adc, &[(p, far), (p + 2, far)]);
+        assert_eq!(go(&x, pace).holds(), [(a.decided_at, p + 2)], "{far:?}");
+    }
+
+    // Windows. (window, count, distance between two rail samples, released?)
+    let two = |d: usize| with(&adc, &[(p, r), (p + d, r)]);
+    for (window, count, d, released) in [
+        (16, 2, 15, true),
+        (16, 2, 16, false),
+        (63, 2, 62, true),
+        (63, 2, 63, false),
+        (64, 2, 63, true),
+        (64, 2, 64, false),
+        // A window above 64 is 64.
+        (65, 2, 64, false),
+        (1000, 2, 63, true),
+        (usize::MAX, 2, 64, false),
+        // A window of one sees the newest sample alone.
+        (1, 2, 1, false),
+        // A window of none sees nothing.
+        (0, 1, 1, false),
+        (0, 2, 1, false),
+    ] {
+        let cfg = HandoffConfig {
+            clip_window: window,
+            clip_count: count,
+            ..pace
+        };
+        let want = if released {
+            vec![(a.decided_at, p + d)]
+        } else {
+            kept.to_vec()
+        };
+        assert_eq!(
+            go(&two(d), cfg).holds(),
+            want,
+            "window {window} count {count} at {d}"
+        );
+    }
+    // One of one: down with the first rail sample.
+    let one = HandoffConfig {
+        clip_window: 1,
+        clip_count: 1,
+        ..pace
+    };
+    assert_eq!(go(&with(&adc, &[(p, r)]), one).holds(), [(a.decided_at, p)]);
+    // Sixty-four of sixty-four: down with the 64th in a row, not the 63rd.
+    let all = HandoffConfig {
+        clip_window: 64,
+        clip_count: 64,
+        ..pace
+    };
+    let row = |n: usize| -> Vec<Swap> { (0..n).map(|k| (p + k, r)).collect() };
+    assert_eq!(go(&with(&adc, &row(63)), all).holds(), kept);
+    assert_eq!(
+        go(&with(&adc, &row(64)), all).holds(),
+        [(a.decided_at, p + 63)]
+    );
+}
