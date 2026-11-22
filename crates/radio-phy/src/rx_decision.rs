@@ -113,7 +113,8 @@ pub struct DecisionTiming {
     /// energy's running sum, the comparison with the maximum (an allowance for step 2: 3).
     pub search_latency: usize,
     /// Cycles from a sample at detector A's input to its event (`det_a`: 4). The run
-    /// counter's clear is due one cycle before; a latch asks the CORDIC one cycle after.
+    /// counter's clear is due one cycle before; a latch asks the CORDIC in the event's own
+    /// cycle (`rx_latch`'s request is combinational on it).
     pub det_latency: usize,
     /// Words of the history memory (the model's `HISTORY`: 512).
     pub history_depth: usize,
@@ -335,7 +336,7 @@ fn granted(
 /// `idle(n)` is the number of idle clocks before sample n beyond the R − 1 of
 /// `t.clocks_per_sample`. `latch(clock)` says whether a latch asks for the CORDIC in that
 /// cycle besides those of the stream's own detection events (which ask
-/// `t.det_latency` + 1 cycles after their sample).
+/// `t.det_latency` cycles after their sample: the event's own cycle).
 ///
 /// # Errors
 /// The first thing that cannot be built: a word read when the memory no longer or not yet
@@ -390,10 +391,7 @@ pub fn run_schedule(
         .map_while(|j| y_clock.get(energy_at(j) + t.delay_samples))
         .map(|c| c + to_strobe - 1)
         .collect();
-    let own: BTreeSet<usize> = events
-        .iter()
-        .map(|&e| y_clock[e] + t.det_latency + 1)
-        .collect();
+    let own: BTreeSet<usize> = events.iter().map(|&e| y_clock[e] + t.det_latency).collect();
     let asked = |c: usize| own.contains(&c) || latch(c);
 
     let taps = ltf_taps(fx);

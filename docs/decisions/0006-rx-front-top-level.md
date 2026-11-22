@@ -132,6 +132,10 @@ RTL, an event is known after `det_a` (4 clocks), then the latch read and add, th
   `detected_at` are kept in model sample numbers.
 - **D is a parameter:** D ≥ ⌈23 / R⌉ + 1 for safety, i.e. D = 5 at R = 5, 4 at R = 6, 3 at R = 8.
   It costs D × 26 bits of registers. D also shortens the decision budget, as tabled above.
+  *(Note, 2026-11-22, with the CORDIC behind its arbiter, part d step 3a: the count is 24
+  clocks and the contract D·R ≥ 24, measured; the three examples still hold, D = 3 at R = 8
+  and D = 4 at R = 6 with no clock to spare. The front runs D = 4 at R = 8, as ADR 0008's
+  schedule does. `docs/gates/rx_front.md`.)*
 - **Rejected:** changing the model so that the step acts from n + Δ. That is a behaviour change
   with G1/G2 reruns and no benefit.
 

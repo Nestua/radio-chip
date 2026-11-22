@@ -5,8 +5,8 @@
 #
 # Reads the generated ROM package, round_sat and the memory wrappers, any extra sources, and
 # hw/rtl/<top>.sv; one clock at 6.25 ns (160 MHz, R = 8 clocks per sample at 20 MS/s, ADR 0006)
-# on the KV260's part; default synthesis, placement and routing. rx_latch needs cordic.sv as an
-# extra source.
+# on the KV260's part; default synthesis, placement and routing. cordic_arb needs cordic.sv as
+# an extra source.
 set repo [lindex $argv 0]
 set top  [lindex $argv 1]
 set out  [lindex $argv 2]
