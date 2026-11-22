@@ -3,22 +3,27 @@
 // Only the ADC samples go in; the decision's own `acquired` clears the detector's run counter
 // and closes the search. Required, against radio_phy::rx_front_fixed::RxFrontFixed::push_traced
 // bit for bit:
+//   - the detector's event of every sample (the decision's `acquired` clears its run
+//     counter: a clear missing or misplaced moves the events that follow);
 //   - an acceptance strobe at exactly the samples the model accepts a candidate at;
 //   - at each result (res_valid): whether the decision got to its sums, and the sums — the
 //     final coarse sum, the confirmation, the coherence, the energy, and the fine sum where
 //     the model made it (it does not for a rejected candidate);
 //   - at sample n + L of each acceptance at n (dec_valid, kDecLatency edges after that sample):
 //     whether an acquisition is applied there, with T1 and the three phase words.
+// T1 is also required at every result, acquired or not.
 // And against radio_phy::rx_decision::run_schedule, in the run at R = 8 and D = 4 (whose clock
-// pattern rvec gave the model): the cycle of each full decision's result after its strobe.
+// pattern rvec gave the model), for each full decision, in cycles after its strobe: the grant
+// of the coarse sum's request of the CORDIC (w + 102 and the model's wait), the rotation's
+// first read (20 later), the grant of the fine sum's (w + 278 and its wait), the result.
 //
 // usage: sim_decide <vectors.txt> <R> <D> <W>   (R at least 8: ltf_corr)
 //
 // Samples come every R clocks, with one more idle clock after every 5th and two after every
 // 13th (idle inputs carry garbage); D flush samples follow a segment. Before each segment the
-// chain is reset four times in the middle of a decision (the segment up to its first
-// acceptance and up to 49 samples and 7 clocks more, a one-clock reset): nothing of it may
-// reach the run that follows. The RTL's own checks ($error) abort the run. Exit code 0 = passed.
+// chain is reset four times in the middle of a decision or at its delivery (the segment up to
+// its first acceptance and up to 71 samples and 7 clocks more, a one-clock reset): nothing
+// may come out after it, and nothing of it may reach the run that follows. The RTL's own checks ($error) abort the run. Exit code 0 = passed.
 
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +43,7 @@ namespace {
 constexpr int kXBits = 12;
 constexpr int kSumBits = 34;
 constexpr int kPBits = 22;
+constexpr long kEventLatency = 4;   // det_a's event, edges after its sample
 constexpr long kAccLatency = 23;   // the acceptance strobe, edges after sample n + D
 constexpr long kDecLatency = 3;    // dec_valid, edges after sample n + L
 constexpr long kL = 64;            // the decision latency of the vectors
@@ -52,6 +58,7 @@ long long sext(uint64_t v, int bits) {
 struct Accept {
     bool has_sums = false, has_fine = false, has_done = false;
     long long t1 = 0, cre = 0, cim = 0, conf = 0, coh = 0, en = 0, fre = 0, fim = 0, done = 0;
+    long long coarse_wait = 0, fine_wait = 0;
 };
 
 struct Acq {
@@ -59,7 +66,7 @@ struct Acq {
 };
 
 struct Sample {
-    long xr = 0, xi = 0;
+    long xr = 0, xi = 0, event = 0;
     int acc = -1, acq = -1;   // indices into the segment's records
 };
 
@@ -72,8 +79,9 @@ struct Segment {
 };
 
 struct Flight {
-    size_t n;      // the acceptance's sample
-    long strobe;   // its cycle
+    size_t n;        // the acceptance's sample
+    long strobe;     // its cycle
+    int grants = 0;  // requests of the CORDIC granted so far
 };
 
 struct Gate {
@@ -81,6 +89,8 @@ struct Gate {
     int R = 8, D = 4, W = 12;
     long cycle = 0, mismatches = 0;
     long accs = 0, results = 0, summed = 0, fines = 0, timed = 0, decs = 0, acqs = 0;
+    long stages = 0;                   // grants and rotation starts held to the schedule
+    long events = 0;                   // detector outputs compared
     long in_flight_resets = 0;
     const Segment* seg = nullptr;
     std::vector<long> fed;
@@ -115,6 +125,15 @@ struct Gate {
             return;
         }
         const size_t n = seg->s.size();
+        if (dut.d_valid) {
+            const long k = sample_at(cycle - kEventLatency);
+            if (k < 0) {
+                fail("detector output off its latency", 0, 1, 0);
+            } else if (static_cast<size_t>(k) < n) {
+                if (dut.event_d != seg->s[k].event) fail("event", k, dut.event_d, seg->s[k].event);
+                ++events;
+            }
+        }
         if (dut.acc_valid) {
             const long k = sample_at(cycle - kAccLatency);
             const long a = k - D;
@@ -126,6 +145,25 @@ struct Gate {
                 ++accs;
             }
         }
+        // The schedule's cycles inside a decision (one decision is in flight at a time).
+        if ((dut.cq_granted || dut.rot_start) && !waiting.empty()) {
+            Flight& f = waiting.front();
+            const Accept& g = seg->acc[seg->s[f.n].acc];
+            if (g.has_done && R == 8 && D == 4) {
+                const long at = cycle - f.strobe;
+                if (dut.rot_start) {
+                    if (at != W + 122 + g.coarse_wait) fail("rotation's first read, cycles after the strobe", f.n, at, W + 122 + g.coarse_wait);
+                    ++stages;
+                }
+                if (dut.cq_granted) {
+                    const long long want = f.grants == 0 ? W + 102 + g.coarse_wait : W + 278 + g.fine_wait;
+                    if (f.grants > 1) fail("a third request of the CORDIC", f.n, f.grants, 1);
+                    else if (at != want) fail(f.grants == 0 ? "coarse grant, cycles after the strobe" : "fine grant, cycles after the strobe", f.n, at, want);
+                    ++stages;
+                }
+            }
+            f.grants += dut.cq_granted;
+        }
         if (dut.res_valid) {
             if (waiting.empty()) {
                 fail("result without an acceptance", 0, 1, 0);
@@ -134,6 +172,7 @@ struct Gate {
                 waiting.pop_front();
                 const Accept& g = seg->acc[seg->s[f.n].acc];
                 ++results;
+                if (dut.acq_t1 != g.t1 % kPosMod) fail("T1 at the result", f.n, dut.acq_t1, g.t1 % kPosMod);
                 if (static_cast<bool>(dut.res_sums) != g.has_sums) fail("sums made", f.n, dut.res_sums, g.has_sums);
                 if (dut.res_sums && g.has_sums) {
                     ++summed;
@@ -158,7 +197,6 @@ struct Gate {
                 }
             }
         }
-        if (dut.acquired && !dut.dec_valid) fail("acquired without dec_valid", 0, 1, 0);
         if (dut.dec_valid) {
             const long q = sample_at(cycle - kDecLatency);
             const long a = q - kL;
@@ -204,12 +242,13 @@ struct Gate {
     }
 
     // A reset in the middle of a decision: the grid, the sums, the rotation, the tail or the
-    // registered result waiting for its sample, by how far past the acceptance the segment
-    // is fed (0 to 49 samples and 0 to 7 clocks, a different place each time).
+    // registered result waiting for its sample or its delivery, by how far past the
+    // acceptance the segment is fed (0 to 71 samples and 0 to 7 clocks, a different place
+    // each time).
     void reset_in_flight(const Segment& s) {
         size_t a = 0;
         while (a < s.s.size() && s.s[a].acc < 0) ++a;
-        const size_t upto = a + D + 3 + (in_flight_resets * 7) % 50;
+        const size_t upto = a + D + 3 + (in_flight_resets * 7) % 72;
         if (upto >= s.s.size()) return;
         const int more = static_cast<int>(in_flight_resets % 8);
         ++in_flight_resets;
@@ -219,6 +258,15 @@ struct Gate {
         for (size_t k = 0; k <= upto; ++k) feed(s.s[k].xr, s.s[k].xi, k);
         for (int i = 0; i < more; ++i) tick();
         junk = false;
+        // Nothing comes out after it: not a result, not a delivery.
+        quiet = true;
+        reset(1);
+        for (int i = 0; i < 30; ++i) tick();
+        quiet = false;
+        if (after_reset != 0) {
+            fail("outputs after a reset in flight", upto, after_reset, 0);
+            after_reset = 0;
+        }
     }
 
     void run(const Segment& s) {
@@ -306,10 +354,12 @@ int main(int argc, char** argv) {
         if (a == "A") {
             Accept x;
             bool pt = false, p1 = false, p2 = false, p3 = false, p4 = false, p5 = false, f1 = false, f2 = false;
+            bool w1 = false, w2 = false;
             if (s.s.empty() || !field(f, x.t1, pt) || !field(f, x.cre, p1) || !field(f, x.cim, p2) ||
                 !field(f, x.conf, p3) || !field(f, x.coh, p4) || !field(f, x.en, p5) ||
-                !field(f, x.fre, f1) || !field(f, x.fim, f2) || !field(f, x.done, x.has_done) || !pt ||
-                p1 != p2 || p1 != p3 || p1 != p4 || p1 != p5 || f1 != f2)
+                !field(f, x.fre, f1) || !field(f, x.fim, f2) || !field(f, x.done, x.has_done) ||
+                !field(f, x.coarse_wait, w1) || !field(f, x.fine_wait, w2) || !pt || p1 != p2 || p1 != p3 ||
+                p1 != p4 || p1 != p5 || f1 != f2 || w1 != x.has_done || w2 != x.has_done)
                 return bad();
             x.has_sums = p1;
             x.has_fine = f1;
@@ -323,7 +373,7 @@ int main(int argc, char** argv) {
         } else {
             Sample x;
             x.xr = std::stol(a);
-            if (!(f >> x.xi)) return bad();
+            if (!(f >> x.xi >> x.event)) return bad();
             s.s.push_back(x);
         }
     }
@@ -338,14 +388,15 @@ int main(int argc, char** argv) {
         g.run(s);
     }
     std::printf("decide G3 (R = %d, D = %d, W = %d): %ld segments, %ld samples, %ld acceptances, %ld results "
-                "(%ld with sums, %ld with the fine sum, %ld held to the schedule's cycle), %ld decisions "
+                "(%ld with sums, %ld with the fine sum, %ld held to the schedule's cycle, %ld grants and rotation "
+                "starts held), %ld decisions "
                 "delivered, %ld acquisitions, %ld resets in flight, %ld mismatches\n",
-                g.R, g.D, g.W, run_segments, samples, g.accs, g.results, g.summed, g.fines, g.timed, g.decs,
+                g.R, g.D, g.W, run_segments, samples, g.accs, g.results, g.summed, g.fines, g.timed, g.stages, g.decs,
                 g.acqs, g.in_flight_resets, g.mismatches);
     if (run_segments == 0 || g.summed == 0 || g.fines == 0 || g.acqs == 0 || g.in_flight_resets == 0 ||
-        (g.R == 8 && g.D == 4 && g.timed == 0)) {
+        (g.R == 8 && g.D == 4 && (g.timed == 0 || g.stages < 3 * g.timed))) {
         std::cerr << "nothing compared — refusing to pass an empty gate\n";
         return 1;
     }
-    return g.mismatches == 0 && g.accs == want_acc && g.acqs == want_acq ? 0 : 1;
+    return g.mismatches == 0 && g.accs == want_acc && g.acqs == want_acq && g.events == samples ? 0 : 1;
 }

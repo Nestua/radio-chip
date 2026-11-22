@@ -39,6 +39,8 @@
 // The CORDIC is the front's one, behind cordic_arb (requester b): cq_req with cq_re/cq_im is
 // held until cq_grant; the coarse angle comes back before the fine request is made.
 // A rejected candidate runs its whole schedule (the fine sum is made beside the rotation).
+// After a reset in the middle of a decision nothing of it is delivered (dec_valid hangs on
+// state that is reset); the probe res_valid is not part of that promise.
 
 `default_nettype none
 
@@ -97,7 +99,8 @@ module rx_decide
     output logic [M_W-1:0]                res_coherence,
     output logic [N_W-1:0]                res_energy,
     output logic signed [S_W-1:0]         res_fine_re,
-    output logic signed [S_W-1:0]         res_fine_im
+    output logic signed [S_W-1:0]         res_fine_im,
+    output logic                          rot_start      // the rotation's first read (probe)
 );
     localparam int E      = EST_BITS;
     localparam int A      = ANGLE_BITS;
@@ -114,6 +117,9 @@ module rx_decide
     end
     if (P != A + 6 || STF_PERIOD != 16 || LTF_SYMBOL_LEN != 64) begin : g_bad_step
         $error("rx_decide: the steps are exact shifts only for P = A + 6, lags 16 and 64");
+    end
+    if (LTF_TAP_ENERGY >= (1 << 20)) begin : g_bad_taps
+        $error("rx_decide: the taps' energy does not fit the rule's 20 bits");
     end
     if (T1_MIN + GI_LEN + L + 2 * LTF_SYMBOL_LEN + 4 * GI_LEN >= HISTORY) begin : g_bad_hist
         $error("rx_decide: the history does not reach the coarse window");
@@ -173,6 +179,7 @@ module rx_decide
     endfunction
 
     assign ro_read = ro_run && rwait == '0;
+    assign rot_start = ro_read && rm == '0;
     assign re_a    = co_run || ro_read;
     assign re_b    = co_run || fi_run;
     always_comb begin
@@ -238,6 +245,7 @@ module rx_decide
     logic [M_W-1:0]         conf, coh;
     logic [N_W-1:0]         en;
     logic [N_W+19:0]        rhs;
+    logic signed [M_W+3:0]  d_conf, d_coh;                // 2·x − E_L·energy
     logic                   ok_conf, ok_coh, en_pos, tail_rdy, fine_rdy, res_done, res_acq;
     logic signed [15:0]     resid;
     logic                   fa_v;                         // the residual is registered
@@ -299,8 +307,11 @@ module rx_decide
         m_b <= (2*C_W+1)'(qb_re) + (2*C_W+1)'(qb_im);
         m_s <= (2*C_W+3)'(qs_re) + (2*C_W+3)'(qs_im);
         rhs <= (N_W+20)'(en) * (N_W+20)'(LTF_TAP_ENERGY);
-        ok_conf <= {2'b0, conf, 1'b0} >= (M_W+3)'(rhs);
-        ok_coh  <= {2'b0, coh, 1'b0} >= (M_W+3)'(rhs);
+        // The rules in two stages (the schedule's two): the difference, its sign.
+        d_conf  <= $signed({3'b0, conf, 1'b0}) - $signed((M_W+4)'(rhs));
+        d_coh   <= $signed({3'b0, coh, 1'b0}) - $signed((M_W+4)'(rhs));
+        ok_conf <= !d_conf[M_W+3];
+        ok_coh  <= !d_coh[M_W+3];
         en_pos  <= en != '0;
 
         if (!rst_n) begin

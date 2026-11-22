@@ -23,6 +23,8 @@ module decide_chain
     input  wire logic                         in_valid,
     input  wire logic signed [Y_BITS-2:0]     in_re,      // 12-bit ADC
     input  wire logic signed [Y_BITS-2:0]     in_im,
+    output logic                              d_valid,      // det_a's stage 4
+    output logic                              event_d,
     output logic                              acc_valid,
     output logic [POS_W-1:0]                  acc_n,
     output logic                              res_valid,
@@ -34,6 +36,8 @@ module decide_chain
     output logic [N_W-1:0]                    res_energy,
     output logic signed [S_W-1:0]             res_fine_re,
     output logic signed [S_W-1:0]             res_fine_im,
+    output logic                              rot_start,
+    output logic                              cq_granted,   // the decision's request taken
     output logic                              dec_valid,
     output logic                              acquired,
     output logic [POS_W-1:0]                  acq_t1,
@@ -41,7 +45,7 @@ module decide_chain
     output logic signed [NCO_PHASE_BITS-1:0]  acq_coarse,
     output logic signed [NCO_PHASE_BITS-1:0]  acq_fine
 );
-    logic                              y_valid, cd_valid, d_valid, fire, event_d;
+    logic                              y_valid, cd_valid, fire;
     logic                              l_valid, l_event, z_valid, c_valid;
     logic signed [Y_BITS-1:0]          y_re, y_im, n_re, n_im;
     logic signed [2*DET_BITS+5:0]      cd_re, cd_im;
@@ -49,6 +53,7 @@ module decide_chain
     logic signed [Z_BITS-1:0]          z_re, z_im;
     logic signed [CORR_BITS-1:0]       c_re, c_im;
     logic                              rq_valid, a_valid, cq_req, cq_grant, cq_valid;
+    assign cq_granted = cq_req && cq_grant;
     logic signed [CORDIC_IN_BITS-1:0]  cq_re, cq_im;
     logic                              ring_re, acc_lapped, e_valid, s_valid, searching;
     logic [RA_W-1:0]                   ring_addr, acc_ring;
@@ -102,7 +107,7 @@ module decide_chain
         .cq_req, .cq_re, .cq_im, .cq_grant, .cq_valid, .cq_angle(a_angle),
         .dec_valid, .acquired, .acq_t1, .acq_cfo, .acq_coarse, .acq_fine,
         .res_valid, .res_sums, .res_coarse_re, .res_coarse_im, .res_confirmation,
-        .res_coherence, .res_energy, .res_fine_re, .res_fine_im
+        .res_coherence, .res_energy, .res_fine_re, .res_fine_im, .rot_start
     );
 
     logic unused;
