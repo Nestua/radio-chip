@@ -661,8 +661,9 @@ fn a_ready_reader_gets_a_beat_a_clock_until_it_is_at_the_antenna() {
     let fast = (waiting - 8) / 7 + 1;
     let rest = waiting + fast - 8 * fast;
     assert!((1..=8).contains(&rest), "{rest}");
-    for k in 0..8 * fast + rest {
-        assert_eq!(run.beats[k].0, e.tick + 161 + k, "beat {k}: a clock apart");
+    assert!(run.beats.len() > 8 * fast + rest);
+    for (k, beat) in run.beats.iter().enumerate().take(8 * fast + rest) {
+        assert_eq!(beat.0, e.tick + 161 + k, "beat {k}: a clock apart");
     }
     for p in 0..fast {
         assert_eq!(model.count[n0 + p], 8);
