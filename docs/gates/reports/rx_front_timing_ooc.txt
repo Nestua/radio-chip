@@ -147,3 +147,19 @@ Slack (MET) :             0.244ns  (required time - arrival time)
   Destination:            u_corr/g_im_reg/DSP_OUTPUT_INST/ALU_OUT[46]
   Data Path Delay:        5.997ns  (logic 4.310ns (71.869%)  route 1.687ns (28.131%))
   Logic Levels:           11  (DSP_A_B_DATA=1 DSP_ALU=4 DSP_C_DATA=3 DSP_OUTPUT=3)
+# Added 2026-11-22: rx_front whole (part d step 4a), the same part, Vivado 2024.2, build server,
+# tools/syn/ooc_probe.tcl as committed (no input delays). The worst paths are det_a's.
+== rx_front
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+     -0.379       -5.816                     29                30563        0.038        0.000                      0                30563        2.363        0.000                       0                  9399  
+| CLB LUTs                   | 6561 |     0 |          0 |    117120 |  5.60 |
+| CLB Registers              | 8622 |     0 |          0 |    234240 |  3.68 |
+| CARRY8                     |  508 |     0 |          0 |     14640 |  3.47 |
+| CLB Registers                              | 8622 |     0 |          0 |    234240 |  3.68 |
+| Block RAM Tile    |    3 |     0 |          0 |       144 |  2.08 |
+| DSPs           |  124 |     0 |          0 |      1248 |  9.94 |
+| CARRY8   |  508 |                 CLB |
+Slack (VIOLATED) :        -0.379ns  (required time - arrival time)
+  Source:                 u_det/pp__1/DSP_A_B_DATA_INST/CLK
+  Destination:            u_det/rhs3_reg[76]/D

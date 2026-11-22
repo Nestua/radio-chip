@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch search decide
+VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch search decide front
 # `cordic_arb` replays the CORDIC's vectors.
 BLOCKS    := ram cordic_arb $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
@@ -34,6 +34,7 @@ TOP_det       := det_chain
 TOP_latch     := latch_chain
 TOP_search    := search_chain
 TOP_decide    := decide_chain
+TOP_front     := rx_front
 SRC_ram       := rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv tb/ram_bank.sv
 SRC_scrambler := rtl/scrambler.sv
 SRC_conv_encoder := rtl/conv_encoder.sv
@@ -50,7 +51,8 @@ SRC_search    := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2
                  tb/search_chain.sv
 SRC_decide    := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
                  rtl/det_a.sv rtl/cordic.sv rtl/cordic_arb.sv rtl/nco.sv rtl/rx_latch.sv rtl/ltf_corr.sv rtl/rx_search.sv \
-                 rtl/ltf_corr1.sv rtl/rx_decide.sv tb/decide_chain.sv
+                 rtl/ltf_corr1.sv rtl/rx_decide.sv rtl/rx_front.sv tb/decide_chain.sv
+SRC_front     := $(filter-out tb/decide_chain.sv,$(SRC_decide))
 
 .PHONY: all lint vectors clean $(BLOCKS)
 
@@ -161,6 +163,18 @@ decide: vectors/decide.txt
 			--top-module decide_chain $(SRC_decide) tb/tb_decide.cpp -o sim_decide; \
 		for r in 8 11 16; do \
 			./obj_dir/decide/d$${d}w$$w/sim_decide vectors/decide.txt $$r $$d $$w +verilator+rand+reset+2; \
+		done; \
+	done
+
+# The top level at its pins: only the ADC's samples in, only the acquisitions out, on long
+# streams with nothing reset inside them. The builds and clock rates of `decide`.
+front: vectors/front.txt
+	rm -rf obj_dir/front && mkdir -p obj_dir/front
+	set -e; for b in $(DECIDE_BUILDS); do d=$${b%.*}; w=$${b#*.}; \
+		$(VERILATOR) $(VFLAGS) -GD_SAMPLES=$$d -GW=$$w --Mdir obj_dir/front/d$${d}w$$w \
+			--top-module rx_front $(SRC_front) tb/tb_front.cpp -o sim_front; \
+		for r in 8 11 16; do \
+			./obj_dir/front/d$${d}w$$w/sim_front vectors/front.txt $$r $$d $$w +verilator+rand+reset+2; \
 		done; \
 	done
 

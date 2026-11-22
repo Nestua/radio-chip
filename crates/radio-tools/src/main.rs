@@ -1873,6 +1873,256 @@ fn decide_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// What the front's segments exercise.
+#[derive(Debug, Default, Clone, Copy)]
+struct FrontCover {
+    samples: usize,
+    acquisitions: usize,
+    /// Acquisitions less than 900 samples after the one before (a frame of 560 samples a
+    /// SIFS, 320 samples, or less after another).
+    close_pairs: usize,
+    /// Acquisitions whose T1 is the last position of the grid (the maximum's and GI − B
+    /// more): a decision that looks at one position fewer places it elsewhere.
+    grid_last: usize,
+    /// Acquisitions whose FFT window starts in the lap of the history before T1's (T1 modulo
+    /// the history's depth less than the back-off's GI − w): the address borrows.
+    fft_borrow: usize,
+    /// The sample of the last acquisition.
+    last_acquisition: usize,
+}
+
+/// One segment of the front's gate (see [`front_vectors`]).
+fn front_segment(
+    out: &mut dyn Write,
+    label: &str,
+    x: &[(i16, i16)],
+    w: usize,
+    c: &mut FrontCover,
+) -> io::Result<()> {
+    let mut rx = RxFrontFixed::new(search_config(w), FixedRxConfig::default());
+    writeln!(out, "reset {label} {w}")?;
+    let mut last: Option<usize> = None;
+    let mut at_last = false;
+    for (n, s) in x.iter().enumerate() {
+        writeln!(out, "{} {}", s.0, s.1)?;
+        let (acq, t) = rx.push_traced(*s);
+        if let Some(a) = t.accepted {
+            at_last = t.t1 == Some(a.imax + w);
+        }
+        if let Some(q) = acq {
+            let t1 = q.ltf_start + GI2_LEN;
+            if q.decided_at != n || q.fft_start + GI_LEN != t1 + w {
+                return Err(io::Error::other(format!(
+                    "{label} at w = {w}: an acquisition off its sample or its window"
+                )));
+            }
+            // What `rx_front.sv` promises the hand-off: an acquisition is applied 189 + w + L
+            // to 189 + 2w + L samples after its T1 (the maximum's position imax is at most w
+            // before T1 and the acceptance 189 + 2w after imax), so the window's first sample
+            // is at most 285 samples old in a history of 512.
+            let age = n - t1;
+            if age < 189 + w + DECISION_LATENCY || age > 189 + 2 * w + DECISION_LATENCY {
+                return Err(io::Error::other(format!(
+                    "{label} at w = {w}: an acquisition {age} samples after its T1"
+                )));
+            }
+            c.grid_last += usize::from(at_last);
+            writeln!(
+                out,
+                "Q {} {t1} {} {} {}",
+                q.fft_start, q.cfo_phase, q.coarse_phase, q.fine_phase
+            )?;
+            c.acquisitions += 1;
+            c.close_pairs += usize::from(last.is_some_and(|p| n - p < 900));
+            c.fft_borrow += usize::from(t1 % HISTORY < GI_LEN - w);
+            c.last_acquisition = c.last_acquisition.max(n);
+            last = Some(n);
+        }
+    }
+    c.samples += x.len();
+    Ok(())
+}
+
+/// A stream of `frames` short frames over a noise floor 46 dB below full scale, nothing
+/// reset between them: each at its own level (−40 to −4 dBFS, every seventh 6 dB over full
+/// scale), CFO (±235 kHz) and phase; every sixth through a TGn D channel, the others
+/// delayed by a fraction of a sample; the gaps from a frame's last sample to the next one's
+/// first a SIFS (320 samples), 60 to 120 samples, or 150 to 900; a tone burst in some gaps
+/// and a tone of a frame's own power over some frames.
+fn front_stream(frames: usize, seed: u64) -> io::Result<Vec<(i16, i16)>> {
+    const FS: f64 = 20e6;
+    let frame = short_frame()?;
+    let p = mean_power(&frame);
+    let full = f64::from(ADC_FULL_SCALE);
+    let mut rng = Rng::new(seed);
+    let mut x: Vec<(f64, f64)> = vec![(0.0, 0.0); 200];
+    // The sample after the last frame's last (the channel's tail of 40 samples aside).
+    let mut end = 200;
+    let add = |x: &mut Vec<(f64, f64)>, at: usize, piece: &[(f64, f64)]| {
+        if x.len() < at + piece.len() {
+            x.resize(at + piece.len(), (0.0, 0.0));
+        }
+        for (v, s) in x.iter_mut().skip(at).zip(piece) {
+            *v = (v.0 + s.0, v.1 + s.1);
+        }
+    };
+    for k in 0..frames {
+        let gap = match k % 4 {
+            0 => 320,
+            1 => 60 + (rng.uniform() * 60.0) as usize,
+            _ => 150 + (rng.uniform() * 750.0) as usize,
+        };
+        let at = end + gap;
+        let dbfs = if k % 7 == 6 {
+            6.0
+        } else {
+            -40.0 + 36.0 * rng.uniform()
+        };
+        let g = full * 10f64.powf(dbfs / 20.0) / p.sqrt();
+        let mut f = frame.clone();
+        f.extend(vec![(0.0, 0.0); 40]);
+        let f = if k % 6 == 5 {
+            let taps = tgn_taps(TgnModel::D, false);
+            Multipath::new(taps, Doppler::Static, 1, FS, &mut rng).apply(&f)
+        } else {
+            fractional_delay(&f, rng.uniform())
+        };
+        let cfo = (rng.uniform() * 2.0 - 1.0) * 235e3;
+        let f = frequency_offset(&f, cfo, FS, 2.0 * std::f64::consts::PI * rng.uniform());
+        let f: Vec<(f64, f64)> = f.iter().map(|s| (s.0 * g, s.1 * g)).collect();
+        add(&mut x, at, &f);
+        let tone_hz = (rng.uniform() * 2.0 - 1.0) * 8e6;
+        if k % 5 == 2 && gap > 140 {
+            let a = full * 10f64.powf((-30.0 + 20.0 * rng.uniform()) / 20.0);
+            let tone = add_tone(&vec![(0.0, 0.0); gap - 40], a * a, tone_hz, FS, 0.3);
+            add(&mut x, end + 10, &tone);
+        }
+        if k % 9 == 4 {
+            let tone = add_tone(&vec![(0.0, 0.0); 300], g * g * p, tone_hz, FS, 0.7);
+            add(&mut x, at + 100, &tone);
+        }
+        end = at + frame.len();
+    }
+    x.extend(vec![(0.0, 0.0); 300]);
+    let pn = (full * 10f64.powf(-46.0 / 20.0)).powi(2);
+    Ok(to_adc(&awgn(&x, 0.0, pn, &mut rng), 1.0))
+}
+
+/// Vectors for the front's top level (gate G3: `make -C hw front`): `hw/rtl/rx_front.sv`
+/// against `RxFrontFixed::push` at its pins, nothing but the ADC's samples in and the
+/// acquisitions out. Per sample `<x re> <x im>`; after the sample an acquisition is applied
+/// at, `Q <fft start> <T1> <cfo> <coarse> <fine>` (the `FixedAcquisition`; the starts as full
+/// sample numbers, the hardware gives them modulo the history's depth). Segments, for
+/// w = 12, 16, 8 and 4: a long stream of frames with nothing reset between them
+/// ([`front_stream`]; at w = 12 past sample 2^16), and for w below 16 a frame placed by
+/// its lead so that its FFT window starts in the lap of the history before T1's; frames
+/// with a second path GI − B or one sample more behind the first and nearly as strong
+/// (0.94 to 0.99 of it), chosen by seed for a T1 at the grid's last position (the
+/// independent review's construction). What the
+/// front does inside (the detector's events, the acceptances, the decision's sums and
+/// cycles) is the gate `decide`'s, which runs on the same top level.
+fn front_vectors(out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "# rvec front — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# reset <label> <w>; <x re> <x im> per sample; after an acquisition's sample:"
+    )?;
+    writeln!(out, "# Q <fft start> <T1> <cfo> <coarse> <fine>")?;
+    let frame = short_frame()?;
+    let p = mean_power(&frame);
+    let full = f64::from(ADC_FULL_SCALE);
+    for w in [12usize, 16, 8, 4] {
+        let frames = if w == 12 { 76 } else { 20 };
+        let mut long = FrontCover::default();
+        let x = front_stream(frames, 0xF207_0000 + w as u64)?;
+        front_segment(out, "long_stream", &x, w, &mut long)?;
+        let mut c = long;
+        if w < GI_LEN {
+            let scene = (0..80usize).find_map(|k| {
+                let mut rng = Rng::new(0xF207_1000 + k as u64);
+                let mut x = vec![(0.0, 0.0); 290 + k];
+                x.extend_from_slice(&frame);
+                x.extend(vec![(0.0, 0.0); 400]);
+                x.extend_from_slice(&frame);
+                x.extend(vec![(0.0, 0.0); 200]);
+                let x = to_adc(&awgn(&x, 25.0, p, &mut rng), 0.1 * full / p.sqrt());
+                let mut probe = FrontCover::default();
+                front_segment(&mut io::sink(), "probe", &x, w, &mut probe).ok()?;
+                (probe.fft_borrow > 0 && probe.acquisitions == 2).then_some(x)
+            });
+            let x = scene.ok_or_else(|| {
+                io::Error::other(format!("w = {w}: no window before the history's wrap"))
+            })?;
+            front_segment(out, "window_before_the_wrap", &x, w, &mut c)?;
+        }
+        {
+            let scene = (0..40u64).find_map(|k| {
+                let mut rng = Rng::new(0xF207_2000 + k);
+                let mut x: Vec<(f64, f64)> = vec![(0.0, 0.0); 300];
+                for i in 0..6usize {
+                    let a = [0.94, 0.97, 0.99][i % 3];
+                    let d = w + (i / 3) % 2;
+                    let ph = 2.0 * std::f64::consts::PI * rng.uniform();
+                    let (re, im) = (a * ph.cos(), a * ph.sin());
+                    let mut f = vec![(0.0, 0.0); frame.len() + d];
+                    for (j, v) in frame.iter().enumerate() {
+                        f[j] = (f[j].0 + v.0, f[j].1 + v.1);
+                        let e = f[j + d];
+                        f[j + d] = (e.0 + re * v.0 - im * v.1, e.1 + re * v.1 + im * v.0);
+                    }
+                    let cfo = (rng.uniform() * 2.0 - 1.0) * 100e3;
+                    x.extend(frequency_offset(&f, cfo, 20e6, 0.0));
+                    x.extend(vec![(0.0, 0.0); 500 + 37 * i]);
+                }
+                let x = to_adc(&awgn(&x, 30.0, p, &mut rng), 0.1 * full / p.sqrt());
+                let mut probe = FrontCover::default();
+                front_segment(&mut io::sink(), "probe", &x, w, &mut probe).ok()?;
+                (probe.grid_last > 0).then_some(x)
+            });
+            let x = scene.ok_or_else(|| {
+                io::Error::other(format!("w = {w}: no T1 at the grid's last position"))
+            })?;
+            let before = c.grid_last;
+            front_segment(out, "two_paths", &x, w, &mut c)?;
+            if c.grid_last == before {
+                return Err(io::Error::other("the two-path scene lost its T1"));
+            }
+        }
+        writeln!(out, "# w = {w}: {c:?}")?;
+        let missing: Vec<&str> = [
+            (
+                usize::from(2 * long.acquisitions >= frames),
+                "an acquisition for half the long stream's frames",
+            ),
+            (
+                long.close_pairs,
+                "an acquisition less than 900 samples after another",
+            ),
+            (
+                usize::from(w == GI_LEN) + c.fft_borrow,
+                "a window that starts before the history's wrap",
+            ),
+            (
+                usize::from(w != 12 || long.last_acquisition > 1 << 16),
+                "an acquisition past sample 2^16",
+            ),
+        ]
+        .iter()
+        .filter_map(|&(n, what)| (n == 0).then_some(what))
+        .collect();
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "front vectors at w = {w} miss: {}",
+                missing.join("; ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Vectors for `hw/rtl/conv_encoder.sv` (gate G3: `make -C hw conv_encoder`): frames of input
 /// bits with the encoder's A and B outputs (`ConvolutionalEncoder::encode_bit`), each frame
 /// from the all-zero state. Frames: all zeros, all ones, a single one (the impulse response:
@@ -1933,9 +2183,10 @@ fn main() -> ExitCode {
         "latch" => latch_vectors(&mut out),
         "search" => search_vectors(&mut out),
         "decide" => decide_vectors(&mut out),
+        "front" => front_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, front, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
