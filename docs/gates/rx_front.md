@@ -3059,3 +3059,62 @@ verdict may arrive) is not in it.
 - L above 63 + w is not lossless in the model, and by the reviewer's probe the ring has
   no word to spare at L = 80.
 - The latch gate at D = 4, R = 8; the hand-off's own schedule and the verdict's.
+
+## 2026-11-22 · G0 + G3 · R0-08d part d, step 2: the LTF search (`rx_search`)
+
+**Block.** `hw/rtl/rx_search.sv`; golden: `RxFrontFixed::search_step` with the search control
+of `push` step 1 (open, extend) and of `apply_pending` (the acquisition closes the search).
+Gate: `make -C hw search` on the chain dc_block → det_a → rx_latch → nco → ltf_corr →
+rx_search (`hw/tb/search_chain.sv`), as the top level will wire it. The decision engine
+(step 3) does not exist: the vectors say at which sample an acquisition is applied, as they
+do for `det_a.clear` in the latch gate.
+
+**G0: what it computes** (w = GI − B, the parameter `W`, 1 … 16; L the decision latency)
+- |c|² of each correlator output (K = 20 bits a component, so 2·K bits unsigned), the
+  energy e(j) = Σ of the w squares from position j on (2·K + 4 = 44 bits), as a running
+  sum: plus the new square, minus the one w back. Exact, so equal to the model's fresh sum.
+- The energy ring: 64 + GI + 1 = 81 words of 44 bits through `ram_1w1r`, e(j) at address
+  j mod 81, with a read port for the decision (the schedule's grid: imax … imax + w, oldest
+  first, one a cycle from the strobe's cycle on).
+- The search's state in counts of its own samples, no absolute numbers in any comparison:
+  `wait` (150 + w at the opening event, down to 0: position j has reached `first`), `left`
+  (389 + w at every event; 0: j + 1 has reached the deadline, the search closes after this
+  sample), the running maximum with its age, the decision in flight (L samples from the
+  acceptance, counted here).
+- Per sample, in the model's order: the event (open, or the deadline moved); the position
+  (maximum, acceptance when the maximum is 63 + w positions old); the end of a decision
+  in flight (an acquisition closes the search, also one opened at this very sample).
+
+**G0: the timeline.** The search lives on the NCO path's samples, `D_SAMPLES` behind the
+detector. `rx_latch` gains `out_event`: the event flag of the sample it emits, kept by the
+sample's tag (the detector's flag is there 4 clocks after the sample, the emission D
+samples after it: inside the latch's own contract). From the emission the flag and the
+sample's tick go down a shift register of `PATH_DELAY` = 19 clocks (`nco` 4, `ltf_corr`
+15, cycle to cycle) and meet the correlator's output; a simulation check stops the run if a
+correlator output and a tick do not coincide. Events before the first correlator output
+(the first 127 samples) open the search as in the model: the tick does not depend on the
+correlator.
+
+**G0: clocks** (the schedule's allowance of 3, cycle to cycle from the correlator's
+output in cycle C): the squares registered for C + 1; the energy for C + 2, at the ring's
+write port in that cycle; the comparison and the state for C + 3, the cycle of the
+acceptance strobe: a = Y(n + D) + 5 + 15 + 3, as `rx_decision` assumes. Nothing of it is
+through synthesis yet: two 20 × 20 squares and their sum in one clock, a 44-bit sum of
+three, a 44-bit comparison with the control behind it.
+
+**G0: the interface to the decision (step 3).** Strobe `acc_valid` with: `acc_n`, the
+sample of the acceptance, and `acc_imax`, both sample numbers modulo 2^9 (the history's
+depth: its addresses); `acc_ring`, the ring address of e(imax); `acc_emax`; `acc_opened`,
+the opening event's sample modulo 2^9 (a search under a tone stays open without bound: the
+number is a tag, not an age). Back: `acquired`, a strobe any time between the acceptance
+and the search's own sample n + L (in the detector's timeline the result is due
+D samples and 20 clocks earlier than that); no strobe: not acquired.
+- **The deadline is not handed over.** `Accepted::deadline` has no use in hardware (the
+  schedule's finding 3); it lives in `left` and is gated through `searching` per sample.
+- **`pending.is_none()` needs no hardware when L ≤ 63 + w.** After an acceptance the next
+  maximum starts a position later and cannot be 63 + w old before sample n + 64 + w, which
+  is after n + L. An elaboration check requires L ≤ 63 + W; a simulation check stops on an
+  acceptance with a decision in flight. (Beyond that bound the model itself reads energies
+  that its ring has dropped: the open item of the schedule's entry.) The maximum is
+  therefore always exactly 63 + w old at an acceptance, which is what keeps e(imax) in the
+  81 words.

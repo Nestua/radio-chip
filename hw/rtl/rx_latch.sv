@@ -28,6 +28,10 @@
 // sample was emitted blocks later latches until the 8-bit tag comes round. Pick D_SAMPLES
 // from the formula, not by trial.
 //
+// out_event is the detection event of the emitted sample (for the LTF search, which lives on
+// the NCO path's samples: rx_search): det_a's flag is kept by the sample's tag from stage 4
+// (4 clocks after the sample's edge) to the emission, inside the contract above.
+//
 // Inputs, all the same sample stream, each in its own pipeline stage of det_a:
 //   y_*: det_a's input (dc_block output); c_*: det_a stage 2 (C of that sample); d_valid/event_i:
 //   det_a stage 4. Never stalls. CORDIC priority (ADR 0006: the latch before the decision
@@ -54,7 +58,8 @@ module rx_latch
     output logic                                  out_valid,
     output logic signed [Y_BITS-1:0]              out_re,
     output logic signed [Y_BITS-1:0]              out_im,
-    output logic signed [NCO_PHASE_BITS-1:0]      out_step
+    output logic signed [NCO_PHASE_BITS-1:0]      out_step,
+    output logic                                  out_event
 );
     localparam int C_W   = 2 * DET_BITS + 6;
     localparam int L_W   = C_W + 1;                     // C(n − 24) + C(n − 72)
@@ -174,6 +179,13 @@ module rx_latch
         end
     end
 
+    // ---- the event flag of each sample in flight, by its tag (at most D_SAMPLES + 1 < FD)
+    logic ev_mem [0:FD-1];
+    always_ff @(posedge clk) begin
+        if (d_valid) ev_mem[td[FAW-1:0]] <= event_i;
+        if (emit) out_event <= ev_mem[te[FAW-1:0]];
+    end
+
     always_ff @(posedge clk) begin
         if (y_valid) begin
             dl_re[0] <= y_re;
@@ -210,6 +222,8 @@ module rx_latch
                 $error("rx_latch: the latch of sample tag %0d is not back before its emission (D_SAMPLES too small for this sample rate)", te);
             if (emit && rp != wp && $signed(f_tag[rp[FAW-1:0]] - te) < 0)
                 $error("rx_latch: a latch result was skipped");
+            if (emit && $signed(td - te) <= 0)
+                $error("rx_latch: the event flag of sample tag %0d is not back before its emission", te);
             if (issue && wp - rp == (FAW+1)'(FD))
                 $error("rx_latch: result FIFO overflow");
         end

@@ -27,6 +27,16 @@ package rx_front_rom_pkg;
     // Provisional latch: COARSE_LEN lag-16 products ending LATCH_LAG samples back.
     localparam int LATCH_LAG      = 24;
     localparam int COARSE_LEN     = 96;
+    // LTF search: positions from SEARCH_OFFSET after the opening event to SEARCH_LEN
+    // after the latest; SEARCH_W = GI_LEN - back-off energy positions (RxConfig::new);
+    // a decision's result DECISION_LATENCY samples after its acceptance.
+    localparam int LTF_SYMBOL_LEN   = 64;
+    localparam int GI_LEN           = 16;
+    localparam int SEARCH_OFFSET    = 24;
+    localparam int SEARCH_LEN       = 240;
+    localparam int SEARCH_W         = 12;
+    localparam int DECISION_LATENCY = 64;
+    localparam int HISTORY          = 512;
 
     // LTF taps t(k), k = 0..32 (t(64 - k) = conj(t(k)); t(0), t(32) real): ltf_taps().
     function automatic logic signed [7:0] ltf_tap_re(input int k);

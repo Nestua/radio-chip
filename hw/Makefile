@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch
+VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch search
 BLOCKS    := ram $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
 GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
@@ -30,6 +30,7 @@ TOP_cordic    := cordic
 TOP_nco       := nco
 TOP_det       := det_chain
 TOP_latch     := latch_chain
+TOP_search    := search_chain
 SRC_ram       := rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv tb/ram_bank.sv
 SRC_scrambler := rtl/scrambler.sv
 SRC_conv_encoder := rtl/conv_encoder.sv
@@ -40,6 +41,9 @@ SRC_nco       := $(GEN_RTL) rtl/round_sat.sv rtl/nco.sv
 SRC_det       := $(GEN_RTL) rtl/round_sat.sv rtl/dc_block.sv rtl/det_a.sv tb/det_chain.sv
 SRC_latch     := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
                  rtl/det_a.sv rtl/cordic.sv rtl/nco.sv rtl/rx_latch.sv tb/latch_chain.sv
+SRC_search    := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
+                 rtl/det_a.sv rtl/cordic.sv rtl/nco.sv rtl/rx_latch.sv rtl/ltf_corr.sv rtl/rx_search.sv \
+                 tb/search_chain.sv
 
 .PHONY: all lint vectors clean $(BLOCKS)
 
@@ -101,7 +105,8 @@ det: vectors/det.txt
 	./obj_dir/det/sim_det vectors/det.txt
 
 # Three builds: D_SAMPLES = 3 at R = 8 clocks per sample (and R = 16, the 10 MHz mode), D_SAMPLES
-# = 4 at R = 6 (ADR 0006), and D_SAMPLES = 5 at R = 5, the only one with two latches in flight.
+# = 4 at R = 6 (ADR 0006) and at R = 8 (the decision's schedule, with the CORDIC's arbiter to
+# come), and D_SAMPLES = 5 at R = 5, the only one with two latches in flight.
 # Registers without a reset and the delay line start from random values (rand+reset+2).
 latch: vectors/latch.txt
 	rm -rf obj_dir/latch && mkdir -p obj_dir/latch
@@ -114,7 +119,22 @@ latch: vectors/latch.txt
 	./obj_dir/latch/d3/sim_latch vectors/latch.txt 8 3 +verilator+rand+reset+2
 	./obj_dir/latch/d3/sim_latch vectors/latch.txt 16 3 +verilator+rand+reset+2
 	./obj_dir/latch/d4/sim_latch vectors/latch.txt 6 4 +verilator+rand+reset+2
+	./obj_dir/latch/d4/sim_latch vectors/latch.txt 8 4 +verilator+rand+reset+2
 	./obj_dir/latch/d5/sim_latch vectors/latch.txt 5 5 +verilator+rand+reset+2
+
+# One build per (D_SAMPLES, W): the schedule's default D = 4 with GI − B = 12 (the default
+# back-off), 16 (none: one ring word to spare) and 8; D = 3 and 5 at W = 12. The correlator
+# takes a sample in 8 clocks at most: R = 8, 11 and 16 (the 10 MHz mode).
+SEARCH_BUILDS := 4.12 4.16 4.8 3.12 5.12
+search: vectors/search.txt
+	rm -rf obj_dir/search && mkdir -p obj_dir/search
+	set -e; for b in $(SEARCH_BUILDS); do d=$${b%.*}; w=$${b#*.}; \
+		$(VERILATOR) $(VFLAGS) -GD_SAMPLES=$$d -GW=$$w --Mdir obj_dir/search/d$${d}w$$w \
+			--top-module search_chain $(SRC_search) tb/tb_search.cpp -o sim_search; \
+		for r in 8 11 16; do \
+			./obj_dir/search/d$${d}w$$w/sim_search vectors/search.txt $$r $$d $$w +verilator+rand+reset+2; \
+		done; \
+	done
 
 clean:
 	rm -rf obj_dir
