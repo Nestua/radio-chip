@@ -12,43 +12,52 @@
 //!
 //! # The clocks
 //!
+//! Every count here is from cycle to cycle: a block with a latency of k that has its input
+//! in cycle X shows its registered output in cycle X + k. (The RTL headers count the clock
+//! edges after the edge that takes the input, which is one less: `ltf_corr`'s 14 is 15
+//! here, the CORDIC's 17 is 18, the NCO's 3 is 4.)
+//!
 //! Cycle Y(n) is the one in which sample n of the DC blocker's output is at the history's
 //! write port and at detector A's input; samples are at least R cycles apart. The NCO, the
 //! search correlator and the search run D samples behind (ADR 0006 decision 3), so the
 //! acceptance at model sample n is a registered strobe in cycle
 //!
 //! ```text
-//! a = Y(n + D) + z_latency + corr_latency + search_latency        (5 + 14 + 3 = 22)
+//! a = Y(n + D) + z_latency + corr_latency + search_latency        (5 + 15 + 3 = 23)
 //! ```
 //!
 //! and the result is applied at model sample n + L: detector A's run counter is cleared in
 //! the cycle sample n + L is in its last stage, so the result must be a register's output
-//! in cycle Y(n + L) + det_latency − 1. With samples exactly R apart that leaves
-//! (L − D)·R − 22 + 3 = 461 cycles at R = 8, D = 4, L = 64.
+//! in cycle Y(n + L) + det_latency − 1, and in any case within that sample's R cycles (the
+//! hand-off and the gain's hold start with it). With samples exactly R apart that leaves
+//! (L − D)·R − 23 + 3 = 460 cycles at R = 8, D = 4, L = 64.
 //!
 //! # The schedule, in cycles after the strobe (w = GI − B, F the correlator's fold)
 //!
 //! | Cycles | What | Reads |
 //! |---|---|---|
-//! | 0 … w | the grid: the energies at imax … imax + w, oldest first; the last one that keeps 7/8 of the maximum and lies before the deadline is T1 | ring, one a cycle |
-//! | w + 2 | T1 registered | |
+//! | 0 … w | the grid: the energies at imax … imax + w, oldest first; the last one that keeps 7/8 of the maximum is T1 | ring, one a cycle |
+//! | w + 2 | T1 registered (the word, the comparison) | |
 //! | c = w + 3 … c + 95 | the final coarse sum: product i from y(T1 − 160 + i) and y(T1 − 144 + i), narrowed to E bits, one product a cycle on one complex multiplier | port 0 and port 1 |
-//! | c + 98 | the sum registered; the CORDIC asked (a latch asking in the same cycle goes first, the decision asks again in the next) | |
-//! | g + 17, g + 18 | the coarse angle, the step (g the cycle the CORDIC took the sum) | |
-//! | r = g + 19 … | the rotation of y(T1 + m), m = 0 … 126 + w, into the decision's correlator, one sample a cycle; after each sample that completes a window to be correlated (m = 63 … 62 + w and 127 … 126 + w) the stream waits F − 1 cycles | port 0 |
+//! | c + 99 | the sum registered (the words 1, narrowed 1, the product 1, the accumulator 1); the CORDIC asked. A latch asking in the same cycle goes first and the decision asks again in the next | |
+//! | g + 1 | the sum at the CORDIC's input, g the cycle it is granted (the arbiter's register) | |
+//! | g + 19, g + 20 | the coarse angle, the step | |
+//! | r = g + 20 … | the rotation of y(T1 + m), m = 0 … 126 + w, through a second NCO into the decision's correlator, one sample a cycle; after each sample that completes a window to be correlated (m = 63 … 62 + w and 127 … 126 + w) the stream waits F − 1 cycles | port 0 |
 //! | f = c + 96 … f + 175 | the fine sum on the same multiplier: product i from y(T1 − 28 + i) in cycle f + 2i and y(T1 + 36 + i) in the next | port 1 |
-//! | f + 178 | the fine sum registered, the CORDIC asked; its angle 17 cycles after it is taken, the resolved CFO 2 later | |
-//! | last read + 4 | the last sample in the correlator's window (memory 1, NCO 3) | |
-//! | + F + 5 | its correlation | |
+//! | f + 179 | the fine sum registered, the CORDIC asked; its angle 19 cycles after the grant, the resolved CFO 2 later | |
+//! | last read + 5 | the last sample out of the NCO, at the correlator (memory 1, NCO 4) | |
+//! | + F + 7 | its correlation (`ltf_corr`'s stages: the phase 1, F of products, select, fold, product, two of sums, the accumulator) | |
 //! | + 3, + 1, + 2 | the squares, the three sums, the two comparisons | |
 //! | + 1 | **the result registered** | |
 //!
-//! Without a wait at the CORDIC that is 8·w + 263 cycles at F = 4 (359 at w = 12, 391 at
-//! w = 16); the fine sum's branch ends at w + 296 and is the longer one only below w = 5.
+//! Without a wait at the CORDIC that is 8·w + 268 cycles at F = 4 (364 at w = 12, 396 at
+//! w = 16); the fine sum's branch ends at w + 300 and is the longer one only below w = 5.
 //!
-//! The stage counts inside a branch (two cycles from a memory word to a registered product,
-//! one for the accumulator, three for the squares) are this schedule's allowance for the
-//! RTL of step 3, as ADR 0006's were: the RTL may be faster, and must not be slower.
+//! The stage counts of blocks that exist are theirs (`cordic`, `nco`, the memory; the
+//! correlator's are `ltf_corr`'s with F in place of 8). Those of blocks not yet written
+//! (the search's three, the multiplier's, the squares and comparisons) are this
+//! schedule's allowance for the RTL of steps 2 and 3, as ADR 0006's were: none has been
+//! through synthesis, and a stage more in any of them is a cycle more here.
 
 use crate::rx_front::{
     backoff_samples, RxConfig, COARSE_END_BEFORE_T1, COARSE_LEN, FINE_GUARD, FINE_LEN, GI2_LEN,
@@ -63,24 +72,28 @@ use std::collections::BTreeSet;
 
 /// A synchronous memory's read: the word is registered the cycle after its address.
 const MEM: usize = 1;
-/// From a registered pair of memory words to their registered product (narrowing, the
-/// multiplier), and one cycle more to the accumulator.
-const MAC: usize = 2;
-/// The CORDIC of `hw/rtl/cordic.sv`: the angle 17 cycles after the cycle that takes the
-/// input.
-const CORDIC: usize = 17;
-/// The NCO of `hw/rtl/nco.sv`: the rotated sample 3 cycles after its input.
-const NCO: usize = 3;
-/// The decision's correlator beyond its F cycles of products: select, fold, product, two
-/// of sums (the search correlator's stages without the narrowing).
-const CORR: usize = 5;
-/// Squares of a correlation pair, the running sums, the comparisons with the energy.
+/// From a registered pair of memory words to the registered sum: the narrowing, the
+/// product, the accumulator, a register after each (an allowance: `nco`'s product alone,
+/// from flip-flops, routed with 0.9 ns to spare at 160 MHz on IHP 130 nm).
+const MAC: usize = 3;
+/// The register between the CORDIC's arbiter and its input.
+const ARB: usize = 1;
+/// The CORDIC of `hw/rtl/cordic.sv`: the angle 18 cycles after the input's cycle.
+const CORDIC: usize = 18;
+/// The NCO of `hw/rtl/nco.sv`: the rotated sample 4 cycles after its input's cycle.
+const NCO: usize = 4;
+/// The decision's correlator beyond its F cycles of products, as `ltf_corr` is built: the
+/// phase register, select, fold, product, two of sums, the accumulator's last clock.
+const CORR: usize = 7;
+/// Squares of a correlation pair (3), the running sums (1), the comparisons with the
+/// energy (2).
 const TAIL: usize = 3 + 1 + 2;
 
 /// What the schedule is laid out against: the clock, the path delays of the blocks around
 /// the decision, and the memories' depths. The defaults are the front as built and decided
-/// on 2026-11-22: 160 MHz at 20 MS/s, D = 4 (the latch's contract with a register for the
-/// CORDIC's arbiter), a fold of 4 (ADR 0008 decision 4).
+/// on 2026-11-22: 160 MHz at 20 MS/s, D = 4 (the latch's contract D·R ≥ 24 with the
+/// arbiter's register, and a sample to spare), a fold of 4 (ADR 0008 decision 4).
+/// Latencies are from cycle to cycle (see the module's text).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecisionTiming {
     /// R: the least number of clocks between two samples.
@@ -91,10 +104,10 @@ pub struct DecisionTiming {
     /// F: clocks the decision's correlator takes for one 64-tap correlation (128 real
     /// products on 128 / F multipliers).
     pub fold: usize,
-    /// Cycles from Y(k + D) to the rotated sample k at the search correlator (`rx_latch`
-    /// and `nco`: 5).
+    /// Cycles from Y(k + D) to the rotated sample k at the search correlator's input
+    /// (`rx_latch` and `nco`, as `tb_latch` requires: 5).
     pub z_latency: usize,
-    /// The search correlator's latency (`ltf_corr`: 14).
+    /// The search correlator's latency (`ltf_corr`: 15, its header's 14 edges).
     pub corr_latency: usize,
     /// Cycles from a correlator output to the registered acceptance: the square, the
     /// energy's running sum, the comparison with the maximum (an allowance for step 2: 3).
@@ -115,7 +128,7 @@ impl Default for DecisionTiming {
             delay_samples: 4,
             fold: 4,
             z_latency: 5,
-            corr_latency: 14,
+            corr_latency: 15,
             search_latency: 3,
             det_latency: 4,
             history_depth: HISTORY,
@@ -152,60 +165,47 @@ pub struct DecisionRun {
     pub ring_spare: usize,
 }
 
+/// A memory of the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Store {
+    /// The history of the DC blocker's output.
+    History,
+    /// The ring of the search's energies.
+    Ring,
+}
+
 /// Why a schedule cannot be built in hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleError {
     /// A word is read after it was overwritten, or in the cycle that overwrites it.
     Stale {
-        /// Whether the memory is the energy ring (otherwise the history).
-        ring: bool,
+        /// The memory.
+        store: Store,
         /// The sample or position asked for.
         index: usize,
         /// The cycle of the read.
         clock: usize,
     },
-    /// A word is read before it is written.
+    /// A word is read before it is written, or in the cycle that writes it.
     Unwritten {
-        /// Whether the memory is the energy ring.
-        ring: bool,
+        /// The memory.
+        store: Store,
         /// The sample or position asked for.
         index: usize,
         /// The cycle of the read.
         clock: usize,
     },
-    /// A read port of the history is used twice in a cycle.
+    /// A read port is used twice in a cycle.
     PortBusy {
-        /// The port (0 or 1).
+        /// The memory.
+        store: Store,
+        /// The port (0 or 1; the ring has one).
         port: u8,
         /// The cycle.
         clock: usize,
     },
     /// A result is not registered by the cycle it is due.
     Late,
-}
-
-/// Where the branches of one decision stand, in cycles after the strobe.
-#[derive(Debug, Clone, Copy)]
-struct Plan {
-    /// First read of the coarse sum.
-    coarse: usize,
-    /// The coarse sum asks the CORDIC.
-    coarse_ask: usize,
-    /// First read of the fine sum.
-    fine: usize,
-    /// The fine sum asks the CORDIC.
-    fine_ask: usize,
-}
-
-fn plan(w: usize) -> Plan {
-    let coarse = w + 1 + MEM + 1;
-    let fine = coarse + COARSE_LEN;
-    Plan {
-        coarse,
-        coarse_ask: coarse + COARSE_LEN - 1 + MEM + MAC,
-        fine,
-        fine_ask: fine + 2 * FINE_LEN - 1 + MEM + MAC,
-    }
 }
 
 /// Windows of the rotated stream that are correlated: those ending at m = 63 … 62 + w
@@ -220,76 +220,99 @@ fn rotation_read(m: usize, w: usize, fold: usize) -> usize {
     m + (fold - 1) * (0..m).filter(|&k| correlated(k, w)).count()
 }
 
-/// The cycle after the strobe at which the result is registered, the coarse sum taken by
-/// the CORDIC in cycle `coarse_taken` and the fine sum in `fine_taken`.
-fn end(w: usize, fold: usize, coarse_taken: usize, fine_taken: usize) -> usize {
-    let first = coarse_taken + CORDIC + 1 + 1;
-    let last = first + rotation_read(PAIR_LEN + w - 2, w, fold);
-    let rotation = last + MEM + NCO + fold + CORR + TAIL;
-    let fine = fine_taken + CORDIC + 2;
+/// The cycle the first rotated sample is read in, the coarse sum granted the CORDIC in
+/// cycle `granted`: the cycle the step is registered (the address does not wait for it).
+fn rotation_start(granted: usize) -> usize {
+    granted + ARB + CORDIC + 1
+}
+
+/// The cycle the result is registered in, from the last read of the rotation and the
+/// cycle the fine sum was granted the CORDIC.
+fn result_at(last_rotation_read: usize, fold: usize, fine_granted: usize) -> usize {
+    let rotation = last_rotation_read + MEM + NCO + fold + CORR + TAIL;
+    let fine = fine_granted + ARB + CORDIC + 2;
     rotation.max(fine) + 1
 }
 
 /// Cycles from the acceptance strobe to the registered result when nothing else asks for
-/// the CORDIC, at w = GI − B: 8·w + 263 at a fold of 4 for w ≥ 5.
+/// the CORDIC, at w = GI − B: the schedule's table added up, 8·w + 268 at a fold of 4 for
+/// w ≥ 5.
 pub fn schedule_len(w: usize, t: &DecisionTiming) -> usize {
-    let p = plan(w);
-    end(w, t.fold.max(1), p.coarse_ask, p.fine_ask)
+    let fold = t.fold.max(1);
+    let coarse = w + MEM + 1 + 1;
+    let coarse_ask = coarse + COARSE_LEN - 1 + MEM + MAC;
+    let fine = coarse + COARSE_LEN;
+    let fine_ask = fine + 2 * FINE_LEN - 1 + MEM + MAC;
+    let last = rotation_start(coarse_ask) + rotation_read(PAIR_LEN + w - 2, w, fold);
+    result_at(last, fold, fine_ask)
 }
 
-/// A memory written once per index in known cycles, read by absolute index.
+/// A memory written once per index in known cycles, read by absolute index on its ports.
 struct Memory<'a, T> {
-    ring: bool,
+    store: Store,
     depth: usize,
     /// Cycle in which index k is written (increasing).
     written: &'a [usize],
     data: &'a [T],
     /// The least number of spare words seen.
     spare: usize,
+    /// The (port, cycle) of every read.
+    used: BTreeSet<(u8, usize)>,
 }
 
-impl<T: Copy> Memory<'_, T> {
-    fn read(&mut self, index: usize, clock: usize) -> Result<T, ScheduleError> {
-        let (ring, err) = (self.ring, (index, clock));
+impl<'a, T: Copy> Memory<'a, T> {
+    fn new(store: Store, depth: usize, written: &'a [usize], data: &'a [T]) -> Self {
+        Self {
+            store,
+            depth,
+            written,
+            data,
+            spare: depth,
+            used: BTreeSet::new(),
+        }
+    }
+
+    fn read(&mut self, port: u8, index: usize, clock: usize) -> Result<T, ScheduleError> {
+        let store = self.store;
+        if !self.used.insert((port, clock)) {
+            return Err(ScheduleError::PortBusy { store, port, clock });
+        }
         // Words whose write is over before this cycle, and those written by its end.
         let before = self.written.partition_point(|&c| c < clock);
         let by_end = self.written.partition_point(|&c| c <= clock);
         let Some(&v) = self.data.get(index).filter(|_| index < before) else {
             return Err(ScheduleError::Unwritten {
-                ring,
-                index: err.0,
-                clock: err.1,
+                store,
+                index,
+                clock,
             });
         };
         // The newest word written by the end of this cycle is by_end − 1: the word read
         // must not share its address with that one or any before it down to its own.
         let age = by_end - 1 - index;
         if age >= self.depth {
-            return Err(ScheduleError::Stale { ring, index, clock });
+            return Err(ScheduleError::Stale {
+                store,
+                index,
+                clock,
+            });
         }
         self.spare = self.spare.min(self.depth - 1 - age);
         Ok(v)
     }
-}
 
-/// The history's two read ports, each good for one word a cycle.
-struct Ports<'a> {
-    history: Memory<'a, IQ>,
-    used: BTreeSet<(u8, usize)>,
-}
-
-impl Ports<'_> {
-    fn read(&mut self, port: u8, index: usize, clock: usize) -> Result<IQ, ScheduleError> {
-        if !self.used.insert((port, clock)) {
-            return Err(ScheduleError::PortBusy { port, clock });
-        }
-        self.history.read(index, clock)
+    fn reads(&self, port: u8) -> usize {
+        self.used.iter().filter(|u| u.0 == port).count()
     }
 }
 
 /// The first cycle from `ask` on in which no latch asks for the CORDIC, if it comes
 /// before `limit`.
-fn taken(ask: usize, limit: usize, latch: &dyn Fn(usize) -> bool) -> Result<usize, ScheduleError> {
+fn granted(
+    ask: usize,
+    limit: usize,
+    latch: &dyn Fn(usize) -> bool,
+) -> Result<usize, ScheduleError> {
     (ask..limit).find(|&c| !latch(c)).ok_or(ScheduleError::Late)
 }
 
@@ -317,6 +340,7 @@ pub fn run_schedule(
     let w = GI_LEN.saturating_sub(b);
     let latency = cfg.decision_latency.min(MAX_DECISION_LATENCY);
     let fold = t.fold.max(1);
+    let period = t.clocks_per_sample.max(1);
     let to_strobe = t.z_latency + t.corr_latency + t.search_latency;
     if w == 0 || !fx.is_valid() {
         return Ok(Vec::new());
@@ -343,11 +367,12 @@ pub fn run_schedule(
     let mut clock = 0;
     let y_clock: Vec<usize> = (0..x.len() + extra)
         .map(|n| {
-            clock += t.clocks_per_sample.max(1) + idle(n);
+            clock += period + idle(n);
             clock
         })
         .collect();
-    // Energy j is complete at model sample j + 126 + w, a cycle before that sample's strobe.
+    // Energy j is complete at model sample j + 126 + w and registered a cycle before that
+    // sample's strobe (the comparison with the maximum is the search's last stage).
     let energy_at = |j: usize| j + PAIR_LEN - 2 + w;
     let ring_clock: Vec<usize> = (0..)
         .map_while(|j| y_clock.get(energy_at(j) + t.delay_samples))
@@ -372,40 +397,29 @@ pub fn run_schedule(
             continue;
         }
         let a = y_clock[n + t.delay_samples] + to_strobe;
-        let deadline = y_clock[due] + t.det_latency.max(1) - 1;
+        // The run counter's clear, and in any case inside the sample's own period.
+        let deadline = y_clock[due] + (t.det_latency.max(1) - 1).min(period - 1);
         let budget = deadline.checked_sub(a).ok_or(ScheduleError::Late)?;
         if schedule_len(w, t) > budget {
             return Err(ScheduleError::Late);
         }
-        let p = plan(w);
-        let mut ring = Memory {
-            ring: true,
-            depth: t.ring_depth,
-            written: &ring_clock,
-            data: &energy,
-            spare: t.ring_depth,
-        };
-        let mut ports = Ports {
-            history: Memory {
-                ring: false,
-                depth: t.history_depth,
-                written: &y_clock,
-                data: &y,
-                spare: t.history_depth,
-            },
-            used: BTreeSet::new(),
-        };
+        let mut ring = Memory::new(Store::Ring, t.ring_depth, &ring_clock, &energy);
+        let mut history = Memory::new(Store::History, t.history_depth, &y_clock, &y);
 
         // The grid: the latest start within GI − B of the maximum keeping 7/8 of it. The
         // oldest energy is read first: it is the first to be overwritten.
         let keep = acc.emax - (acc.emax >> 3);
         let mut sym = None;
+        let mut read = a;
         for k in 0..=w {
-            let e = ring.read(acc.imax + k, a + k)?;
+            read = a + k;
+            let e = ring.read(0, acc.imax + k, read)?;
             if acc.imax + k < acc.deadline && e >= keep {
                 sym = Some(acc.imax + k);
             }
         }
+        // T1 registered: the last word, its comparison.
+        let grid = read + MEM + 1;
 
         let mut run = DecisionRun {
             accepted_at: n,
@@ -429,25 +443,29 @@ pub fn run_schedule(
         // The final coarse sum, both ports, one product a cycle.
         let mut cc = (0, 0);
         for i in 0..COARSE_LEN {
-            let c = a + p.coarse + i;
-            let v0 = ports.read(0, kc + i, c)?;
-            let v1 = ports.read(1, kc + STF_PERIOD + i, c)?;
+            read = grid + 1 + i;
+            let v0 = history.read(0, kc + i, read)?;
+            let v1 = history.read(1, kc + STF_PERIOD + i, read)?;
             cc = iadd(cc, imul(est(v0), iconj(est(v1))));
         }
-        let coarse_taken = taken(a + p.coarse_ask, deadline, &asked)?;
+        let coarse_end = read;
+        let coarse_ask = coarse_end + MEM + MAC;
+        let coarse_granted = granted(coarse_ask, deadline, &asked)?;
         let angle_c = cordic_with(cc.0, cc.1, fx, &cordic);
         let step = phase_per_sample(angle_c, STF_PERIOD as u32, fx);
 
-        // The rotation into the decision's correlator, port 0.
-        let first = coarse_taken + CORDIC + 1 + 1;
-        // The model rotates PAIR_LEN + w samples and no sum reads the last one: the newest
-        // window correlated ends at m = 126 + w.
+        // The rotation into the decision's correlator, port 0. The model rotates
+        // PAIR_LEN + w samples and no sum reads the last one: the newest window
+        // correlated ends at m = 126 + w.
+        let first = rotation_start(coarse_granted);
         let mut rot = Vec::with_capacity(PAIR_LEN + w);
         for m in 0..PAIR_LEN + w - 1 {
-            let v = ports.read(0, sym + m, first + rotation_read(m, w, fold))?;
+            read = first + rotation_read(m, w, fold);
+            let v = history.read(0, sym + m, read)?;
             let ph = (i128::from(step) * m as i128).rem_euclid(1i128 << fx.nco_phase_bits) as i64;
             rot.push(nco_mix_with(v, ph, fx, &nco));
         }
+        let rotation_end = read;
         let xc = |o: usize| {
             (0..LTF_SYMBOL_LEN).fold((0, 0), |s, k| iadd(s, imul(rot[o + k], iconj(taps[k]))))
         };
@@ -460,15 +478,18 @@ pub fn run_schedule(
         // The fine sum on port 1 behind the coarse one, two reads a product.
         let fine_start = (sym + FINE_GUARD).checked_sub(GI2_LEN);
         let mut cf = (0, 0);
+        read = coarse_end + 2 * FINE_LEN;
         if let Some(fs) = fine_start {
             for i in 0..FINE_LEN {
-                let c = a + p.fine + 2 * i;
-                let v0 = ports.read(1, fs + i, c)?;
-                let v1 = ports.read(1, fs + LTF_SYMBOL_LEN + i, c + 1)?;
+                read = coarse_end + 1 + 2 * i;
+                let v0 = history.read(1, fs + i, read)?;
+                read += 1;
+                let v1 = history.read(1, fs + LTF_SYMBOL_LEN + i, read)?;
                 cf = iadd(cf, imul(est(v0), iconj(est(v1))));
             }
         }
-        let fine_taken = taken(a + p.fine_ask, deadline, &asked)?;
+        let fine_ask = read + MEM + MAC;
+        let fine_granted = granted(fine_ask, deadline, &asked)?;
         let coarse = -step;
         let raw = -phase_per_sample(
             cordic_with(cf.0, cf.1, fx, &cordic),
@@ -479,14 +500,11 @@ pub fn run_schedule(
         let half = span >> 1;
         let d = (raw - coarse + half).rem_euclid(span) - half;
 
-        run.coarse_wait = coarse_taken - (a + p.coarse_ask);
-        run.fine_wait = fine_taken - (a + p.fine_ask);
-        run.done = end(w, fold, coarse_taken, fine_taken) - a;
-        run.history_spare = ports.history.spare;
-        run.reads = (
-            ports.used.iter().filter(|u| u.0 == 0).count(),
-            ports.used.iter().filter(|u| u.0 == 1).count(),
-        );
+        run.coarse_wait = coarse_granted - coarse_ask;
+        run.fine_wait = fine_granted - fine_ask;
+        run.done = result_at(rotation_end, fold, fine_granted) - a;
+        run.history_spare = history.spare;
+        run.reads = (history.reads(0), history.reads(1));
         if run.done > budget {
             return Err(ScheduleError::Late);
         }
@@ -514,7 +532,6 @@ pub fn run_schedule(
         };
         runs.push(run);
     }
-
     Ok(runs)
 }
 
@@ -525,24 +542,20 @@ mod tests {
     #[test]
     fn a_port_gives_one_word_a_cycle() {
         let written: Vec<usize> = (1..=40).collect();
-        let data = vec![(0, 0); 40];
-        let mut ports = Ports {
-            history: Memory {
-                ring: false,
-                depth: 16,
-                written: &written,
-                data: &data,
-                spare: 16,
-            },
-            used: BTreeSet::new(),
-        };
-        assert_eq!(ports.read(0, 30, 41), Ok((0, 0)));
-        assert_eq!(ports.read(1, 30, 41), Ok((0, 0)));
-        assert_eq!(ports.read(0, 31, 42), Ok((0, 0)));
+        let data = vec![(0i64, 0i64); 40];
+        let mut m = Memory::new(Store::History, 16, &written, &data);
+        assert_eq!(m.read(0, 30, 41), Ok((0, 0)));
+        assert_eq!(m.read(1, 30, 41), Ok((0, 0)));
+        assert_eq!(m.read(0, 31, 42), Ok((0, 0)));
         assert_eq!(
-            ports.read(0, 32, 41),
-            Err(ScheduleError::PortBusy { port: 0, clock: 41 })
+            m.read(0, 32, 41),
+            Err(ScheduleError::PortBusy {
+                store: Store::History,
+                port: 0,
+                clock: 41
+            })
         );
+        assert_eq!((m.reads(0), m.reads(1)), (2, 1));
     }
 
     #[test]
@@ -550,38 +563,33 @@ mod tests {
         // Index k is written in cycle 10·(k + 1).
         let written: Vec<usize> = (1..=40).map(|k| 10 * k).collect();
         let data: Vec<usize> = (0..40).collect();
-        let mut m = Memory {
-            ring: true,
-            depth: 8,
-            written: &written,
-            data: &data,
-            spare: 8,
-        };
+        let mut m = Memory::new(Store::Ring, 8, &written, &data);
+        let store = Store::Ring;
         // In cycle 205 the newest is index 19 (cycle 200): 12 … 19 are held.
-        assert_eq!(m.read(19, 205), Ok(19));
-        assert_eq!(m.read(12, 205), Ok(12));
+        assert_eq!(m.read(0, 19, 205), Ok(19));
+        assert_eq!(m.read(0, 12, 206), Ok(12));
         assert_eq!(m.spare, 0);
         let stale = |index, clock| {
             Err(ScheduleError::Stale {
-                ring: true,
+                store,
                 index,
                 clock,
             })
         };
-        assert_eq!(m.read(11, 205), stale(11, 205));
+        assert_eq!(m.read(0, 11, 207), stale(11, 207));
         // Index 20 is written in cycle 210 into the word of index 12: neither can be read
         // in that cycle, both the cycle before and after as the memory then stands.
-        assert_eq!(m.read(12, 209), Ok(12));
-        assert_eq!(m.read(12, 210), stale(12, 210));
+        assert_eq!(m.read(0, 12, 209), Ok(12));
+        assert_eq!(m.read(0, 12, 210), stale(12, 210));
         assert_eq!(
-            m.read(20, 210),
+            m.read(1, 20, 210),
             Err(ScheduleError::Unwritten {
-                ring: true,
+                store,
                 index: 20,
                 clock: 210
             })
         );
-        assert_eq!(m.read(20, 211), Ok(20));
-        assert_eq!(m.read(13, 210), Ok(13));
+        assert_eq!(m.read(0, 20, 211), Ok(20));
+        assert_eq!(m.read(2, 13, 210), Ok(13));
     }
 }

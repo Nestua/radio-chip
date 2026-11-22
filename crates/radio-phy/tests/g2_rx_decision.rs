@@ -4,8 +4,8 @@
 //!
 //! References: the decisions are those of `RxFrontFixed::push` (`decide`, gated in
 //! `g2_rx_front.rs`), bit for bit; the clock counts are the schedule's table worked by hand
-//! (G0 in `docs/gates/rx_front.md`): 8·w + 263 clocks at a fold of 4, against a budget of
-//! (L − D)·R − 22 + 3.
+//! (G0 in `docs/gates/rx_front.md`): 8·w + 268 clocks at a fold of 4, against a budget of
+//! (L − D)·R − 23 + 3.
 
 #![allow(clippy::unwrap_used)]
 
@@ -13,7 +13,7 @@ use radio_phy::channel::{add_tone, awgn, fractional_delay, frequency_offset, mea
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_decision::{
-    run_schedule, schedule_len, DecisionRun, DecisionTiming, ScheduleError,
+    run_schedule, schedule_len, DecisionRun, DecisionTiming, ScheduleError, Store,
 };
 use radio_phy::rx_front::RxConfig;
 use radio_phy::rx_front_fixed::{
@@ -198,7 +198,13 @@ fn scenes() -> Vec<Scene> {
         ("no back-off, failed", failed_candidate_scene(8, 0x57), 0.0),
         ("back-off 400 ns", frames_scene(8, 20.0, 0x58), 400.0),
         ("T2 negated", negated_t2_scene(8, 0x59), 200.0),
+        (
+            "back-off 50 ns, failed",
+            failed_candidate_scene(8, 0x5b),
+            50.0,
+        ),
         ("cut at its start", cut_scene(0x5a), 200.0),
+        ("under a tone, no back-off", tone_scene(0x5c), 0.0),
     ]
 }
 
@@ -256,7 +262,7 @@ fn each_way_out_of_a_decision_is_taken() {
             };
             seen[way] += 1;
             // A decision that ends early is still given its whole schedule.
-            assert_eq!((r.done, r.budget), (359, 461));
+            assert_eq!((r.done, r.budget), (364, 460));
         }
         seen
     };
@@ -264,26 +270,31 @@ fn each_way_out_of_a_decision_is_taken() {
     assert_eq!((cut[0], cut[4]), (1, 3), "{cut:?}");
     let failed = ways(&failed_candidate_scene(12, 0x54));
     assert!(failed[1] >= 12 && failed[4] == 12, "{failed:?}");
-    // No scene of this gate is rejected by one rule alone (the search's own correlator
-    // already asks for two symbols that add up): the rules' comparison has its own test
-    // beside the model (`rx_front_fixed::tests`).
+    // Under the tone candidates fail the confirmation alone too (the two symbols' sum
+    // is there, each symbol's own energy is not enough of the window's). No scene of this
+    // gate fails the coherence alone (the search's own correlator already asks for two
+    // symbols that add up): the rules' comparison has its own test beside the model
+    // (`rx_front_fixed::tests`).
     let tone = ways(&tone_scene(0x55));
+    assert!(tone[1] >= 30 && tone[3] >= 5 && tone[4] == 8, "{tone:?}");
     println!("ways out: cut {cut:?}, failed {failed:?}, tone {tone:?}");
 }
 
 #[test]
 fn a_decision_ends_at_the_clock_the_schedule_says() {
     let t = DecisionTiming::default();
-    // 8·w + 263 clocks from the acceptance strobe to the registered result, fold 4.
-    assert_eq!(schedule_len(12, &t), 359);
-    assert_eq!(schedule_len(16, &t), 391);
-    assert_eq!(schedule_len(8, &t), 327);
+    // 8·w + 268 clocks from the acceptance strobe to the registered result, fold 4.
+    assert_eq!(schedule_len(12, &t), 364);
+    assert_eq!(schedule_len(16, &t), 396);
+    assert_eq!(schedule_len(8, &t), 332);
     // A fold of 8 (16 multipliers) adds 4 clocks to each of the 2·w − 1 correlations that
     // hold the window, and one to the last.
     let slow = DecisionTiming { fold: 8, ..t };
-    assert_eq!(schedule_len(12, &slow), 359 + 4 * 23 + 4);
-    // Where the fine sum is the long pole: w + 296 + 1.
-    assert_eq!(schedule_len(2, &t), 2 + 296 + 1);
+    assert_eq!(schedule_len(12, &slow), 364 + 4 * 23 + 4);
+    // Where the fine sum is the long pole: w + 299 and the result's register.
+    assert_eq!(schedule_len(2, &t), 2 + 299 + 1);
+    assert_eq!(schedule_len(4, &t), 4 + 299 + 1);
+    assert_eq!(schedule_len(5, &t), 8 * 5 + 268);
 
     for (name, x, backoff) in scenes() {
         let cfg = with_backoff(backoff);
@@ -297,8 +308,8 @@ fn a_decision_ends_at_the_clock_the_schedule_says() {
             // the fine sum's 176. A decision with no coarse window in the stream reads none.
             let reads = [(0, 0), (96 + 127 + w, 96 + 176)];
             assert_eq!(r.reads, reads[usize::from(r.sums.is_some())], "{name}");
-            // Samples every 8 clocks, D = 4, L = 64: (64 − 4)·8 − (5 + 14 + 3) + (4 − 1).
-            assert_eq!(r.budget, 461, "{name}");
+            // Samples every 8 clocks, D = 4, L = 64: (64 − 4)·8 − (5 + 15 + 3) + (4 − 1).
+            assert_eq!(r.budget, 460, "{name}");
         }
     }
 }
@@ -319,23 +330,20 @@ fn the_latch_goes_first_at_the_cordic_and_costs_a_clock() {
         assert_eq!(accepted(&runs), accepted(&plain), "phase {phase}");
         for r in &runs {
             // The rotation waits for the coarse angle; the fine angle has clocks to spare.
-            assert_eq!(r.done, 359 + r.coarse_wait);
+            assert_eq!(r.done, 364 + r.coarse_wait);
             coarse += r.coarse_wait;
             fine += r.fine_wait;
         }
     }
     // Each decision met the latch once with each of its two requests.
     assert_eq!((coarse, fine), (plain.len(), plain.len()));
-    // With no cycle to spare (a model latency of 52 samples and 9 cycles from a correlator
-    // output to the strobe leave 359), the one wait is one too many.
+    // With no cycle to spare (a model latency of 52 samples leaves 48·8 − 20 = 364), the
+    // one wait is one too many.
     let mut tight = cfg.clone();
     tight.decision_latency = 52;
-    let nine = DecisionTiming {
-        search_latency: 9,
-        ..t
-    };
+    let nine = t;
     let fits = run_schedule(&x, &tight, &fx, &nine, &no_idle, &no_latch).unwrap();
-    assert!(fits.iter().all(|r| (r.done, r.budget) == (359, 359)));
+    assert!(fits.iter().all(|r| (r.done, r.budget) == (364, 364)));
     let late = (0..32)
         .filter(|&phase| {
             let latch = move |clock: usize| clock % 32 == phase;
@@ -343,6 +351,41 @@ fn the_latch_goes_first_at_the_cordic_and_costs_a_clock() {
         })
         .count();
     assert!((1..=fits.len()).contains(&late), "{late}");
+    // The stream's own latches: under a tone the detector's events go on while decisions
+    // are made. An event's latch asks 5 cycles after its sample; with no back-off both of
+    // a decision's requests fall in that cycle of a sample (23 + 19 + 99 and 23 + 19 + 96
+    // + 179 are 5 more than a multiple of 8), with the default back-off neither does.
+    let tone = tone_scene(0x5c);
+    let own = |backoff: f64| {
+        let runs = run(&tone, &with_backoff(backoff), &t);
+        let w = 16 - (backoff / 50.0) as usize;
+        for r in &runs {
+            assert_eq!(r.done, schedule_len(w, &t) + r.coarse_wait);
+        }
+        (
+            runs.iter().map(|r| r.coarse_wait).sum::<usize>(),
+            runs.iter().map(|r| r.fine_wait).sum::<usize>(),
+        )
+    };
+    let (met, missed) = (own(0.0), own(200.0));
+    println!("own latches met: {met:?} without back-off, {missed:?} with 200 ns");
+    assert!(met.0 > 0 && met.1 > 0, "{met:?}");
+    assert_eq!(missed, (0, 0));
+    // Below w = 5 the fine sum's branch is the longer one, and its wait is the one that
+    // counts (back-off 600 ns, w = 4).
+    let narrow = with_backoff(600.0);
+    let mut fine = 0;
+    for phase in 0..32 {
+        let latch = move |clock: usize| clock % 32 == phase;
+        for r in run_schedule(&x, &narrow, &fx, &t, &no_idle, &latch).unwrap() {
+            assert_eq!(
+                r.done,
+                304 + r.fine_wait.max(r.coarse_wait.saturating_sub(4))
+            );
+            fine += r.fine_wait;
+        }
+    }
+    assert!(fine > 0);
     // The latch asking in every clock would starve a decision: the schedule says so.
     let always = |_: usize| true;
     assert_eq!(
@@ -360,11 +403,11 @@ fn the_memories_hold_what_the_schedule_reads() {
         let w = 16 - (backoff / 50.0) as usize;
         let runs = run(&x, &cfg, &t);
         // The oldest sample read is the coarse sum's first, T1 − 160 with T1 at the
-        // earliest n − 189 − 2·w. It is read w + 3 clocks after the strobe, itself D = 4
-        // samples and 22 clocks behind sample n: the newest sample written by then is
-        // n + 4 + (22 + w + 3 − 1) / 8.
+        // earliest n − 189 − 2·w. It is read w + 3 cycles after the strobe, itself D = 4
+        // samples and 23 cycles behind sample n: the newest sample written by the end of
+        // that cycle is n + 4 + (23 + w + 3) / 8.
         let spare = runs.iter().map(|r| r.history_spare).min().unwrap();
-        let oldest = 349 + 2 * w + 4 + (24 + w) / 8;
+        let oldest = 349 + 2 * w + 4 + (26 + w) / 8;
         assert!(spare >= 512 - (oldest + 1), "{name}: {spare}");
         assert!(spare <= 512 - (oldest + 1) + w, "{name}: {spare}");
         // The energy ring: position imax = j − 63 − w is read first, in the strobe's clock.
@@ -373,11 +416,11 @@ fn the_memories_hold_what_the_schedule_reads() {
         if name == "failed candidates" {
             // A scene where T1 is as early as it can be: the bound is met.
             assert_eq!(spare, 512 - (oldest + 1));
-            // With three cycles more before the strobe the coarse sum's first read falls
-            // in the cycle that writes sample n + 9: the word of n − 503 is gone a cycle
-            // before a later read would lose it.
+            // With two cycles more before the strobe the coarse sum's first read falls in
+            // the cycle that writes sample n + 9: the word that write takes is gone a
+            // cycle before a later read would lose it.
             let moved = DecisionTiming {
-                search_latency: 6,
+                search_latency: 5,
                 ..t
             };
             let runs = run(&x, &cfg, &moved);
@@ -393,7 +436,10 @@ fn the_memories_hold_what_the_schedule_reads() {
         assert!(
             matches!(
                 run_schedule(&x, &cfg, &fx, &short, &no_idle, &no_latch),
-                Err(ScheduleError::Stale { .. })
+                Err(ScheduleError::Stale {
+                    store: Store::History,
+                    ..
+                })
             ),
             "{name}"
         );
@@ -414,7 +460,10 @@ fn the_memories_hold_what_the_schedule_reads() {
         assert!(
             matches!(
                 run_schedule(&x, &cfg, &fx, &short, &no_idle, &no_latch),
-                Err(ScheduleError::Stale { .. })
+                Err(ScheduleError::Stale {
+                    store: Store::Ring,
+                    ..
+                })
             ),
             "{name}"
         );
@@ -433,7 +482,12 @@ fn idle_clocks_between_samples_only_add_slack() {
     let idle = |n: usize| usize::from(n % 5 == 4) + 2 * usize::from(n % 13 == 12);
     let runs = run_schedule(&x, &cfg, &fx, &t, &idle, &no_latch).unwrap();
     assert_eq!(accepted(&runs), accepted(&plain));
+    // The strobe is 23 cycles after sample n + 4's own cycle, wherever the idle clocks fell.
+    let cycle = |n: usize| (0..=n).map(|k| 8 + idle(k)).sum::<usize>();
     for (a, b) in runs.iter().zip(&plain) {
+        assert_eq!(a.strobe, cycle(a.accepted_at + 4) + 23);
+        assert_eq!(b.strobe, 8 * (b.accepted_at + 5) + 23);
+        assert_eq!(a.budget, cycle(a.accepted_at + 64) + 3 - a.strobe);
         assert_eq!(a.done, b.done);
         assert!(a.budget > b.budget);
         assert!(a.history_spare >= b.history_spare);
@@ -447,10 +501,24 @@ fn what_does_not_fit_is_refused() {
     let x = frames_scene(4, 20.0, 0x81);
     let t = DecisionTiming::default();
     let late = |t: DecisionTiming| run_schedule(&x, &cfg, &fx, &t, &no_idle, &no_latch);
-    // The decision's correlator folded over 8: 455 clocks of 461 — it fits, by 6 clocks.
+    // The decision's correlator folded over 8: 460 clocks of 460, none to spare, and one
+    // wait at the CORDIC or one stage more anywhere is late.
     let f8 = late(DecisionTiming { fold: 8, ..t }).unwrap();
-    assert!(f8.iter().all(|r| r.done == 455 && r.budget == 461));
-    // 6 clocks per sample: (64 − 4)·6 − 19 = 341 clocks for 359.
+    assert!(f8.iter().all(|r| r.done == 460 && r.budget == 460));
+    let once = |clock: usize| clock % 32 == 1;
+    assert_eq!(
+        run_schedule(
+            &x,
+            &cfg,
+            &fx,
+            &DecisionTiming { fold: 8, ..t },
+            &no_idle,
+            &once
+        )
+        .unwrap_err(),
+        ScheduleError::Late
+    );
+    // 6 clocks per sample: (64 − 4)·6 − 20 = 340 clocks for 364.
     assert_eq!(
         late(DecisionTiming {
             clocks_per_sample: 6,
@@ -459,7 +527,7 @@ fn what_does_not_fit_is_refused() {
         .unwrap_err(),
         ScheduleError::Late
     );
-    // The NCO path 16 samples behind leaves 365 clocks, 17 leave 357.
+    // The NCO path 16 samples behind leaves 48·8 − 20 = 364 clocks, 17 leave 356.
     assert!(late(DecisionTiming {
         delay_samples: 16,
         ..t
@@ -473,6 +541,16 @@ fn what_does_not_fit_is_refused() {
         .unwrap_err(),
         ScheduleError::Late
     );
+    // A detector that answers later than a sample's period (it is to be made serial) does
+    // not move the deadline past the sample the result is applied at: D = 5 and an event
+    // after 12 cycles leave (64 − 5)·8 − 23 + 7, not + 11.
+    let serial = late(DecisionTiming {
+        delay_samples: 5,
+        det_latency: 12,
+        ..t
+    })
+    .unwrap();
+    assert!(serial.iter().all(|r| r.budget == 59 * 8 - 23 + 7));
     // A decision that ends early is refused all the same: the stream cut at its start, up
     // to its first decision and no further.
     let cut = cut_scene(0x5a);
@@ -488,7 +566,7 @@ fn what_does_not_fit_is_refused() {
         run_schedule(cut, &cfg, &fx, &slow, &no_idle, &no_latch).unwrap_err(),
         ScheduleError::Late
     );
-    // A model latency of 52 samples leaves 365 clocks, 51 leaves 357.
+    // A model latency of 52 samples leaves 364 clocks, 51 leaves 356.
     let mut short = cfg.clone();
     short.decision_latency = 52;
     assert!(run_schedule(&x, &short, &fx, &t, &no_idle, &no_latch).is_ok());
@@ -509,8 +587,13 @@ fn the_models_trace_names_the_energy_and_the_accepted_maximum() {
         let w = 16 - (backoff / 50.0) as usize;
         let mut rx = RxFrontFixed::new(cfg.clone(), FixedRxConfig::default());
         let (mut pairs, mut energies, mut seen) = (Vec::new(), Vec::new(), 0);
+        let (mut events, mut last_event) = (Vec::new(), 0);
         for (n, s) in x.iter().enumerate() {
             let t = rx.push_traced(*s).1;
+            if t.event {
+                last_event = n;
+                events.push(n);
+            }
             if let Some(c) = t.corr {
                 pairs.push(i128::from(c.0).pow(2) + i128::from(c.1).pow(2));
             }
@@ -528,7 +611,11 @@ fn the_models_trace_names_the_energy_and_the_accepted_maximum() {
                 let j = energies.len() - 1;
                 assert_eq!(a.imax + 63 + w, j, "{name} {n}");
                 assert_eq!(a.emax, energies[a.imax], "{name} {n}");
-                assert!(a.imax + w < a.deadline && a.opened_by < n, "{name} {n}");
+                // The deadline is 264 positions after the last event up to this sample,
+                // and the search was opened by an event.
+                assert_eq!(a.deadline, last_event + 24 + 240, "{name} {n}");
+                assert!(a.imax + w < a.deadline, "{name} {n}");
+                assert!(events.contains(&a.opened_by), "{name} {n}");
                 seen += 1;
             }
             assert!(t.accepted.is_some() || t.sums.is_none(), "{name} {n}");
