@@ -31,7 +31,7 @@ use crate::rx_front_fixed::{
 };
 use crate::rx_ofdm::{
     descramble, signal_checked, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, Signal,
-    SymbolLog, TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
+    SignalCheck, SymbolLog, TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
 };
 use crate::viterbi::{decode, Termination};
 
@@ -875,7 +875,7 @@ fn signal_with(
     fx: &FixedOfdmConfig,
     tracking: &mut FixedTracking,
     t: &Tables,
-) -> Result<(FixedChannel, Signal, i64, usize), RxOfdmError> {
+) -> Result<(FixedChannel, Signal, i64, SignalCheck), RxOfdmError> {
     let needed = fft_start.saturating_add(2 * FFT_SIZE);
     let short = RxOfdmError::Truncated {
         needed,
@@ -909,16 +909,15 @@ pub fn decode_signal_fixed(
     signal_with(z, fft_start, cfg, fx, &mut tracking, &t).map(|(_, signal, _, _)| signal)
 }
 
-/// [`decode_signal_fixed`] with SIGNAL's check count
-/// ([`crate::rx_ofdm::signal_checked`]): what tells a field read from a frame from one read
-/// from noise.
+/// [`decode_signal_fixed`] with SIGNAL's check ([`SignalCheck`]): what tells a field read
+/// from a frame from one read from noise.
 pub fn decode_signal_checked_fixed(
     z: &[IQ],
     fft_start: usize,
     cfg: &RxOfdmConfig,
     fx: &FixedOfdmConfig,
     mut tracking: FixedTracking,
-) -> Result<(Signal, usize), RxOfdmError> {
+) -> Result<(Signal, SignalCheck), RxOfdmError> {
     let unusable = RxOfdmError::Truncated { needed: 0, have: 0 };
     let t = tables(fx).ok_or(unusable)?;
     signal_with(z, fft_start, cfg, fx, &mut tracking, &t)

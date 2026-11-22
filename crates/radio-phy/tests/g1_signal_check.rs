@@ -12,10 +12,18 @@ use radio_phy::channel::{awgn, mean_power, Rng};
 use radio_phy::convolutional::{encode, CodeRate};
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, signal_bits, Rate};
-use radio_phy::rx_ofdm::{signal_checked, RxOfdmConfig, RxOfdmError, Signal};
+use radio_phy::rx_ofdm::{signal_checked, RxOfdmConfig, RxOfdmError, Signal, SignalCheck};
 use radio_phy::rx_ofdm_fixed::{
     decode_signal_checked_fixed, decode_signal_fixed, FixedOfdmConfig, FixedTracking,
 };
+
+/// A check with `disagree` coded bits against the field and `erased` of no sign.
+fn chk(disagree: usize, erased: usize) -> SignalCheck {
+    SignalCheck {
+        agree: 48 - disagree - erased,
+        disagree,
+    }
+}
 
 /// Soft values of coded bits: positive is a 0 (`docs/gates/viterbi.md`).
 fn soft(coded: &[u8], magnitude: i32) -> Vec<i32> {
@@ -35,7 +43,11 @@ fn the_count_is_the_number_of_coded_bits_turned_over() {
             assert_eq!(coded.len(), 48);
             let want = Signal { rate, length };
             let clean = soft(&coded, 100);
-            assert_eq!(signal_checked(&clean), Ok((want, 0)), "{rate:?} {length}");
+            assert_eq!(
+                signal_checked(&clean),
+                Ok((want, chk(0, 0))),
+                "{rate:?} {length}"
+            );
             let sets: [&[usize]; 7] = [
                 &[5],
                 &[47],
@@ -52,7 +64,7 @@ fn the_count_is_the_number_of_coded_bits_turned_over() {
                 }
                 assert_eq!(
                     signal_checked(&s),
-                    Ok((want, set.len())),
+                    Ok((want, chk(set.len(), 0))),
                     "{rate:?} {length} {set:?}"
                 );
             }
@@ -62,7 +74,11 @@ fn the_count_is_the_number_of_coded_bits_turned_over() {
             s[33] = -127 * s[33].signum();
             s[9] = 0;
             s[10] = 0;
-            assert_eq!(signal_checked(&s), Ok((want, 2)), "{rate:?} {length}");
+            assert_eq!(
+                signal_checked(&s),
+                Ok((want, chk(2, 2))),
+                "{rate:?} {length}"
+            );
         }
     }
 }
@@ -79,12 +95,12 @@ fn the_reserved_bit_set_is_encoded_as_it_was_decoded() {
         rate: Rate::R12,
         length: 1234,
     };
-    assert_eq!(signal_checked(&soft(&coded, 64)), Ok((want, 0)));
+    assert_eq!(signal_checked(&soft(&coded, 64)), Ok((want, chk(0, 0))));
     let mut s = soft(&coded, 64);
     s[2] = -s[2];
     s[25] = -s[25];
     s[46] = -s[46];
-    assert_eq!(signal_checked(&s), Ok((want, 3)));
+    assert_eq!(signal_checked(&s), Ok((want, chk(3, 0))));
 }
 
 #[test]
@@ -109,8 +125,10 @@ fn a_field_that_fails_has_no_count_and_noise_that_passes_has_a_large_one() {
         let s: Vec<i32> = (0..48)
             .map(|_| ((rng.gaussian() * 40.0) as i32).clamp(-127, 127))
             .collect();
-        if let Ok((_, n)) = signal_checked(&s) {
-            assert!(n <= 48);
+        if let Ok((_, c)) = signal_checked(&s) {
+            let n = c.disagree;
+            // Soft values drawn at ±40 a standard deviation: three or four zeros in 48.
+            assert_eq!(c.agree + n, s.iter().filter(|v| **v != 0).count());
             passed += 1;
             sum += n;
             near += usize::from(n <= 4);
@@ -158,15 +176,18 @@ fn the_integer_decoder_reports_the_count_with_its_signal() {
     // At 30 dB: the field, and no disagreement.
     for rate in Rate::ALL {
         let (got, sent) = run(rate, 30.0, &mut rng);
-        assert_eq!(got, Ok((sent, 0)), "{rate:?}");
+        assert_eq!(got, Ok((sent, chk(0, 0))), "{rate:?}");
     }
     // At 2 dB the true field still decodes most of the time, with disagreements.
     let (mut right, mut sum) = (0usize, 0usize);
     for _ in 0..200 {
         let (got, sent) = run(Rate::R6, 2.0, &mut rng);
-        if let Ok((s, n)) = got {
-            assert!(n <= 48);
+        if let Ok((s, c)) = got {
+            let n = c.disagree;
+            assert!(c.agree + n <= 48);
             if s == sent {
+                // Four-bit soft values: a few of the 48 fall on zero.
+                assert!(c.agree + n >= 40, "{c:?}");
                 right += 1;
                 sum += n;
             }

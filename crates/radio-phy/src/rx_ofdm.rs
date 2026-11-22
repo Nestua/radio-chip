@@ -568,21 +568,37 @@ pub(crate) fn signal_from_soft(soft: &[i32]) -> Result<Signal, RxOfdmError> {
     signal_checked(soft).map(|s| s.0)
 }
 
-/// The SIGNAL field from the 48 deinterleaved soft values of its symbol, with its check
-/// count: how many of the 48 coded bits disagree in sign with the decoded field encoded
-/// again (an erasure, 0, disagrees with nothing). A field read from a true SIGNAL has few
-/// (the channel's bit errors), one read from noise many: the decoder's one parity bit and
-/// its eight rate patterns pass a quarter of all noise.
-pub fn signal_checked(soft: &[i32]) -> Result<(Signal, usize), RxOfdmError> {
+/// How SIGNAL's 48 coded bits stand to the decoded field encoded again. A soft value of 0
+/// (an erasure) is in neither count. A field read from a true SIGNAL agrees in nearly all
+/// 48; one read from noise behind a true preamble finds mostly erasures; one read from
+/// noise alone disagrees in many. The decoder's one parity bit and its eight rate patterns
+/// pass a quarter of all noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalCheck {
+    /// Coded bits whose soft value has the sign of the encoded field's bit.
+    pub agree: usize,
+    /// Coded bits whose soft value has the other sign.
+    pub disagree: usize,
+}
+
+/// The SIGNAL field from the 48 deinterleaved soft values of its symbol, with its
+/// [`SignalCheck`].
+pub fn signal_checked(soft: &[i32]) -> Result<(Signal, SignalCheck), RxOfdmError> {
     let bits =
         decode(soft, CodeRate::R1_2, Termination::ZeroAfter(24)).map_err(RxOfdmError::Viterbi)?;
     // Rate 1/2: two coded bits per decoded bit, in the order the soft values came.
-    let count = ConvolutionalEncoder::new()
-        .encode(&bits)
-        .iter()
-        .zip(soft)
-        .filter(|(&c, &v)| v != 0 && (v < 0) != (c == 1))
-        .count();
+    let coded = ConvolutionalEncoder::new().encode(&bits);
+    let count = |other: bool| {
+        coded
+            .iter()
+            .zip(soft)
+            .filter(|(&c, &v)| v != 0 && ((v < 0) != (c == 1)) == other)
+            .count()
+    };
+    let check = SignalCheck {
+        agree: count(false),
+        disagree: count(true),
+    };
     let field = bits.get(..18).ok_or(RxOfdmError::SignalParity)?;
     if field.iter().fold(0u8, |p, b| p ^ b) != 0 {
         return Err(RxOfdmError::SignalParity);
@@ -595,7 +611,7 @@ pub fn signal_checked(soft: &[i32]) -> Result<(Signal, usize), RxOfdmError> {
     if !(1..=MAX_PSDU_LEN).contains(&length) {
         return Err(RxOfdmError::SignalLength);
     }
-    Ok((Signal { rate, length }, count))
+    Ok((Signal { rate, length }, check))
 }
 
 /// Decodes the SIGNAL field with the given channel estimate; `fft_start` as in [`decode_ppdu`].

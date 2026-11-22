@@ -40,7 +40,7 @@ use radio_phy::rx_front_fixed::{
 };
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
 use radio_phy::rx_ofdm_fixed::{
-    clock_ratio, decode_ppdu_fixed, decode_signal_fixed, FixedOfdmConfig, FixedTracking,
+    clock_ratio, decode_ppdu_fixed, decode_signal_checked_fixed, FixedOfdmConfig, FixedTracking,
 };
 
 type C = (f64, f64);
@@ -233,6 +233,7 @@ struct Outcome {
 /// One frame of a point as the gain control meets it.
 struct Stream {
     psdu: Vec<u8>,
+    rate: Rate,
     /// The channel's samples: the frame behind `lead` samples of noise, 200 after it.
     x: Vec<C>,
     /// The same at the antenna's level (the point's noise level at the largest gain).
@@ -324,6 +325,7 @@ fn stream(pt: &Point, agc: &FastAttackAgc, number: u64) -> Stream {
     let span_power = mean_power(span) * k * k;
     Stream {
         psdu,
+        rate: pt.rate,
         x,
         xs,
         dc,
@@ -357,6 +359,7 @@ fn one(pt: &Point, columns: &[Column], agc: &FastAttackAgc, number: u64) -> Outc
         end,
         span_power,
         mut rng,
+        ..
     } = st;
     let full = f64::from(ADC_FULL_SCALE);
     let cfg_float = RxConfig {
@@ -530,6 +533,9 @@ struct Trial {
     /// clipped samples under a still gain): `None` is `fast` all through, `Some(None)` no
     /// release at all, `Some(Some(rule))` that rule.
     robust: Option<Option<(usize, usize)>>,
+    /// The fewest agreeing coded bits of SIGNAL (`SignalCheck::agree`) at which its rate is
+    /// believed.
+    trust: usize,
 }
 
 /// The longest window a [`Trial`] looks back over.
@@ -560,7 +566,15 @@ struct Kept {
     /// The gain changed after the packet's short training field (160 samples) and more than
     /// 16 samples before its end.
     moved: bool,
+    /// SIGNALs that decoded, by the coded bits that agree with them (`SignalCheck::agree`,
+    /// in fours: 0 to 3, 4 to 7, … 44 to 47, 48): the frame's own (its rate, and its length
+    /// or the 100 octets of the frame before it) and the others.
+    own: [u32; CHECK_BINS],
+    other: [u32; CHECK_BINS],
 }
+
+/// Bins of SIGNAL's agreeing bits in `release`'s second table.
+const CHECK_BINS: usize = 13;
 
 /// Samples from the FFT window of T1 to the end of SIGNAL's window, and the periods the
 /// decoder takes from the beat that completes them to its verdict (as `rxper stream`; ADR
@@ -671,11 +685,19 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
                     }
                     z.push(v);
                     if z.len() == SIGNAL_END {
-                        let signal = decode_signal_fixed(&z, 0, &ofdm, &fo, start(word)).ok();
-                        let slow = signal
-                            .as_ref()
-                            .is_some_and(|s| matches!(s.rate, Rate::R6 | Rate::R9 | Rate::R12));
-                        let verdict = signal.map(|s| data_symbols(s.rate, s.length));
+                        let signal =
+                            decode_signal_checked_fixed(&z, 0, &ofdm, &fo, start(word)).ok();
+                        if let Some((s, check)) = signal {
+                            let own =
+                                s.rate == st.rate && (s.length == st.psdu.len() || s.length == 100);
+                            let bins = if own { &mut out.own } else { &mut out.other };
+                            bins[(check.agree / 4).min(CHECK_BINS - 1)] += 1;
+                        }
+                        let slow = signal.is_some_and(|(s, check)| {
+                            matches!(s.rate, Rate::R6 | Rate::R9 | Rate::R12)
+                                && k.trial.is_none_or(|t| check.agree >= t.trust)
+                        });
+                        let verdict = signal.map(|(s, _)| data_symbols(s.rate, s.length));
                         due = Some((n + VERDICT_LATENCY, tag, verdict, slow));
                     }
                 }
@@ -729,6 +751,8 @@ struct LoopTally {
     stopped: Vec<usize>,
     aborted: Vec<usize>,
     moved: Vec<usize>,
+    own: Vec<[u64; CHECK_BINS]>,
+    other: Vec<[u64; CHECK_BINS]>,
 }
 
 fn run_loop(pt: &Point, keepers: &[Keeper], frames: usize) -> LoopTally {
@@ -746,6 +770,8 @@ fn run_loop(pt: &Point, keepers: &[Keeper], frames: usize) -> LoopTally {
         stopped: vec![0; keepers.len()],
         aborted: vec![0; keepers.len()],
         moved: vec![0; keepers.len()],
+        own: vec![[0; CHECK_BINS]; keepers.len()],
+        other: vec![[0; CHECK_BINS]; keepers.len()],
     };
     let parts = par(|th| {
         let mut t = zero.clone();
@@ -762,6 +788,10 @@ fn run_loop(pt: &Point, keepers: &[Keeper], frames: usize) -> LoopTally {
                 t.stopped[c] += k.stopped;
                 t.aborted[c] += k.aborted;
                 t.moved[c] += usize::from(k.moved);
+                for b in 0..CHECK_BINS {
+                    t.own[c][b] += u64::from(k.own[b]);
+                    t.other[c][b] += u64::from(k.other[b]);
+                }
             }
             t.frames += 1;
         }
@@ -776,6 +806,10 @@ fn run_loop(pt: &Point, keepers: &[Keeper], frames: usize) -> LoopTally {
             a.stopped[c] += t.stopped[c];
             a.aborted[c] += t.aborted[c];
             a.moved[c] += t.moved[c];
+            for b in 0..CHECK_BINS {
+                a.own[c][b] += t.own[c][b];
+                a.other[c][b] += t.other[c][b];
+            }
         }
         a.frames += t.frames;
         a
@@ -813,10 +847,15 @@ fn hold_loop(frames: usize, trials: bool) {
         },
     ];
     // `release`: the model's rule against rules that are in this tool only.
-    let trial = |name: &'static str, fast, robust| Keeper {
-        trial: Some(Trial { fast, robust }),
+    let trial = |name: &'static str, fast, robust, trust| Keeper {
+        trial: Some(Trial {
+            fast,
+            robust,
+            trust,
+        }),
         ..keeper(name, 0, true, front)
     };
+    let slow = Some(Some((24, 32)));
     let tried = [
         keeper("from the lock", 0, true, Hold::FromLock),
         keeper("front alone", 0, true, front),
@@ -824,21 +863,24 @@ fn hold_loop(frames: usize, trials: bool) {
             clip_release: true,
             ..keeper("front + release", 0, true, front)
         },
-        trial("4 of 8", (4, 8), None),
-        trial("6 of 8", (6, 8), None),
-        trial("8 of 16", (8, 16), None),
-        trial("12 of 16", (12, 16), None),
-        trial("24 of 32", (24, 32), None),
-        trial("2/4; slow rate: none", (2, 4), Some(None)),
-        trial("2/4; slow rate: 8/16", (2, 4), Some(Some((8, 16)))),
-        trial("2/4; slow rate: 12/16", (2, 4), Some(Some((12, 16)))),
-        trial("2/4; slow rate: 24/32", (2, 4), Some(Some((24, 32)))),
+        trial("4 of 8", (4, 8), None, 0),
+        trial("8 of 16", (8, 16), None, 0),
+        trial("24 of 32", (24, 32), None, 0),
+        trial("2/4; slow: none", (2, 4), Some(None), 0),
+        trial("2/4; slow: 24/32", (2, 4), slow, 0),
+        trial("slow 24/32, agree>=24", (2, 4), slow, 24),
+        trial("slow 24/32, agree>=32", (2, 4), slow, 32),
+        trial("slow 24/32, agree>=40", (2, 4), slow, 40),
+        trial("slow 24/32, agree>=44", (2, 4), slow, 44),
+        trial("slow none, agree>=40", (2, 4), Some(None), 40),
     ];
     let keepers: &[Keeper] = if trials { &tried } else { &keepers };
     const IDLE: f64 = -30.0;
     const LOUD: f64 = -5.0;
     // The rows `release` runs: indices into `points`.
-    const TRIED: [usize; 16] = [2, 4, 6, 8, 10, 11, 12, 15, 17, 18, 19, 20, 21, 22, 23, 24];
+    const TRIED: [usize; 17] = [
+        2, 4, 6, 8, 9, 10, 11, 12, 15, 17, 18, 19, 20, 21, 22, 23, 24,
+    ];
     let HandoffConfig {
         clip_window,
         clip_count,
@@ -897,8 +939,14 @@ fn hold_loop(frames: usize, trials: bool) {
              # this tool only (not in the model, not in ADR 0008), each in place of the model's, on front alone:\n\
              #   C of W           = the hold stops acting on the control once C of the last W ADC samples sit on a rail,\n\
              #                      until the front declares again ('2 of 4' is the model's: the column front + release);\n\
-             #   2/4; slow rate: X = 2 of 4, until the decoder's verdict on SIGNAL of the open stream names 6, 9 or\n\
-             #                      12 Mb/s; from then on X (none: no release; C/W: that rule).\n\
+             #   2/4; slow: X     = 2 of 4, until the decoder's verdict on SIGNAL of the open stream names 6, 9 or\n\
+             #                      12 Mb/s; from then on X (none: no release; C/W: that rule);\n\
+             #   slow X, agree>=N = the same, the rate believed only when N or more of SIGNAL's 48 coded bits agree\n\
+             #                      with the decoded field encoded again (rx_ofdm::SignalCheck; a soft value of 0 agrees\n\
+             #                      with nothing).\n\
+             # Under each row: the SIGNALs that decoded in the column front + release, by agreeing bits in fours (0 to 3,\n\
+             # 4 to 7, ... 44 to 47, 48): 'own' has the frame's rate and its length (or the 100 octets of the frame\n\
+             # before it).\n\
              # The text above is `loop`'s; its columns that are not below were not run."
         );
     }
@@ -1072,6 +1120,19 @@ fn hold_loop(frames: usize, trials: bool) {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
+        if trials {
+            let line = |b: &[u64; CHECK_BINS]| {
+                b.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            println!(
+                "#     own: {}   other: {}",
+                line(&t.own[2]),
+                line(&t.other[2])
+            );
+        }
     }
 }
 
