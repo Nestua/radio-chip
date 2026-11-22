@@ -15,10 +15,10 @@ use radio_phy::rx_front::RxConfig;
 use radio_phy::rx_front_fixed::{
     acquisitions_fixed, cordic_angle, cordic_table, handoff_fixed, ltf_dc_offset_fixed, ltf_taps,
     nco_rotator, nco_table, to_adc, FixedAcquisition, FixedRxConfig, HandoffBeat, HandoffConfig,
-    HandoffEnd, HandoffStart, RxHandoffFixed, ADC_FULL_SCALE, ADC_HISTORY, HANDOFF_TAIL, IQ,
-    MAX_DATA_SYMBOLS,
+    HandoffEnd, HandoffStart, RxHandoffFixed, SignalVerdict, ADC_FULL_SCALE, ADC_HISTORY,
+    HANDOFF_TAIL, IQ, MAX_DATA_SYMBOLS,
 };
-use radio_phy::rx_ofdm::RxOfdmConfig;
+use radio_phy::rx_ofdm::{RxOfdmConfig, Signal, SignalCheck};
 use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
@@ -164,6 +164,33 @@ fn run_with(
     pace: HandoffConfig,
     room: impl Fn(usize) -> usize,
     verdict: impl Fn(usize, &Log) -> Option<Option<usize>>,
+) -> Log {
+    run_verdicts(cfg, adc, fx, pace, room, |n, log| {
+        verdict(n, log).map(|v| {
+            v.map(|data_symbols| SignalVerdict {
+                data_symbols,
+                patient: false,
+            })
+        })
+    })
+}
+
+/// A verdict with a length and nothing else.
+fn plain(data_symbols: usize) -> SignalVerdict {
+    SignalVerdict {
+        data_symbols,
+        patient: false,
+    }
+}
+
+/// [`run_with`] with the verdicts as the front takes them.
+fn run_verdicts(
+    cfg: RxConfig,
+    adc: &[(i16, i16)],
+    fx: FixedRxConfig,
+    pace: HandoffConfig,
+    room: impl Fn(usize) -> usize,
+    verdict: impl Fn(usize, &Log) -> Option<Option<SignalVerdict>>,
 ) -> Log {
     let mut rx = RxHandoffFixed::new(cfg, fx, pace);
     let mut log = Log::default();
@@ -576,11 +603,11 @@ fn a_verdict_on_a_replaced_packet_does_not_touch_the_new_one() {
             }
             if let [_, b] = acquired[..] {
                 if n == b.decided_at + 5 {
-                    rx.signal(1, stale);
+                    rx.signal(1, stale.map(plain));
                     assert!(rx.hold());
                 }
                 if n == b.fft_start + SIGNAL_END + 180 {
-                    rx.signal(2, Some(SHORT_SYMBOLS));
+                    rx.signal(2, Some(plain(SHORT_SYMBOLS)));
                 }
             }
         }
@@ -1365,4 +1392,532 @@ fn the_release_acts_anywhere_under_the_hold_and_for_any_window() {
         go(&with(&adc, &row(64)), all).holds(),
         [(a.decided_at, p + 63)]
     );
+}
+
+/// A verdict with a length for the first acquisition's stream, `after` samples past SIGNAL's
+/// window: `patient` or not.
+fn told(
+    after: usize,
+    data_symbols: usize,
+    patient: bool,
+) -> impl Fn(usize, &Log) -> Option<Option<SignalVerdict>> {
+    move |n, log| {
+        let a = log.acquired.first()?;
+        (n == a.fft_start + SIGNAL_END + after).then_some(Some(SignalVerdict {
+            data_symbols,
+            patient,
+        }))
+    }
+}
+
+#[test]
+fn a_patient_hold_is_given_up_by_24_of_32_and_not_by_2_of_4() {
+    // ADR 0008, decision 2, fourth amendment (2026-11-22). By hand: from the verdict that
+    // says patient on, the window is the last 32 ADC samples and the count 24; before it,
+    // and after a verdict that does not say so, 4 and 2.
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    assert_eq!(
+        (pace.patient_window, pace.patient_count, pace.patient_agree),
+        (32, 24, 40)
+    );
+    let r = (HI, 0);
+    // 1000 octets at 6 Mb/s, 335 data symbols; the verdict 180 samples after SIGNAL.
+    let (adc, _) = scene(&[(Rate::R6, 1000)], 700, 900, 12.5, 31);
+    let go = |adc: &[(i16, i16)], pace: HandoffConfig, patient: bool| {
+        run_verdicts(
+            RxConfig::new(FS),
+            adc,
+            fx,
+            pace,
+            |_| usize::MAX,
+            told(180, 335, patient),
+        )
+    };
+    let plain = go(&adc, pace, true);
+    assert_eq!(plain.acquired.len(), 1);
+    let a = plain.acquired[0];
+    let said = a.fft_start + SIGNAL_END + 180;
+    let end = a.fft_start + SIGNAL_END + 80 * 335 + B;
+    let kept = [(a.decided_at, end)];
+    assert_eq!(plain.holds(), kept);
+    let p = said + 1000;
+    let row = |from: usize, n: usize| -> Vec<Swap> { (0..n).map(|k| (from + k, r)).collect() };
+
+    // Patient: two in four do nothing, nor do 23 in a row; the 24th in a row takes it.
+    assert_eq!(go(&with(&adc, &row(p, 2)), pace, true).holds(), kept);
+    assert_eq!(go(&with(&adc, &row(p, 23)), pace, true).holds(), kept);
+    assert_eq!(
+        go(&with(&adc, &row(p, 24)), pace, true).holds(),
+        [(a.decided_at, p + 23)]
+    );
+    // 24 spread over 32: every fourth sample clean (p + 3, p + 7, … p + 31), so samples
+    // p … p + 30 hold 24 rail samples and the 24th is p + 30.
+    let spread: Vec<Swap> = (0..32).filter(|k| k % 4 != 3).map(|k| (p + k, r)).collect();
+    assert_eq!(spread.len(), 24);
+    assert_eq!(
+        go(&with(&adc, &spread), pace, true).holds(),
+        [(a.decided_at, p + 30)]
+    );
+    // The same 24 over 33 samples (one more clean sample in the middle) never share a
+    // window of 32.
+    let wide: Vec<Swap> = (0..33)
+        .filter(|k| k % 4 != 3 && *k != 16)
+        .map(|k| (p + k, r))
+        .collect();
+    assert_eq!(wide.len(), 24);
+    assert_eq!(go(&with(&adc, &wide), pace, true).holds(), kept);
+
+    // Not patient: the same verdict without the word leaves 2 of 4.
+    assert_eq!(
+        go(&with(&adc, &row(p, 2)), pace, false).holds(),
+        [(a.decided_at, p + 1)]
+    );
+    // Before the verdict the rule is 2 of 4 whatever the verdict will say; the samples
+    // the verdict's own push sees are still judged by 2 of 4, the next by 24 of 32.
+    for at in [said - 100, said - 1] {
+        assert_eq!(
+            go(&with(&adc, &row(at, 2)), pace, true).holds(),
+            [(a.decided_at, at + 1)],
+            "at {at}"
+        );
+    }
+    assert_eq!(go(&with(&adc, &row(said, 2)), pace, true).holds(), kept);
+    // Rail samples from before the verdict count in the patient window: 20 before it and
+    // 4 after make 24 of 32 — but those 20 would have released by 2 of 4, so put them one
+    // in four apart, where 2 of 4 never sees two: no release before, none after either
+    // (8 in 32).
+    let thin: Vec<Swap> = (0..8).map(|k| (said - 30 + 4 * k, r)).collect();
+    assert_eq!(go(&with(&adc, &thin), pace, true).holds(), kept);
+
+    // Other numbers, and a patient count of 0: never, while patient.
+    let cfg = HandoffConfig {
+        patient_window: 8,
+        patient_count: 3,
+        ..pace
+    };
+    assert_eq!(
+        go(&with(&adc, &[(p, r), (p + 2, r), (p + 7, r)]), cfg, true).holds(),
+        [(a.decided_at, p + 7)]
+    );
+    assert_eq!(
+        go(&with(&adc, &[(p, r), (p + 2, r), (p + 8, r)]), cfg, true).holds(),
+        kept
+    );
+    let never = HandoffConfig {
+        patient_count: 0,
+        ..pace
+    };
+    assert_eq!(go(&with(&adc, &row(p, 200)), never, true).holds(), kept);
+    assert_eq!(
+        go(&with(&adc, &row(p, 200)), never, false).holds(),
+        [(a.decided_at, p + 1)]
+    );
+    // The stream does not notice any of it: the same beats in the same periods, the
+    // hand-off's samples of what the ADC gave, the same end mark.
+    let x = with(&adc, &row(p, 24));
+    let log = go(&x, pace, true);
+    assert_eq!(log.beats.len(), plain.beats.len());
+    assert!(log.beats.iter().zip(&plain.beats).all(|(u, v)| u.0 == v.0));
+    let count = log.beats.len() - 1;
+    assert_eq!(log.samples(0, count), reference(&x, &a, &fx)[..count]);
+    assert_eq!(log.beats.last(), plain.beats.last());
+}
+
+#[test]
+fn a_declaration_under_a_patient_hold_inherits_the_patience_until_its_own_verdict() {
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    let r = (HI, 0);
+    // Two short frames 600 samples apart; the first one's verdict claims the longest
+    // frame, so its hold is still up when the second is declared.
+    let (adc, _) = scene(&[SHORT, SHORT], 700, 600, -33.0, 8);
+    // `first`: what the first stream's verdict says; `second`: the second's, if it comes
+    // (60 samples after its stream's first beat).
+    let go = |adc: &[(i16, i16)], first: Option<bool>, second: Option<Option<bool>>| {
+        run_verdicts(
+            RxConfig::new(FS),
+            adc,
+            fx,
+            pace,
+            |_| usize::MAX,
+            |n, log| {
+                let verdict = |patient| SignalVerdict {
+                    data_symbols: MAX_DATA_SYMBOLS,
+                    patient,
+                };
+                let a = log.acquired.first()?;
+                if n == a.fft_start + SIGNAL_END + 180 {
+                    return first.map(|p| Some(verdict(p)));
+                }
+                let b = log.acquired.get(1)?;
+                if n == b.decided_at + 80 {
+                    return second.map(|s| s.map(verdict));
+                }
+                None
+            },
+        )
+    };
+    let plain = go(&adc, Some(true), None);
+    assert_eq!(plain.acquired.len(), 2);
+    let (a, b) = (plain.acquired[0], plain.acquired[1]);
+    assert!(a.fft_start + SIGNAL_END + 180 < b.decided_at);
+    let all = [(a.decided_at, adc.len())];
+    assert_eq!(plain.holds(), all);
+    let two = |at: usize| with(&adc, &[(at, r), (at + 1, r)]);
+    let (after, late) = (b.decided_at + 10, b.decided_at + 200);
+
+    // Patient, declared again: still patient before the second verdict.
+    assert_eq!(go(&two(after), Some(true), None).holds(), all);
+    // The first verdict did not say patient: the second declaration finds 2 of 4.
+    assert_eq!(
+        go(&two(after), Some(false), None).holds(),
+        [(a.decided_at, after + 1)]
+    );
+    // No verdict on the first at all: 2 of 4 all through.
+    assert_eq!(
+        go(&two(after), None, None).holds(),
+        [(a.decided_at, after + 1)]
+    );
+    // The second stream's own verdict decides from then on.
+    assert_eq!(go(&two(late), Some(true), Some(Some(true))).holds(), all);
+    assert_eq!(
+        go(&two(late), Some(true), Some(Some(false))).holds(),
+        [(a.decided_at, late + 1)]
+    );
+    // And a verdict of "patient" on the second makes it patient though the first was not.
+    assert_eq!(go(&two(late), Some(false), Some(Some(true))).holds(), all);
+    // A SIGNAL that fails ends the hold (it is up through the push the verdict follows)
+    // and the patience: the scene has no third frame, so the hold stays down.
+    assert_eq!(
+        go(&adc, Some(true), Some(None)).holds(),
+        [(a.decided_at, b.decided_at + 81)]
+    );
+
+    // A patient hold given up before the declaration (24 in a row, in the noise between
+    // the frames: the first ends at sample 1420, the second begins at 2020) is not
+    // inherited: the second declaration raises the hold by itself, with 2 of 4.
+    let gap = 1600;
+    assert!(a.fft_start + SIGNAL_END + 180 < gap && gap + 24 < 2020);
+    let gone: Vec<Swap> = (0..24).map(|k| (gap + k, r)).collect();
+    let x = with(&adc, &gone);
+    let log = go(&x, Some(true), None);
+    // The burst sets the detector off, and the second frame is declared at the same
+    // sample with another detection behind it.
+    let declared = |log: &Log| {
+        log.acquired
+            .iter()
+            .map(|q| q.decided_at)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(declared(&log), [a.decided_at, b.decided_at]);
+    assert_eq!(
+        log.holds(),
+        [(a.decided_at, gap + 23), (b.decided_at, adc.len())]
+    );
+    let mut y = x.clone();
+    y[after] = r;
+    y[after + 1] = r;
+    let log = go(&y, Some(true), None);
+    assert_eq!(declared(&log), [a.decided_at, b.decided_at]);
+    assert_eq!(
+        log.holds(),
+        [(a.decided_at, gap + 23), (b.decided_at, after + 1)]
+    );
+}
+
+#[test]
+fn the_verdict_is_patient_for_a_slow_rate_with_forty_agreeing_bits() {
+    let pace = HandoffConfig::default();
+    let check = |agree| SignalCheck {
+        agree,
+        disagree: 48 - agree,
+    };
+    for rate in Rate::ALL {
+        let slow = matches!(rate, Rate::R6 | Rate::R9 | Rate::R12);
+        for (agree, enough) in [(48, true), (40, true), (39, false), (0, false)] {
+            let v = SignalVerdict::of(Signal { rate, length: 1000 }, check(agree), &pace);
+            assert_eq!(v.patient, slow && enough, "{rate:?} {agree}");
+        }
+    }
+    // The length in symbols (IEEE 802.11-2020 §17.3.5.4): 16 + 8·LENGTH + 6 bits in
+    // symbols of N_DBPS.
+    let v = SignalVerdict::of(
+        Signal {
+            rate: Rate::R6,
+            length: 1000,
+        },
+        check(48),
+        &pace,
+    );
+    assert_eq!(v.data_symbols, (16usize + 8000 + 6).div_ceil(24));
+    let v = SignalVerdict::of(
+        Signal {
+            rate: Rate::R54,
+            length: 100,
+        },
+        check(48),
+        &pace,
+    );
+    assert_eq!((v.data_symbols, v.patient), (SHORT_SYMBOLS, false));
+    // It is the agreeing bits that count: a SIGNAL of erasures with no bit against it is
+    // not believed, and one with eight against it and forty for it is.
+    let slow = Signal {
+        rate: Rate::R6,
+        length: 1000,
+    };
+    let faint = SignalCheck {
+        agree: 30,
+        disagree: 0,
+    };
+    assert!(!SignalVerdict::of(slow, faint, &pace).patient);
+    assert!(SignalVerdict::of(slow, check(40), &pace).patient);
+    // Another threshold.
+    let strict = HandoffConfig {
+        patient_agree: 44,
+        ..pace
+    };
+    let s = Signal {
+        rate: Rate::R9,
+        length: 1,
+    };
+    assert!(!SignalVerdict::of(s, check(43), &strict).patient);
+    assert!(SignalVerdict::of(s, check(44), &strict).patient);
+}
+
+/// Pushes `adc` through a front at its defaults with verdicts given by tag: `say(n, acquired)`
+/// lists the calls of `signal` after push n. Returns the acquisitions and the hold's stretches.
+fn drive(
+    adc: &[(i16, i16)],
+    say: impl Fn(usize, &[FixedAcquisition]) -> Vec<(u8, Option<SignalVerdict>)>,
+) -> (Vec<FixedAcquisition>, Vec<(usize, usize)>) {
+    let mut rx = RxHandoffFixed::new(
+        RxConfig::new(FS),
+        FixedRxConfig::default(),
+        HandoffConfig::default(),
+    );
+    let mut log = Log::default();
+    for (n, &x) in adc.iter().enumerate() {
+        let step = rx.push(x, usize::MAX);
+        log.acquired.extend(step.acquired);
+        log.hold.push(step.hold);
+        for (tag, v) in say(n, &log.acquired) {
+            rx.signal(tag, v);
+        }
+    }
+    let holds = log.holds();
+    (log.acquired, holds)
+}
+
+/// A verdict of the longest frame.
+fn longest(patient: bool) -> Option<SignalVerdict> {
+    Some(SignalVerdict {
+        data_symbols: MAX_DATA_SYMBOLS,
+        patient,
+    })
+}
+
+#[test]
+fn the_patience_is_the_open_streams_first_verdict_and_nothing_elses() {
+    // Review of 2026-11-22. The tags are the streams' own: 1 and 2.
+    let r = (HI, 0);
+    let (adc, _) = scene(&[SHORT, SHORT], 700, 600, -33.0, 8);
+    let (acq, holds) = drive(&adc, |_, _| vec![]);
+    let (a, b) = (acq[0], acq[1]);
+    let all = vec![(a.decided_at, adc.len())];
+    assert_eq!(holds, all);
+    let v1 = a.fft_start + SIGNAL_END + 180;
+    let p = v1 + 100;
+    assert!(p + 40 < b.decided_at - 300);
+    let two = with(&adc, &[(p, r), (p + 1, r)]);
+    let at = |n: usize, when: usize, what: (u8, Option<SignalVerdict>)| {
+        if n == when {
+            vec![what]
+        } else {
+            vec![]
+        }
+    };
+
+    // A second verdict on the open stream changes nothing, either way.
+    let (_, h) = drive(&two, |n, _| {
+        [
+            at(n, v1, (1, longest(false))),
+            at(n, v1 + 20, (1, longest(true))),
+        ]
+        .concat()
+    });
+    assert_eq!(h, [(a.decided_at, p + 1), (b.decided_at, adc.len())]);
+    let (_, h) = drive(&two, |n, _| {
+        [
+            at(n, v1, (1, longest(true))),
+            at(n, v1 + 20, (1, longest(false))),
+        ]
+        .concat()
+    });
+    assert_eq!(h, all);
+
+    // A verdict with another stream's tag does not make the hold patient, nor end a
+    // patience: tag 2 while stream 1 is open, tag 1 once stream 2 is.
+    let (_, h) = drive(&two, |n, _| at(n, v1, (2, longest(true))));
+    assert_eq!(h, [(a.decided_at, p + 1), (b.decided_at, adc.len())]);
+    let q = b.decided_at + 300;
+    let late = with(&adc, &[(q, r), (q + 1, r)]);
+    let (_, h) = drive(&late, |n, _| {
+        [
+            at(n, v1, (1, longest(true))),
+            at(n, b.decided_at + 100, (1, longest(false))),
+        ]
+        .concat()
+    });
+    assert_eq!(h, all);
+    let (_, h) = drive(&late, |n, _| at(n, b.decided_at + 100, (1, longest(true))));
+    assert_eq!(h, [(a.decided_at, q + 1)]);
+}
+
+#[test]
+fn the_rail_flags_are_one_history_for_both_rules() {
+    // The verdict does not clear the window: two rail samples before it (four apart, so
+    // 2 of 4 never has both) and 22 after it make 24 of 32 at the 22nd.
+    let r = (HI, 0);
+    let (adc, _) = scene(&[(Rate::R6, 1000)], 700, 900, 12.5, 31);
+    let (acq, _) = drive(&adc, |_, _| vec![]);
+    let a = acq[0];
+    let v = a.fft_start + SIGNAL_END + 180;
+    let say = |n: usize, _: &[FixedAcquisition]| {
+        if n == v {
+            vec![(1, longest(true))]
+        } else {
+            vec![]
+        }
+    };
+    let rails = |after: usize| -> Vec<Swap> {
+        [(v - 7, r), (v - 3, r)]
+            .into_iter()
+            .chain((1..=after).map(|k| (v + k, r)))
+            .collect()
+    };
+    let end = a.fft_start + SIGNAL_END + 80 * MAX_DATA_SYMBOLS + B;
+    let kept = vec![(a.decided_at, end.min(adc.len()))];
+    assert_eq!(drive(&with(&adc, &rails(21)), say).1, kept);
+    assert_eq!(
+        drive(&with(&adc, &rails(22)), say).1,
+        [(a.decided_at, v + 22)]
+    );
+    // Without the two before: 22 are not 24.
+    let alone: Vec<Swap> = (1..=22).map(|k| (v + k, r)).collect();
+    assert_eq!(drive(&with(&adc, &alone), say).1, kept);
+}
+
+#[test]
+fn the_inheritance_lasts_passes_on_and_needs_the_hold_up_at_the_declaration() {
+    let r = (HI, 0);
+    // Three short frames 600 apart; the first one's verdict claims the longest frame.
+    let (adc, _) = scene(&[SHORT, SHORT, SHORT], 700, 600, -33.0, 8);
+    let (acq, holds) = drive(&adc, |_, _| vec![]);
+    assert_eq!(acq.len(), 3);
+    let (a, b, c) = (acq[0], acq[1], acq[2]);
+    let all = vec![(a.decided_at, adc.len())];
+    assert_eq!(holds, all);
+    let v1 = a.fft_start + SIGNAL_END + 180;
+    let first = |patient: bool| {
+        move |n: usize, _: &[FixedAcquisition]| {
+            if n == v1 {
+                vec![(1, longest(patient))]
+            } else {
+                vec![]
+            }
+        }
+    };
+    let two = |at: usize| with(&adc, &[(at, r), (at + 1, r)]);
+    // With no verdict of its own the second stream stays patient for as long as it is
+    // open, and hands the patience on to the third.
+    for at in [
+        b.decided_at + 400,
+        c.decided_at - 300,
+        c.decided_at + 10,
+        c.decided_at + 400,
+    ] {
+        assert_eq!(drive(&two(at), first(true)).1, all, "at {at}");
+        assert_eq!(
+            drive(&two(at), first(false)).1[0],
+            (a.decided_at, at + 1),
+            "at {at}"
+        );
+    }
+
+    // A verdict that does not say patient, on a hold that inherited it: 2 of 4 from the
+    // next push on, over the last four samples as they are. Rail samples at v − 2 and
+    // v − 1 are both in the window of push v + 1; at v − 3 and v − 2 only one is.
+    let v = b.decided_at + 80;
+    let both = |n: usize, _: &[FixedAcquisition]| {
+        if n == v1 {
+            vec![(1, longest(true))]
+        } else if n == v {
+            vec![(2, longest(false))]
+        } else {
+            vec![]
+        }
+    };
+    assert_eq!(
+        drive(&with(&adc, &[(v - 2, r), (v - 1, r)]), both).1[0],
+        (a.decided_at, v + 1)
+    );
+    assert_eq!(drive(&with(&adc, &[(v - 3, r), (v - 2, r)]), both).1, all);
+
+    // The hold must be up when the declaration comes, and the hold's end by length is
+    // applied first in the same push: a first frame whose length ends exactly at the
+    // second's declaration hands on nothing. Two frames 657 apart put the declaration
+    // 18 symbols and the back-off after SIGNAL's window.
+    let (adc, _) = scene(&[SHORT, SHORT], 700, 657, -33.0, 8);
+    let (acq, _) = drive(&adc, |_, _| vec![]);
+    let (a, b) = (acq[0], acq[1]);
+    assert_eq!(b.decided_at, a.fft_start + SIGNAL_END + 80 * 18 + B);
+    let v1 = a.fft_start + SIGNAL_END + 180;
+    let claim = |symbols: usize| {
+        move |n: usize, _: &[FixedAcquisition]| {
+            if n == v1 {
+                vec![(
+                    1,
+                    Some(SignalVerdict {
+                        data_symbols: symbols,
+                        patient: true,
+                    }),
+                )]
+            } else {
+                vec![]
+            }
+        }
+    };
+    let at = b.decided_at + 10;
+    let x = with(&adc, &[(at, r), (at + 1, r)]);
+    // Ends at the declaration: the hold is raised again in that push (no gap shows), by
+    // itself, with 2 of 4.
+    assert_eq!(drive(&x, claim(18)).1, [(a.decided_at, at + 1)]);
+    // One symbol longer: up at the declaration, inherited.
+    assert_eq!(drive(&x, claim(19)).1, [(a.decided_at, adc.len())]);
+    // One symbol shorter: down for 80 samples before it.
+    assert_eq!(
+        drive(&x, claim(17)).1,
+        [(a.decided_at, b.decided_at - 80), (b.decided_at, at + 1)]
+    );
+}
+
+#[test]
+fn a_verdict_of_any_length_field_does_not_panic() {
+    let pace = HandoffConfig::default();
+    let check = SignalCheck {
+        agree: 48,
+        disagree: 0,
+    };
+    for length in [0, 4095, 4096, usize::MAX] {
+        let v = SignalVerdict::of(
+            Signal {
+                rate: Rate::R6,
+                length,
+            },
+            check,
+            &pace,
+        );
+        assert!(v.data_symbols <= MAX_DATA_SYMBOLS, "{length}");
+    }
 }

@@ -30,8 +30,8 @@ use crate::rx_front_fixed::{
     cordic_table, cordic_with, nco_table, rotate_with, FixedRxConfig, IQ, Y_BITS,
 };
 use crate::rx_ofdm::{
-    descramble, signal_from_soft, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, Signal,
-    SymbolLog, TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
+    descramble, signal_checked, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, Signal,
+    SignalCheck, SymbolLog, TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
 };
 use crate::viterbi::{decode, Termination};
 
@@ -875,7 +875,7 @@ fn signal_with(
     fx: &FixedOfdmConfig,
     tracking: &mut FixedTracking,
     t: &Tables,
-) -> Result<(FixedChannel, Signal, i64), RxOfdmError> {
+) -> Result<(FixedChannel, Signal, i64, SignalCheck), RxOfdmError> {
     let needed = fft_start.saturating_add(2 * FFT_SIZE);
     let short = RxOfdmError::Truncated {
         needed,
@@ -889,8 +889,8 @@ fn signal_with(
     let (soft, phi) =
         symbol_with(w, &ch, 0, Modulation::Bpsk, cfg, fx, tracking, t).ok_or(short)?;
     // A length of 0 is refused there (`SignalLength`).
-    let signal = signal_from_soft(&soft)?;
-    Ok((ch, signal, phi))
+    let (signal, check) = signal_checked(&soft)?;
+    Ok((ch, signal, phi, check))
 }
 
 /// SIGNAL alone, from the two long training symbols at `fft_start` and the symbol after
@@ -906,7 +906,22 @@ pub fn decode_signal_fixed(
 ) -> Result<Signal, RxOfdmError> {
     let unusable = RxOfdmError::Truncated { needed: 0, have: 0 };
     let t = tables(fx).ok_or(unusable)?;
-    signal_with(z, fft_start, cfg, fx, &mut tracking, &t).map(|(_, signal, _)| signal)
+    signal_with(z, fft_start, cfg, fx, &mut tracking, &t).map(|(_, signal, _, _)| signal)
+}
+
+/// [`decode_signal_fixed`] with SIGNAL's check ([`SignalCheck`]): what tells a field read
+/// from a frame from one read from noise.
+pub fn decode_signal_checked_fixed(
+    z: &[IQ],
+    fft_start: usize,
+    cfg: &RxOfdmConfig,
+    fx: &FixedOfdmConfig,
+    mut tracking: FixedTracking,
+) -> Result<(Signal, SignalCheck), RxOfdmError> {
+    let unusable = RxOfdmError::Truncated { needed: 0, have: 0 };
+    let t = tables(fx).ok_or(unusable)?;
+    signal_with(z, fft_start, cfg, fx, &mut tracking, &t)
+        .map(|(_, signal, _, check)| (signal, check))
 }
 
 /// Decodes the PPDU whose first long training symbol's FFT window starts at `fft_start`, from
@@ -922,7 +937,7 @@ pub fn decode_ppdu_fixed(
 ) -> Result<Decoded, RxOfdmError> {
     let unusable = RxOfdmError::Truncated { needed: 0, have: 0 };
     let t = tables(fx).ok_or(unusable)?;
-    let (ch, signal, phi) = signal_with(z, fft_start, cfg, fx, &mut tracking, &t)?;
+    let (ch, signal, phi, _) = signal_with(z, fft_start, cfg, fx, &mut tracking, &t)?;
     let short = RxOfdmError::Truncated {
         needed: fft_start.saturating_add(2 * FFT_SIZE),
         have: z.len(),

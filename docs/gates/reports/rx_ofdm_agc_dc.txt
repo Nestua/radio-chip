@@ -10,7 +10,7 @@
 #               CFO word and the register fs/fc (FixedTracking::from_cfo_word): no float
 #               between the ADC and the PSDU; the int columns of a row share one acquisition;
 #   stream    = where a command has it: the receiver of ADR 0008 in a closed loop with the
-#               gain control, a sample at a time (the column `front + release` of `loop`): the
+#               gain control, a sample at a time (`loop`'s column `front + release by rate`): the
 #               streaming front (RxHandoffFixed), its own hold in place of the assumed one,
 #               the offset of the two long training symbols removed, 13 bits, the decoder
 #               at its defaults reading the beats; the front searches all through and the

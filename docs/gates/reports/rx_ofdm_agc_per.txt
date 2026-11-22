@@ -10,7 +10,7 @@
 #               CFO word and the register fs/fc (FixedTracking::from_cfo_word): no float
 #               between the ADC and the PSDU; the int columns of a row share one acquisition;
 #   stream    = where a command has it: the receiver of ADR 0008 in a closed loop with the
-#               gain control, a sample at a time (the column `front + release` of `loop`): the
+#               gain control, a sample at a time (`loop`'s column `front + release by rate`): the
 #               streaming front (RxHandoffFixed), its own hold in place of the assumed one,
 #               the offset of the two long training symbols removed, 13 bits, the decoder
 #               at its defaults reading the beats; the front searches all through and the
@@ -173,8 +173,8 @@
    6 Mb/s 30.0 dB                                2000  -10.0  3.31   579           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
    6 Mb/s 35.0 dB                                2000  -10.0  5.34   573           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           1 +1−0
    6 Mb/s 40.0 dB                                2000  -10.0  6.72   540           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
-   6 Mb/s 50.0 dB                                2000  -10.0  8.87   523           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           5 +5−0
-   6 Mb/s 60.0 dB                                2000  -10.0 11.18   564           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           2 +2−0
+   6 Mb/s 50.0 dB                                2000  -10.0  8.87   523           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
+   6 Mb/s 60.0 dB                                2000  -10.0 11.18   564           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
   24 Mb/s 30.0 dB                                2000  -10.0  3.32   172           2 +0−0           2 +0−0                2           2 +0−0           2 +0−0           2 +0−0           3 +3−2
   24 Mb/s 35.0 dB                                2000  -10.0  5.39   150           0 +0−0           0 +0−0                0           0 +0−0           0 +0−0           0 +0−0           0 +0−0
   24 Mb/s 40.0 dB                                2000  -10.0  6.68   171           1 +0−0           1 +0−0                1           1 +0−0           1 +0−0           1 +0−0           2 +2−1

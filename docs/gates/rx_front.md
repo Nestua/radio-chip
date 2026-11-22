@@ -2569,3 +2569,294 @@ column; "hit 4, +10 dB, 54 Mb/s" is 2000 in every column.)
    fewer frames than no release (710). Not looked into.
 
 Nothing of this is in the model: it runs 2 of 4, as decided.
+
+## 2026-11-22 · model gate + measurement · SIGNAL's check, and a release by the rate (tool only)
+
+Asked by the founder the same day: something between the hold alone and the release as it
+is, and then the rule by the rate with a threshold on SIGNAL's quality.
+
+**SIGNAL's check (model).** `rx_ofdm::signal_checked` and
+`rx_ofdm_fixed::decode_signal_checked_fixed` give, with the field, `SignalCheck`: of
+SIGNAL's 48 coded bits, how many soft values agree in sign with the decoded field encoded
+again (`agree`) and how many have the other sign (`disagree`); a soft value of 0 is in
+neither. The decoded 24 bits are encoded as they were decoded, the reserved bit included
+(§17.3.4.3: it is not refused). `decode_signal_fixed` is the same decoding without the
+check; nothing that existed changes its result.
+
+Gate: `crates/radio-phy/tests/g1_signal_check.rs`, four tests. Reference: the
+transmitter's SIGNAL (`signal_bits`, `encode`, held to Annex I.1 Tables I-7 and I-8 by
+`g1_annex_i1`) with coded bits chosen in the test turned over (one to four, the code's
+free distance being 10) or erased: the counts must be those numbers, for every rate and
+four lengths each; the reserved bit set; a failed field has no check; the integer decoder
+reports 48 and 0 at 30 dB for every rate and its plain form the same field. Seen to fail
+first with a count that was always 0 (all four tests). Mutants, all nine failing the gate:
+the sign the other way; an erasure counted; the tail not encoded; the soft values read
+backwards; the reserved bit taken as 0; every other coded bit only; the integer decoder
+reporting a fixed check; the two counts swapped; `agree` as 48 less `disagree`.
+Command: `cargo test -p radio-phy --test g1_signal_check` — 4 passed.
+
+**What the two counts are worth** (`rxagc release`, 2000 frames per row, the column
+"front + release"; the report's second table):
+- `disagree` does not tell a noise SIGNAL behind a true preamble from a true one: there
+  the symbol at SIGNAL's place is near silence against the channel estimate, the 4-bit
+  soft values are mostly 0, and the count is 1 to 5 (seen at 100 frames with the first
+  form of the check, which had this count alone).
+- `agree` does. The frame's own SIGNAL: 48 in every one of 2000 in AWGN at 30 dB and
+  more; 44 or more in 1999 of 2000 at 6 Mb/s 5 dB; through TGn D 40 or more in 1999 of
+  2000 at 6 Mb/s 30 dB (one at 36 to 39) and in all at 54 Mb/s 40 dB. The others (SIGNALs
+  read behind a preamble alone): 16 to 35 in quiet noise (488 and 495 of them), 12 to 43
+  in loud noise (4 of 518 at 40 to 43, none above).
+
+**A release by the rate, in the tool only** (`reports/rx_front_agc_release.txt`, commit
+a480af1; frames lost of 2000). The rule: 2 of 4 as the model has it; once SIGNAL of the
+open stream has named 6, 9 or 12 Mb/s with `agree` ≥ 40, 24 of 32 from then on
+("patient"); and a declaration under a hold that is up and patient, with nothing released,
+leaves it patient until its own SIGNAL's verdict ("inherited").
+
+| Row | hold alone | 2 of 4 (the model) | by rate, no threshold | by rate, agree ≥ 40 | **the same, inherited** |
+|---|---|---|---|---|---|
+| preamble alone, then 54 Mb/s | 477 | 1 | 175 | 1 | **1** |
+| the same in loud noise | 508 | 2 | 3 | 2 | **2** |
+| preamble alone, then 6 Mb/s | 3 | 0 | 1 | 0 | **0** |
+| under −25 dB, 54 Mb/s | 2000 | 2 | 2 | 2 | **2** |
+| under −25 dB, 6 Mb/s | 43 | 1 | 2 | 2 | **2** |
+| under −10 dB, 6 Mb/s | 0 | 9 | 69 | 69 | **8** |
+| hit 4, +20 dB, 6 Mb/s | 91 | 94 | 91 | 91 | **91** |
+| hit 8, +20 dB, 6 Mb/s | 710 | 1010 | 711 | 711 | **711** |
+| hit 8, +10 dB, 6 Mb/s | 21 | 54 | 21 | 21 | **21** |
+| hit 16, +10 dB, 6 Mb/s | 383 | 766 | 384 | 384 | **384** |
+| TGn D 54 Mb/s 40 dB | 2 | 4 | 4 | 4 | **4** |
+
+(The other rows are the same in every column. Thresholds of 24, 32 and 44 are in the
+report: 94, 2 and 1 in the first row; 40 and 44 agree in every row.)
+
+1. **With the threshold the rule has both ends:** what 2 of 4 gains after a preamble and
+   for a stronger frame at 54 Mb/s, and what the hold alone keeps of the 6 Mb/s frames a
+   burst hits. The 175 of the rule without a threshold were noise SIGNALs naming a slow
+   rate; none has 40 agreeing bits in quiet noise.
+2. **Without the inheritance one row is worse than both** (69): the weaker frame's true
+   SIGNAL makes the hold patient, the frame 10 dB above it clips too little for 24 of 32,
+   and the front's declaration of that frame put the rule back to 2 of 4 — which then
+   released in the middle of the frame. Inherited: 8, with the model's 9 and the hold
+   alone's 0.
+3. With "no release at all" as the patient rule, inherited: 43 in "under −25 dB, 6 Mb/s"
+   (the hold alone's), 4 in the loud preamble row. 24 of 32 is the better patient rule.
+4. The gain moves inside far fewer frames: at 6 Mb/s 30 dB in 2 of 2000 against 5, through
+   TGn D in 1 against 14.
+
+**What this is not.** In the tool, not in the model; one seed per row; the same scenes the
+rule was shaped on (the inheritance was added after the 2000-frame run showed row 6, and
+run again on the same frames). The slow rates are 6, 9 and 12 Mb/s by judgement; 18 Mb/s
+and above were not tried as slow. The burst is white noise; the weaker frame has the
+frame's rate. A noise SIGNAL in loud noise reached 43 agreeing bits: at a threshold of 40
+four of 518 would be believed there (and cost nothing in that row). No independent review
+yet: it belongs with the change to the model.
+
+**Open**
+- Whether the rule goes into `RxHandoffFixed` and ADR 0008 (the founder).
+- If it does: `signal()` has to be told the rate and the check, and the gate needs scenes
+  the rule has not seen (other rates under, an interferer that is a frame, TGn channels).
+
+## 2026-11-22 · G0 + model gate + measurement · the release by the rate in the model (ADR 0008, decision 2, fourth amendment)
+
+Decision: the founder, 2026-11-22, on the entry before this one: the rule by the rate with
+the threshold on SIGNAL's agreeing bits and the inheritance goes into `RxHandoffFixed` and
+ADR 0008 in place of plain 2 of 4, with its gate, rows it has not seen and a review.
+
+**G0 (the rule; ADR 0008, decision 2, fourth amendment).**
+- The decoder's verdict on SIGNAL is `SignalVerdict { data_symbols, patient }`.
+  `SignalVerdict::of(signal, check, pace)`: `patient` when the rate is 6, 9 or 12 Mb/s
+  and `check.agree` ≥ `patient_agree` = 40 (`rx_ofdm::SignalCheck`, the entry before).
+- The front has one bit more, *patient*. The first verdict on the open stream sets it to
+  the verdict's (a failed SIGNAL ends the stream and the hold as before). A second
+  verdict, or one for a stream that is not the open one, changes nothing.
+- The release: with the bit clear, `clip_count` = 2 of the last `clip_window` = 4 ADC
+  samples on a rail, as the third amendment has it; with it set, `patient_count` = 24 of
+  the last `patient_window` = 32. One history of rail flags serves both (64 samples, from
+  reset on): a verdict changes which window is read from the next push on, not what is
+  in it.
+- A declaration raises the hold; it starts patient when the hold was up and patient at
+  that push (after the hold's end by length has been applied, before this sample's
+  release) and not otherwise, and stays so until its own first verdict. This passes
+  through any number of declarations that get no verdict.
+- The bit is only read while the hold is up. Nothing in the stream, its marks or the
+  acquisitions depends on it.
+- A count of 0 switches that rule's release off; a window of 64 or more is 64.
+- Interface: `HandoffConfig::patient_window`, `patient_count`, `patient_agree`;
+  `RxHandoffFixed::signal(packet, Option<SignalVerdict>)`.
+
+**Gate** (`crates/radio-phy/tests/g2_rx_handoff.rs`, eight tests of the rule in its 23;
+reference: the rule worked by hand on streams with chosen samples replaced by rail
+values and verdicts given at chosen samples).
+- `a_patient_hold_is_given_up_by_24_of_32_and_not_by_2_of_4`
+- `a_declaration_under_a_patient_hold_inherits_…`
+- `the_verdict_is_patient_for_a_slow_rate_with_forty_agreeing_bits` (every rate; 39, 40
+  and 48 agreeing; 30 agreeing with none against; another threshold)
+- `the_patience_is_the_open_streams_first_verdict_and_nothing_elses`
+- `the_rail_flags_are_one_history_for_both_rules`
+- `the_inheritance_lasts_passes_on_and_needs_the_hold_up_at_the_declaration` (three
+  declarations with a verdict on the first alone; a declaration at the very sample of the
+  hold's end by length; a verdict that is not patient with rail samples just before it)
+- `a_verdict_of_any_length_field_does_not_panic`
+- and the older tests on `SignalVerdict` in place of a bare length.
+
+Seen to fail first: against the model with the fields and a verdict that is never patient
+and no second rule, the first three fail (the hold's stretch `[(1162, 2277)]` against
+`[(1162, 27900)]` in the first). Command:
+`cargo test -p radio-phy --test g2_rx_handoff` — 23 passed (commit 0b63cb3).
+
+**Mutations** (each applied to `rx_front_fixed.rs`, the gate run, the file restored with
+`cp` and `touch`). Sixteen of the author's: the patient rule never used; its window one
+short; its count one more; its window with the fast count; the verdict never patient;
+every verdict patient; a verdict that cannot end the patience; no inheritance; inherited
+also with the hold down; every declaration patient; 18 Mb/s slow; 12 Mb/s not slow;
+`agree` strictly above the threshold; a count of 0 that releases — fourteen failed at
+once; the threshold put on `disagree` passed, a case was added (30 agreeing, none
+against) and it fails; `close` not clearing the bit passed and is equivalent (the bit is
+read only under a hold, and every hold is raised by a declaration that sets it): that
+line was removed. Seven of the reviewer's that the gate of 19 tests let through, all
+failing the four tests added for them: the rail history cleared at a patient verdict; a
+second verdict setting the bit; a verdict for another stream setting it; inherited
+patience running out 30 periods after the opening; inherited only from a stream that had
+a verdict; the hold judged before its end by length at a declaration; a verdict judging
+the window at once instead of at the next push.
+
+**The tools on the model's rule.** `rxagc` and `rxper stream` give the model
+`SignalVerdict::of` of `decode_signal_checked_fixed`. `rxagc loop` has a column "front +
+release by rate" (the model's default) beside "front + release" (2 of 4: the model with no
+verdict ever patient) and "front alone"; `rxagc release` a column "the model" beside the
+tool's own trial of the same rule. The `stream` column of `per`, `level` and `dc` runs the
+model's default.
+
+**Measurement: `rxagc release`** (commit 0b63cb3, the build server, 2000 frames per row;
+`reports/rx_front_agc_release.txt`).
+1. **The model is the trial, to the frame:** in all 27 rows the column "the model" equals
+   "24/32, >=40, inherited" cell for cell (frames lost, declarations, stopped streams,
+   frames with the gain moved). The 17 rows and 15 columns of the report of the entry
+   before are unchanged.
+2. **Ten rows the rule had not seen** (added with the model, after the numbers 40, 24 and
+   32 were fixed; frames lost of 2000):
+
+| Row | from the lock | hold alone | 2 of 4 | by rate, not inherited | **the model** |
+|---|---|---|---|---|---|
+| 6 Mb/s under −25 dB: 54 Mb/s 50 dB | 0 | 2000 | 3 | 4 | **4** |
+| 6 Mb/s under −10 dB: 54 Mb/s 50 dB | 2000 | 2000 | 2000 | 2000 | **2000** |
+| under −25 dB: 12 Mb/s 50 dB | 0 | 1793 | 0 | 0 | **0** |
+| under −10 dB: 12 Mb/s 50 dB | 0 | 12 | 29 | 483 | **12** |
+| hit 8, +20 dB: 12 Mb/s 30 dB | 1911 | 1910 | 1958 | 1910 | **1910** |
+| hit 8, +20 dB: 24 Mb/s 30 dB | 2000 | 2000 | 2000 | 2000 | **2000** |
+| TGn D: preamble alone, then 54 Mb/s 40 dB | 0 | 188 | 6 | 6 | **6** |
+| TGn D: under −25 dB: 54 Mb/s 50 dB | 3 | 2000 | 1 | 1 | **1** |
+| TGn D: hit 8, +20 dB: 6 Mb/s 30 dB | 1375 | 1374 | 1644 | 1375 | **1375** |
+| TGn D 6 Mb/s 50 dB | 1 | 1 | 3 | 1 | **1** |
+
+   In every one the model is the better of the hold alone and 2 of 4, or within a frame
+   of it. The case the rule was built for, the other way round — a 54 Mb/s frame over a
+   true 6 Mb/s one that made the hold patient — is released by 24 of 32 (4 lost, 3 with
+   2 of 4). A 54 Mb/s frame 10 dB above a 6 Mb/s one is lost in every column, the gain
+   held from the lock included: that is the interference, not the hold. The burst at
+   24 Mb/s loses the frame whatever holds the gain, so that 24 Mb/s is not a slow rate
+   costs nothing in this row. Without the inheritance the 12 Mb/s row is 483.
+3. **SIGNAL's agreeing bits in the new rows.** The frame's own SIGNAL through TGn D: 36 to
+   39 in 1 of 2000 (6 Mb/s 30 dB), 2 of 2000 (6 Mb/s 50 dB) and 3 of 4000 (54 Mb/s
+   50 dB), 40 or more in the rest. Read behind a preamble alone through TGn D: 0 to 35 in
+   all 217.
+
+**Measurement: `rxagc loop`** (commit 0b63cb3, the build server, 2000 frames per row;
+`reports/rx_front_agc_loop.txt`: 35 rows and the 6 with a DC offset, the ten new rows
+among them, and the new column). Every cell of the 31 rows and ten columns of the report
+before is unchanged. Frames lost of 2000, and in brackets the frames inside which the gain
+moved:
+
+| Row | from the lock | front alone | front + release (2 of 4) | **front + release by rate** |
+|---|---|---|---|---|
+| preamble alone, then 54 Mb/s 30 dB (idle; loud noise; DC per index; DC before the gain) | 0; 0; 19; 0 | 477; 508; 375; 472 | 1; 2; 5; 4 | **1; 2; 5; 4** |
+| TGn D: preamble alone, then 54 Mb/s 40 dB | 0 | 188 | 6 | **6** |
+| under −25 dB: 54 Mb/s 50 dB (AWGN; TGn D) | 0; 3 | 2000; 2000 | 2; 1 | **2; 1** |
+| under −25 dB: 6 Mb/s; 12 Mb/s | 0; 0 | 43; 1793 | 1; 0 | **2; 0** |
+| under −10 dB: 6 Mb/s; 12 Mb/s | 0; 0 | 0; 12 | 9 (97); 29 (48) | **8 (44); 12 (3)** |
+| hit 4, +20 dB: 6 Mb/s 30 dB | 91 | 91 | 94 (1993) | **91 (4)** |
+| hit 8, +20 dB: 6 Mb/s 30 dB (AWGN; TGn D) | 710; 1375 | 710; 1374 | 1010 (2000); 1644 (1999) | **711 (1); 1375 (2)** |
+| hit 8, +10 dB: 6 Mb/s 30 dB | 21 | 21 | 54 (1299) | **21 (3)** |
+| hit 16, +10 dB: 6 Mb/s 30 dB | 384 | 383 | 766 (1813) | **384 (2)** |
+| hit 8, +20 dB: 12 Mb/s 30 dB | 1911 | 1910 | 1958 (2000) | **1910 (1)** |
+| TGn D 6 Mb/s 30 dB; 50 dB | 0; 1 | 0; 1 | 0 (14); 3 (12) | **0 (1); 1 (1)** |
+| TGn D 54 Mb/s 40 dB | 0 | 2 | 4 | **4** |
+
+4. **The rule has both ends at 2000 frames, in the model.** Where 2 of 4 gained (after a
+   preamble alone, a stronger frame inside a weaker one) the model's rule has 2 of 4's
+   count, but for one frame in "under −25 dB, 6 Mb/s". Where 2 of 4 cost (a burst on
+   a frame at 6 or 12 Mb/s) it has the hold alone's count, within a frame: the gain moves inside 1 to
+   4 frames of 2000 where it moved inside 1299 to 2000.
+5. **The other rows lose the same number of frames** in the two release columns (plain,
+   SIFS, loud noise, DC), but TGn D 6 Mb/s 50 dB: 1 against 3. At 6 Mb/s the gain moves
+   inside fewer frames (2 of 2000 against 5 to 8; through TGn D 1 against 12 to 14).
+6. What remains of 2 of 4's cost is at the rates that are not slow: TGn D 54 Mb/s 40 dB
+   is 4 against the hold alone's 2, as before.
+
+**The `stream` column with the rule** (`rxagc dc`, `level`, `per` at commit ca2a97d, whose
+receiver and `stream` path are those of 0b63cb3; the build server, 2000 frames per row;
+the three reports replaced). Against the reports of the third amendment: every other
+column identical cell for cell; `stream` unchanged in all of `dc` (49 rows) and `level`
+(35), and in `per` (126 rows) two cells changed, both through TGn D at 6 Mb/s: 50 dB 0 of
+2000 against 5, 60 dB 0 against 2 — the frames 2 of 4 had cost there. The cells that the
+third amendment raised at 24 Mb/s through TGn D (3, 2 and 4 of 2000) stay: 24 Mb/s is not
+a slow rate.
+One line of these three reports' header was written after the run: the column was named
+"the column `front + release` of `loop`" by the binary of ca2a97d and is "`loop`'s column
+`front + release by rate`" in the tool now; the reports carry the tool's present line
+(checked: `rxagc level 2` of the present tool against the report, the header lines differ
+in the number of frames alone). `rxper stream` at 0b63cb3
+(`reports/rx_front_stream.txt`): every number as before, one header line names
+`decode_signal_checked_fixed`.
+
+**Independent review (fresh agent in its own worktree, the diff at ca2a97d and ADR 0008,
+not the conclusions).** No defect found in the rule: the order inside `push`, verdicts
+after a release, after the stream's end, repeated, with another tag; windows and counts
+of 0 and above 64; no panic path; `patient` and `hold` never read on the beat path. Its
+own oracle against the model on 6000 random scenes (2 to 4 frames at four rates, rail
+bursts, windows up to 99, counts of 0, verdicts at random times with current, stale and
+random tags, five reader paces with stalls): the hold equal at every push and after every
+verdict, beats and acquisitions identical to a run with both releases off (16 215
+acquisitions, 1994 inherited, 4719 fast and 4415 patient releases). `rxagc release` at 40
+frames: "the model" equal to the tool's trial in all 27 rows. `rxper stream` at 100
+frames from main and from the branch: identical. Found and corrected (commit 0b63cb3):
+- *holes in the gate:* of its 25 mutants of the hand-off 7 survived that are not
+  equivalent (listed above); four tests added, all seven fail them. Four more survivors
+  are equivalent (the bit cleared or kept at `close`, at a release, at the hold's end by
+  length, at a failed SIGNAL): the bit is read only under a hold. Of its 11 mutants of
+  `signal_checked` 10 fail `g1_signal_check`; the one that passes (the parity bit forced
+  even before encoding again) is equivalent;
+- `SignalVerdict::of` could overflow on a `Signal` built by hand with a length the
+  decoder cannot give: the length is clamped to the longest PSDU, with a test;
+- doc comments of `RxHandoffFixed`, `signal` and `clip_count` that still described 2 of 4
+  alone; the tools' headers naming `decode_signal_fixed`; "'2 of 4' is the model's"; the
+  rows "6 Mb/s under" did not say the weaker frame of 1000 octets outlasts the stream;
+  the usage line without `release`.
+Noted by it: two places where the tool's trial and the model can differ by construction
+(the trial switches rule in the verdict's own period, the model at the next push; a
+declaration at the very sample of the hold's end) — not seen at 40 frames, and not at
+2000 (item 1).
+Not checked by it: any 2000-frame number, `loop`, `per`, `level`, `dc`; the journal's
+numbers; `signal_checked` against a reference outside the crate's own encoder; the tag's
+wrap at 256 streams (as before this change); whether the rule is good for a radio.
+
+**What this is not.** One seed per row, one run. 40, 24 and 32 and the three slow rates
+were chosen on the rows of the entry before; the ten new rows were run after and nothing
+was retuned on them, but they are the same kinds of scene (a frame under, a white-noise
+burst, a preamble alone) at other rates and through TGn D — not an interferer that is a
+frame of another network, not radar's pulse shape, no adjacent channel. A patient hold
+waits 24 samples (1.2 µs) of clipping, so a stronger frame over a believed slow one that
+clips less than three samples in four is held through: "under −10 dB" at 6 and 12 Mb/s is
+8 and 12 of 2000, and the gain is then right only by the frame's luck. In loud noise a
+noise SIGNAL reached 40 to 43 agreeing bits in 4 of 518 (the entry before): it would be
+believed if it also named a slow rate. The released control returns to the largest gain
+(an assumption about a radio); the rails are the ADC's. No float chain in the loop.
+
+**Open**
+- The cycle-exact schedule of the decision, now with the verdict's second bit: when
+  `signal()` may arrive in clocks, and that the rule changes at the next sample.
+- R1: the rule against captures (how often a clipping burst that is not a frame, how
+  often a stronger frame over a slow one).
+- As before: the stream's 12 of 10 000 at 24 Mb/s in AWGN above 30 dB; the `dc` row
+  −10 dBFS before the gain at 25 dB.
