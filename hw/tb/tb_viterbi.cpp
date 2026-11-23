@@ -248,9 +248,21 @@ int main(int argc, char** argv) {
     g.feed(blocks[2], 2, 1);
     g.drain();
 
+    // The case the contract's n + 2 is for: a block of one step exactly n + 2 edges after a
+    // long block's last step, then one-step blocks each 3 edges after the one before.
+    long chained = 0;
+    g.feed(blocks[mid], mid, 0);
+    g.idle(DEPTH + 1);
+    for (int r = 0; r < 8; ++r) {
+        g.feed(blocks[0], 0, 0);
+        g.idle(2);
+        ++chained;
+    }
+    g.drain();
+
     std::printf("viterbi G3: %zu blocks, %ld bits compared, %ld blocks followed at once, %ld resets after a "
-                "last step, %ld mismatches\n",
-                blocks.size(), g.compared, tight, resets, g.mismatches);
+                "last step, %ld one-step blocks at the contract's edge, %ld mismatches\n",
+                blocks.size(), g.compared, tight, resets, chained, g.mismatches);
     if (!g.expect.empty()) {
         std::fprintf(stderr, "%zu expected outputs never came\n", g.expect.size());
         return 1;

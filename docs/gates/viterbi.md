@@ -234,7 +234,10 @@ through the open flow first, the streaming data path's model after it.
    state are 0), so the model's choice there is always the dropped bit 0: the RTL forces it
    and compares nothing. Through those six steps every state's metric descends from state
    0's, so nothing needs clearing at a block's start: the old value is an offset common to
-   all 64 (the mutation run below confirms that clearing changes nothing).
+   all 64 (the mutation run below confirms that clearing changes nothing). State 0's metric
+   alone is reset (13 flip-flops), for a four-valued simulation only: without it every metric
+   descends from an X after power-up and the output is X for ever there (the independent
+   review), while silicon and Verilator's two values do not care.
 2. **Survivors: 64 registers of 90 bits** (window 96 less the six bits that are the state
    itself), each rewritten every step by shifting in the survivor bit of the chosen
    predecessor. The decided bit is the oldest bit of the best state's register; the flush
@@ -257,16 +260,23 @@ OpenOFDM's frames, the windowed decision's definition). `rvec viterbi` →
 ## 2026-11-23 · G3 · `viterbi.sv` bit-exact with `decode_windowed`, every bit in its cycle
 
 Command: `make -C hw viterbi` (Verilator 5.054, registers from random values,
-`+verilator+rand+reset+2`). Result: `viterbi G3: 63 blocks, 31716 bits compared, 32 blocks
-followed at once, 10 resets after a last step, 0 mismatches`.
+`+verilator+rand+reset+2`). Result: `viterbi G3: 147 blocks, 44837 bits compared, 74 blocks
+followed at once, 10 resets after a last step, 8 one-step blocks at the contract's edge,
+0 mismatches`.
 
-**Vectors** (`rvec viterbi`, 63 blocks): every length near the window and the forced start
+**Vectors** (`rvec viterbi`, 147 blocks; 63 before the independent review, below): every
+length near the window and the forced start
 (1 to 8, 23 to 25, 90 to 98, 189 to 193 steps); codewords in noise at rates 1/2, 2/3 and 3/4
 (stolen values erased) of 150, 400 and 1000 steps; SIGNAL's 24 steps from no noise to σ = 2;
 all erasures (every comparison a tie); every value at one rail, at random rails, uniform
 random values; noise of σ = 1.6 (most decisions wrong); 12 022 steps (1500 octets, the
-13-bit metrics wrap hundreds of times); four blocks found by search whose last step's own
-decision differs from the flush's first bit. The largest metric spread in them is 2286
+13-bit metrics wrap hundreds of times); 52 blocks of 97 to 200 steps of values from three or
+five small levels ({−1, 0, 1}, {−127, 0, 127}, −2 to 2: equal metrics in the best-state
+tree) or uniform; 32 blocks found by search until each of the tree's 32 first-level pairs
+(2j, 2j + 1) has a decision where 2j is the lowest best state and 2j + 1 as good with
+another decided bit (`tree_pair_ties`, a selector in the tool; the expected bits stay
+`decode_windowed`'s); four blocks found by search whose last step's own decision differs
+from the flush's first bit. The largest metric spread in them is 2286
 (the tool refuses a file at 2047 or less, so 12 bits are wrong somewhere).
 
 **Testbench** (`hw/tb/tb_viterbi.cpp`): holds every output to its edge (4 after the step's
@@ -274,7 +284,8 @@ edge; the flush from 4 after the last step's), and nothing at other edges; idle 
 inside blocks (none, every fifth step, random), every other block followed as early as the
 contract allows; resets while decisions come out, during a flush, and with their first edge
 1 to 5 edges after a last step (nothing due after the reset may come out, what was due
-before it must; the next block decodes).
+before it must; the next block decodes); a one-step block exactly n + 2 edges after a long
+block's last step, and eight one-step blocks chained at the contract's edge.
 
 **Test first.** The gate failed on a stub (31 336 of 31 336 bits). The first RTL failed it
 twice: a block of one step right behind a flush overwrote the flush register (the contract
@@ -299,18 +310,54 @@ vectors and the testbench:
 - a mutant of the first tree level that carries an equal metric from the other side (lived:
   equal metrics, nothing changes) was replaced by one that moves the bit on a tie.
 
-Final round, on the RTL and vectors as committed: **43 of 44 fail, all on a wrong or
-misplaced output bit (none by a build or lint error)**; the one alive is the clearing of
-state 0's metric at a block's start, equivalent by G0 item 1 and not in the RTL.
+Final round, on the RTL and vectors as committed (after the independent review below,
+which added three tree mutants of its own and the reset of state 0's metric): **46 of 48
+fail, all on a wrong or misplaced output bit (none by a build or lint error)**; the two
+alive are state 0's metric cleared at a block's start and reset to 1 instead of 0, both an
+offset common to every metric, equivalent by G0 item 1.
 
 | Mutation | Fails |
 |---|---|
 | metric 12 bits | yes (first wrong bit in block 50 of 63) |
 | a tie taken to the predecessor with bit 1; the comparison unsigned; its sign inverted | yes |
 | forced for 5 or 7 steps, or never | yes |
-| the tree: a tie to the higher state (all levels; level 1's bit only); the losing metric carried; the bit of stage B or of the last level from the other side; register bit 88 read for 89 | yes |
+| the tree: a tie to the higher state (all levels; level 2 only; level 1's right-hand pairs only; level 1's bit only, in all groups or in group 7 alone); the losing metric carried; the bit of stage B or of the last level from the other side; register bit 88 read for 89 | yes |
 | the flush: index + 1; a state bit 1; from state 1; one bit long; n without its + 1; `out_last` a bit early; the decision given priority over it | yes |
 | the survivor bit shifted in inverted; the branch metrics' cases, A and B, a generator (133 → 131, 171 → 175), the complement of the second branch, P1 = P0 | yes |
 | the index saturating at 94, stepping by 2, starting at 1; a decision tagged one step early or without a valid step; the tree's valid a stage early; the ACS stepping without a valid step | yes |
 | `fstart` skipped; `acs_last` without a valid step; resets of `s1_valid`, `acs_tag`, `acs_last`, `va`, `fstart`, `factive`, `out_valid` removed | yes |
-| state 0's metric cleared at a block's start | no — equivalent (G0 item 1) |
+| state 0's metric cleared at a block's start; reset to 1 | no — equivalent (G0 item 1) |
+
+**Independent review** (a fresh agent in its own worktree on 9a3c61a, given the code, the
+model, the clause and this entry, not its conclusions). It found no defect in the RTL over
+the interface's input space: read line by line against `decode_windowed` (branch outputs,
+the complement, ties in the ACS and in the tree, the survivor shift, bit t − 95, the flush's
+order for fewer than 6, 6 to 95 and 96 or more steps, the last decision's slot); the G0
+bounds rebuilt; a model of its own built the RTL's way (13-bit modulo metrics, register
+exchange, the same tree) equal to `decode_windowed` on 300 random blocks; 740 blocks of its
+own through the gate, 0 mismatches; 36 mutants of its own. Found:
+1. **Three mutants of the tree's tie rule lived** (a tie to the higher state at level 2;
+   at level 1 in the right-hand pairs only; level 1's bit in one group of four only), each
+   killed by its extra blocks. The tie-heavy blocks and the search for a deciding tie in
+   each of the 32 first-level pairs are in the vectors now (above).
+2. **A four-valued simulation would show X for ever after power-up** (no metric is reset;
+   every one descends from state 0's). State 0's metric is reset now (G0 item 1).
+3. **The case the contract's n + 2 was set for was never run** (a one-step block that
+   close behind a long one). It is now; the reviewer showed n + 1 fails and n + 2 passes.
+4. The mutation script is not in the repo, so "the mutation run confirmed" could not be
+   reproduced by it; its own reasoning agreed.
+It also found that every comparison inside the tree differs by at most 8·254 = 2032 (12
+bits would do there; the ACS needs 13). Not checked by it: synthesis, the standard's text,
+timing and area.
+
+## 2026-11-23 · probe · the decoder through the open flow (ADR 0010, decision 4)
+
+`silicon_probe.md` of this date: **0.96 mm² routed, +0.35 ns at 160 MHz** (IHP 130 nm,
+typical corner), 7012 flip-flops, the add-compare-select loop the worst path; ADR 0010 had
+estimated 0.5 to 0.7 mm². A second multiplexer per survivor and metric bit (no enable
+flip-flop in the library) is most of the difference; a gated clock would remove it and
+has not been tried.
+
+**Decision (the founder, 2026-11-23, asked with these figures): register exchange stays**
+(ADR 0010, decision 4, confirmed). The gated clock and a switching simulation for power
+come later, with the clock-gating wrapper; the traceback memory is not built.

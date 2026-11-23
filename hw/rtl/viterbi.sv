@@ -117,8 +117,12 @@ module viterbi (
             // Ties keep the predecessor whose dropped bit is 0.
             d    = !forced && !diff[M-1] && diff != '0;
         end
+        // State 0's metric is reset only so that a four-valued simulation after power-up is not
+        // X for ever (every metric descends from it); the logic does not need it (G0 item 1).
         always_ff @(posedge clk) begin
-            if (s1_valid) begin
+            if (s == 0 && !rst_n) begin
+                metric[s] <= '0;
+            end else if (s1_valid) begin
                 metric[s] <= d ? m1 : m0;
                 path[s]   <= d ? {path[P1][R-2:0], 1'b1} : {path[P0][R-2:0], 1'b0};
             end

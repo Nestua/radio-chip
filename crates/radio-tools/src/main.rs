@@ -15,7 +15,7 @@ use radio_phy::channel::{
     add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, tgn_taps, Doppler,
     Multipath, Rng, TgnModel,
 };
-use radio_phy::convolutional::{CodeRate, ConvolutionalEncoder};
+use radio_phy::convolutional::{CodeRate, ConvolutionalEncoder, G0, G1};
 use radio_phy::fixed::{requantize, Overflow, QFormat, Rounding};
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
@@ -2170,6 +2170,64 @@ fn conv_encoder_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// Which of the 32 first-level pairs (2j, 2j + 1) of the hardware's best-state tree decide an
+/// output through a tie in a rate-1/2 soft block decoded with window `depth`: bit j is set
+/// when, at some step whose decision is output (depth − 1 ≤ t < steps − 1), state 2j is the
+/// lowest best state, 2j + 1 has the same metric, and their decided bits differ. Only picks
+/// vectors; the expected bits are `decode_windowed`'s. Metrics, ties and survivors as in
+/// `radio_phy::viterbi` (start in state 0, a tie keeps the dropped bit 0).
+fn tree_pair_ties(soft: &[i32], depth: usize) -> u32 {
+    const S: usize = 64;
+    let steps = soft.len() / 2;
+    let parity = |w: usize, g: u8| i64::from(((w as u8) & g).count_ones() & 1);
+    let mut metric = [i64::MIN / 4; S];
+    metric[0] = 0;
+    let mut survivor: Vec<[u8; S]> = Vec::with_capacity(steps);
+    let mut pairs = 0u32;
+    for t in 0..steps {
+        let (sa, sb) = (i64::from(soft[2 * t]), i64::from(soft[2 * t + 1]));
+        let mut next = [0i64; S];
+        let mut surv = [0u8; S];
+        for (s, slot) in next.iter_mut().enumerate() {
+            let u = s >> 5;
+            let cand = |p: usize| {
+                let w = (u << 6) | p;
+                metric[p] + sa * (1 - 2 * parity(w, G0)) + sb * (1 - 2 * parity(w, G1))
+            };
+            let p0 = (s << 1) & (S - 1);
+            let (m0, m1) = (cand(p0), cand(p0 | 1));
+            if m1 > m0 {
+                *slot = m1;
+                surv[s] = 1;
+            } else {
+                *slot = m0;
+            }
+        }
+        metric = next;
+        survivor.push(surv);
+        if t + 1 < depth || t + 1 >= steps {
+            continue;
+        }
+        let best = metric.iter().copied().max().unwrap_or(0);
+        let Some(low) = metric.iter().position(|&m| m == best) else {
+            continue;
+        };
+        if low % 2 == 1 || metric[low + 1] != best {
+            continue;
+        }
+        let decided = |mut state: usize| {
+            for back in survivor[t + 2 - depth..=t].iter().rev() {
+                state = ((state << 1) & (S - 1)) | usize::from(back[state]);
+            }
+            state >> 5
+        };
+        if decided(low) != decided(low + 1) {
+            pairs |= 1 << (low / 2);
+        }
+    }
+    pairs
+}
+
 /// Vectors for `hw/rtl/viterbi.sv` (gate G3: `make -C hw viterbi`): blocks of depunctured
 /// soft pairs (A, B) with the bits `viterbi::decode_windowed` gives for them, window
 /// [`TRACEBACK_DEPTH`], the encoder in state 0 after the block's last step
@@ -2182,11 +2240,14 @@ fn conv_encoder_vectors(out: &mut impl Write) -> io::Result<()> {
 /// values erased), some with the tail and some ending in another state, SIGNAL's 24 steps,
 /// all erasures (every comparison a tie), every value at a rail, uniform random values (no
 /// codeword: wrong decisions and a best state that jumps), noise so strong that most
-/// decisions are wrong, one block of 12 022 steps (1500 octets), and four blocks found by
-/// search whose last step's own decision differs from the flush's first bit. The tool refuses
-/// to write a file whose largest path-metric spread is not above 2047 (so that 12 bits of
-/// metric would be wrong somewhere), without those four, or without a block shorter than the
-/// window, one of exactly the window and one longer than twice the window.
+/// decisions are wrong, one block of 12 022 steps (1500 octets), 52 short blocks of values
+/// from three or five small levels (ties in the best-state tree) or uniform, blocks found by
+/// search until each of the tree's 32 first-level pairs has a tie that decides an output
+/// ([`tree_pair_ties`]), and four found by search whose last step's own decision differs from
+/// the flush's first bit. The tool refuses to write a file whose largest path-metric spread is
+/// not above 2047 (so that 12 bits of metric would be wrong somewhere), without any of those
+/// searched blocks, or without a block shorter than the window, one of exactly the window and
+/// one longer than twice the window.
 fn viterbi_vectors(out: &mut impl Write) -> io::Result<()> {
     writeln!(
         out,
@@ -2277,6 +2338,51 @@ fn viterbi_vectors(out: &mut impl Write) -> io::Result<()> {
     }
     let bits = message(16 + 8 * 1500 + 6, true, &mut rng);
     blocks.push(noisy(&bits, 0.55, CodeRate::R3_4, &mut rng));
+    // Ties in the best-state tree (the independent review found three tie mutants of the
+    // tree that the blocks above miss): short blocks of values from three levels, where equal
+    // metrics are common, and of uniform values, at lengths around and above the window.
+    let pick =
+        |levels: &[i32], rng: &mut Rng| levels[(rng.next_u64() % levels.len() as u64) as usize];
+    for (k, n) in (97..=200).step_by(4).enumerate() {
+        let levels: &[i32] = match k % 3 {
+            0 => &[-1, 0, 1],
+            1 => &[-max, 0, max],
+            _ => &[-2, -1, 0, 1, 2],
+        };
+        blocks.push((0..2 * n).map(|_| pick(levels, &mut rng)).collect());
+        let uniform = (0..2 * n)
+            .map(|_| (rng.next_u64() % (2 * max as u64 + 1)) as i32 - max)
+            .collect();
+        blocks.push(uniform);
+    }
+    // For each of the 32 pairs (2j, 2j + 1) that the tree's first level compares, a block with
+    // a decision where 2j is the lowest best state and 2j + 1 is as good with another decided
+    // bit: a tie taken the wrong way in that one pair changes an output (the review's mutants
+    // of one pair or one group of four lived through the blocks above).
+    let mut covered = 0u32;
+    for _ in 0..200_000 {
+        if covered == u32::MAX {
+            break;
+        }
+        let n = 97 + (rng.next_u64() % 104) as usize;
+        let levels: &[i32] = match rng.next_u64() % 3 {
+            0 => &[-1, 0, 1],
+            1 => &[-max, 0, max],
+            _ => &[-2, -1, 0, 1, 2],
+        };
+        let soft: Vec<i32> = (0..2 * n).map(|_| pick(levels, &mut rng)).collect();
+        let pairs = tree_pair_ties(&soft, TRACEBACK_DEPTH);
+        if pairs & !covered != 0 {
+            covered |= pairs;
+            blocks.push(soft);
+        }
+    }
+    if covered != u32::MAX {
+        return Err(io::Error::other(format!(
+            "viterbi vectors: tree pairs without a deciding tie: {:#010x}",
+            !covered
+        )));
+    }
     // Blocks whose last step's own decision (the best state's oldest bit) differs from the
     // flush's first bit (state 0's): the flush must take that output slot. Searched among
     // short blocks of strong noise that do not end in the tail.
