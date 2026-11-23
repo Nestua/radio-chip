@@ -19,8 +19,12 @@ pub const SOFT_MAX: i32 = (1 << (SOFT_BITS - 1)) - 1;
 /// Matched-filter level (signal amplitude 1) that maps to ±[`SOFT_MAX`]: the demapper's
 /// scaling contract (R0-09). Chosen by G2 together with [`SOFT_BITS`].
 pub const SOFT_CLIP: f64 = 3.0;
-/// Traceback window of the hardware decoder ([`decode_windowed`]), chosen by G2.
-pub const TRACEBACK_DEPTH: usize = 64;
+/// Traceback window of the hardware decoder ([`decode_windowed`]). 96 by the founder's
+/// decision of 2026-11-23 on the receiver's frames lost (`docs/gates/rx_ofdm.md`,
+/// `viterbi.md`); R0-10's G2 had chosen 64 on the bit error rate of BPSK in white noise,
+/// which through the receiver loses 11 to 25 % more frames of 1000 octets at the rates
+/// with a code rate of 3/4.
+pub const TRACEBACK_DEPTH: usize = 96;
 /// Path-metric register width for modulo arithmetic: 2^METRIC_BITS > 2·24·SOFT_MAX.
 pub const METRIC_BITS: u32 = 13;
 

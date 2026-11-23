@@ -689,7 +689,52 @@ fn widths(frames: usize) {
                 ..d.front
             }),
         ),
+        (
+            "whole block",
+            FixedOfdmConfig {
+                traceback: 0,
+                ..FixedOfdmConfig::default()
+            },
+        ),
+        (
+            "window 48",
+            FixedOfdmConfig {
+                traceback: 48,
+                ..FixedOfdmConfig::default()
+            },
+        ),
+        (
+            "window 80",
+            FixedOfdmConfig {
+                traceback: 80,
+                ..FixedOfdmConfig::default()
+            },
+        ),
+        (
+            "window 64",
+            FixedOfdmConfig {
+                traceback: 64,
+                ..FixedOfdmConfig::default()
+            },
+        ),
+        (
+            "window 128",
+            FixedOfdmConfig {
+                traceback: 128,
+                ..FixedOfdmConfig::default()
+            },
+        ),
+        (
+            "window 192",
+            FixedOfdmConfig {
+                traceback: 192,
+                ..FixedOfdmConfig::default()
+            },
+        ),
     ];
+    println!(
+        "# every integer column decodes the data with the hardware's traceback window of 96 steps (ADR 0010; the founder, 2026-11-23) but `whole block`: the model's defaults with a traceback over the whole block, as every report before 2026-11-23; the float column decodes over the whole block"
+    );
     let mut rx = vec![
         receiver("float", true, base()),
         Receiver {

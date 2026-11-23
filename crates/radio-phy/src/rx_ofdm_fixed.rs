@@ -33,7 +33,7 @@ use crate::rx_ofdm::{
     descramble, signal_checked, symbol_start, Decoded, RxOfdmConfig, RxOfdmError, Signal,
     SignalCheck, SymbolLog, TIMING_MEASUREMENT_STD, TIMING_PRIOR_PPM,
 };
-use crate::viterbi::{decode, Termination};
+use crate::viterbi::{decode, decode_windowed, Termination, TRACEBACK_DEPTH};
 
 /// Widths of the integer data path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,10 @@ pub struct FixedOfdmConfig {
     /// Half a table address is added to the data path's rotation phases before the table is
     /// addressed (rounding instead of the front's truncation).
     pub rot_round: bool,
+    /// The Viterbi decoder's traceback window for the DATA field, in trellis steps
+    /// ([`crate::viterbi::decode_windowed`]: the hardware's decoder, ADR 0010); 0: a
+    /// traceback over the whole block ([`crate::viterbi::decode`]).
+    pub traceback: usize,
     /// The front's rotator (P, L, Q) and CORDIC (N, W_c, A), shared.
     pub front: FixedRxConfig,
 }
@@ -90,6 +94,7 @@ impl Default for FixedOfdmConfig {
             coef_frac: 16,
             var_frac: 10,
             rot_round: true,
+            traceback: TRACEBACK_DEPTH,
             front: FixedRxConfig::default(),
         }
     }
@@ -969,7 +974,13 @@ pub fn decode_ppdu_fixed(
     }
     // §17.3.5.3: the encoder is back in state 0 after SERVICE, the PSDU and the six tail bits.
     let tail = 16 + 8 * signal.length + 6;
-    let bits = decode(&all, signal.rate.code_rate(), Termination::ZeroAfter(tail))
-        .map_err(RxOfdmError::Viterbi)?;
+    // ADR 0010: the hardware's decoder decides a bit `traceback` steps later; SIGNAL's 24
+    // bits are shorter than any window and keep their whole-block traceback.
+    let end = Termination::ZeroAfter(tail);
+    let bits = match fx.traceback {
+        0 => decode(&all, signal.rate.code_rate(), end),
+        depth => decode_windowed(&all, signal.rate.code_rate(), end, depth),
+    }
+    .map_err(RxOfdmError::Viterbi)?;
     descramble(&bits, signal, log)
 }

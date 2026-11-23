@@ -1283,3 +1283,65 @@ again on the final code with the same rows.
 - `rxagc` on the word start with its reruns: done 2026-11-21, `rx_front.md` ("`rxagc`'s other
   reports on the word start"): 26 integer cells of 3674 move, by one or two frames.
 - Narrowing the tracker (R 6, M 8, K 8, V 4 lose nothing here either) before its RTL.
+
+## 2026-11-23 · model gate + measurement + decision · the hardware's traceback window in the receiver (ADR 0010, decision 6.1a)
+
+ADR 0010 (Context 1): `decode_ppdu_fixed` decoded the data with a traceback over the whole
+block; the hardware decides a bit a fixed number of steps later (`viterbi::decode_windowed`).
+Every packet error figure of this journal before this entry is the whole block's.
+
+**Model.** `FixedOfdmConfig::traceback`: the window in trellis steps for the DATA field, 0
+for the whole block; the default is `viterbi::TRACEBACK_DEPTH`. SIGNAL's 24 bits are
+shorter than any window and are decoded as before. Nothing else changes.
+
+**Gate** (`g2_rx_ofdm`, `the_data_is_decoded_with_the_hardwares_traceback_window`; a model
+gate, its reference the Viterbi model's own two functions, gated in `g1_viterbi`): 60
+frames of 300 octets at 54 Mb/s and 17.5 dB; for each whose SIGNAL decodes, the receiver's
+PSDU is `decode_windowed` of the receiver's own soft values (rebuilt in the test from
+`symbol_soft_fixed`, descrambled there), the PSDU at a window of 0 is `decode` of the same
+values, a window longer than the frame is the whole block; some frames must differ between
+the two, some decode and some not. Written before the change: it failed to build, then
+failed on the decoder that still used the whole block (frame 1), then passed. One mutant
+(the window 8 steps short): fails. `cargo test -p radio-phy --test g2_rx_ofdm` — 28 passed.
+
+**Measurement** (`rxper fixedw 2000` on the build server, 4 min; the report
+`reports/rx_ofdm_fixedw.txt` is regenerated: frames lost of 2000, 1000 octets, the same
+frames in every column, clock offset uniform in ±40 ppm; the column `whole block` is the
+model's defaults with a window of 0 and reproduces the old report's `word start` to the
+frame, 220, 191, 0, 181, 221, 143, 0):
+
+| Point | float | whole block | 48 | 64 | 80 | **96** | 128 | 192 |
+|---|---|---|---|---|---|---|---|---|
+| AWGN 6 Mb/s 3.5 dB | 217 | 220 | 220 | 220 | 220 | **220** | 220 | 220 |
+| AWGN 54 Mb/s 20 dB | 181 | 191 | 361 | 239 | 208 | **195** | 192 | 191 |
+| TGn D 18 Mb/s 15.5 dB | 182 | 181 | 247 | 211 | 190 | **186** | 184 | 182 |
+| TGn D 54 Mb/s 26.5 dB | 220 | 221 | 286 | 245 | 229 | **224** | 221 | 221 |
+| TGn E 54 Mb/s 26.5 dB | 144 | 143 | 225 | 176 | 153 | **144** | 143 | 143 |
+
+(54 Mb/s at 35 and 45 dB: no frame lost in any column.)
+
+1. **The window of 64 that R0-10's G2 chose loses 11 to 25 % more frames** than the whole
+   block at the three points coded at rate 3/4 (239 against 191, 211 against 181, 245
+   against 221, 176 against 143), and nothing at rate 1/2. Its G2 figure, 0.024 dB, was
+   the bit error rate of BPSK in white noise at 10⁻⁴: a frame of 1000 octets is lost by
+   one wrong bit in 8000, and a rare wrong decision of the window is enough.
+2. A window of 96 loses 1 to 5 frames of 2000 more than the whole block (1 to 3 %), 128
+   at most 3, 192 none.
+3. Not converted to dB: the slopes of the error rate at these points are in
+   `rx_ofdm_per.txt` and were not applied. Against the 0.2 dB budget the window of 64 is
+   probably over it in the fading rows; 96 is a few hundredths.
+
+**Decision (the founder, 2026-11-23, asked with this table): the window is 96.**
+`viterbi::TRACEBACK_DEPTH` = 96; ADR 0010's decision 4 is amended (90 bits a survivor for
+58, the last octet 0.2 µs later). The other columns of `rx_ofdm_fixedw.txt` are now
+measured with the window of 96 and moved by a few frames with it.
+
+**What this is not.** One seed per point, 2000 frames, 1000 octets: longer frames lose
+more to a window, shorter ones less. Rates 2/3 (48 Mb/s) and 9, 12, 24, 36 Mb/s not run.
+`rxper fixed` (the full G2 grid, 2.3 h) was not rerun: the float column there decodes
+over the whole block, so the integer receiver's loss against it grows by what this table
+shows. `rxper stream`, `rxagc` and their reports are older than the window.
+
+**Open**
+- The full G2 grid and the `stream` and `rxagc` reports with the window of 96.
+- The window's loss on the longest frame and at 48 Mb/s.
