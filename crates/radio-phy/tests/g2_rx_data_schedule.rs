@@ -56,11 +56,7 @@ type Train = (Vec<(i16, i16)>, Vec<Vec<u8>>, Vec<usize>);
 /// Frames (rate, octets, SNR in dB, clock offset in ppm) each after `gap` samples of
 /// silence (the first after 400), at −15 dBFS. Returns the ADC's samples, the PSDUs and
 /// where each frame starts.
-fn train(
-    frames: &[(Rate, usize, f64, f64)],
-    gap: usize,
-    seed: u64,
-) -> Train {
+fn train(frames: &[(Rate, usize, f64, f64)], gap: usize, seed: u64) -> Train {
     let mut rng = Rng::new(seed);
     let mut x: Vec<(f64, f64)> = Vec::new();
     let mut psdus = Vec::new();
