@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide front dc_estimate handoff
+VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide decide_t1 front dc_estimate handoff
 # `cordic_arb` replays the CORDIC's vectors; `handoff_forced` holds the hand-off to itself.
 BLOCKS    := ram cordic_arb handoff_forced $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
@@ -36,6 +36,7 @@ TOP_latch     := latch_chain
 TOP_search    := search_chain
 TOP_search_alone := rx_search
 TOP_decide    := decide_chain
+TOP_decide_t1 := decide_alone
 TOP_front     := rx_front
 TOP_handoff   := handoff_chain
 TOP_dc_estimate := dc_estimate
@@ -60,6 +61,8 @@ SRC_decide   := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r
                  rtl/det_a.sv rtl/cordic.sv rtl/cordic_arb.sv rtl/nco.sv rtl/rx_latch.sv rtl/ltf_corr.sv rtl/rx_search.sv \
                  rtl/ltf_corr1.sv rtl/rx_decide.sv rtl/rx_front.sv tb/decide_chain.sv
 SRC_front     := $(filter-out tb/decide_chain.sv,$(SRC_decide))
+SRC_decide_t1 := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/cordic.sv rtl/cordic_arb.sv \
+                 rtl/nco.sv rtl/ltf_corr1.sv rtl/rx_decide.sv tb/decide_alone.sv
 SRC_dc_estimate := $(GEN_RTL) rtl/dc_estimate.sv
 SRC_handoff_forced := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/dc_estimate.sv rtl/rx_handoff.sv \
                  tb/handoff_alone.sv
@@ -184,6 +187,17 @@ search_alone: vectors/search_alone.txt
 		for c in 8 13; do \
 			./obj_dir/search_alone/w$$w/sim_search_alone vectors/search_alone.txt $$c $$w $$l $$p +verilator+rand+reset+2; \
 		done; \
+	done
+
+# The decision's T1 on the search's full-width energies (the chain's stay within 32 bits): the
+# decision engine alone, its candidate and ring the testbench's. W = 16 (the bound), 12, 8, 1.
+DECIDE_T1_BUILDS := 16 12 8 1
+decide_t1: vectors/decide_t1.txt
+	rm -rf obj_dir/decide_t1 && mkdir -p obj_dir/decide_t1
+	set -e; for w in $(DECIDE_T1_BUILDS); do \
+		$(VERILATOR) $(VFLAGS) -GW=$$w --Mdir obj_dir/decide_t1/w$$w \
+			--top-module decide_alone $(SRC_decide_t1) tb/tb_decide_t1.cpp -o sim_decide_t1; \
+		./obj_dir/decide_t1/w$$w/sim_decide_t1 vectors/decide_t1.txt $$w +verilator+rand+reset+2; \
 	done
 
 # The front with its loop closed. Builds as the search's and W = 4 (where the fine sum's

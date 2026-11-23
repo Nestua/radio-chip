@@ -4569,3 +4569,67 @@ bench closes it. (Mutation script in the session's scratchpad, not in the reposi
 - Resets longer than a clock; clock patterns that remove clocks; R below 8.
 - The decision engine (`rx_decide`) on energies above 32 bits: it reads `acc_emax` and the
   ring at full width, but its own gate (`decide`) is on the chain's values.
+
+## 2026-11-23 · G3 · R0-08d: the decision's T1 on full-width energies (`decide_t1`)
+
+The open item of the bench of `rx_search` alone: `rx_decide` was gated (`decide`) on the
+chain's energies only, which stay within 32 of their 44 bits.
+
+**G0: where `rx_decide` sees the search's energies.** Two places, both in the choice of T1:
+`keep <= acc_emax - (acc_emax >> 3)` at the strobe (`hw/rtl/rx_decide.sv:333`) and
+`ring_data >= keep` over the grid's w + 1 words (`:358`), T1 the last offset that holds
+(`acq_t1`, `:257`). Nothing else of the decision reads an energy: the sums are made from the
+history. The model's rule is the same with one more condition, positions before the search's
+deadline; that cut never acts on a candidate the search hands over (it accepts at
+imax + 63 + w, before the deadline, so the whole grid is), and the RTL has no deadline input.
+The narrowest honest bench is therefore the decision engine alone with T1 as its output.
+keep ≤ 7/8 of the bound 2^43 < 2^43: its top bit is always 0 (the mutant that drops it is
+equivalent; the register could be 43 bits).
+
+**Reference.** `latest_start(emax, grid)` in `radio_phy::rx_front_fixed`, the rule moved
+out of `RxFrontFixed::decide`, which now calls it (the grid cut at the deadline as before).
+`make -C hw vectors`: no diff in any committed file. `crates/radio-phy/tests/rx_decide_t1.rs`:
+the threshold worked by hand at full width (keep = 7·2^40 at emax = 2^43; ties; the low 32
+bits deciding otherwise both ways; the shift floors).
+
+**Vectors** `hw/vectors/decide_t1.txt` (`rvec decide_t1`): 240 candidates for each of
+w = 16, 12, 8, 1; e(imax) = emax and every later word at most emax, as the search hands them;
+maxima at the bound, the bound − 1, 2^42 + 2^34 (keep's low word 2^31) and log-uniform; the
+words about keep (equal, ±1, ±2^32, across the low word's carry both ways, between keep and
+emax, below); lapped, unlapped with T1 < 160 (no decision) and unlapped above. `rvec` refuses
+a w without the bound, a tie at keep, a word above 32 bits at T1, a T1 that the low 32 bits
+would place elsewhere (75 to 96 per w), or either unlapped case.
+
+**Testbench** (`hw/tb/decide_alone.sv` + `tb_decide_t1.cpp`): `rx_decide` behind the real
+`cordic_arb` and CORDIC; the ring the testbench's (81 words, the grid at the candidate's
+address on, wrapping, every other word 2^44 − 1 or 0 in turn, garbage on `ring_data` when not
+read); the history written a sample every 8 clocks; the strobe where the front would give it
+(acc_n = imax + 189 + 2w, the write port 4 samples on: a first version with the strobe
+anywhere stopped on `ram_1w1r`'s read-and-write check, the decision's history reads must stay
+behind the write). At each `res_valid`: T1 and `res_sums`; every candidate delivered.
+
+**Result** (commit 3499c7d, `make -C hw decide_t1`, Verilator 5.054): w = 16, 12, 8, 1 —
+240 candidates each, 240 results, 75 to 80 with no decision, 122 to 130 T1 words above 32
+bits, **0 mismatches**.
+
+**The gate bites** (`hw/rtl/rx_decide.sv` mutated; built with `-Wno-fatal`, since a narrowed
+mutant draws width warnings; the chain's gate `decide` on the same mutants):
+
+| Mutant | `decide_t1` | `decide` (chain) |
+|---|---|---|
+| keep at 32 bits | **fails** (T1 of case 0: 406 for 402) | passes |
+| keep drops its top bit (43 bits) | passes: **equivalent** (keep < 2^43 always) | passes |
+| keep at 42 bits | **fails** (406 for 402) | passes |
+| emax >> 2 | **fails** (37 for 36) | fails (T1 333 for 331) |
+| emax >> 4 | **fails** (390 for 402) | fails (157 for 163) |
+| comparison at 32 bits | **fails** (406 for 402) | passes |
+| ring word truncated to 32 bits | **fails** (155 for 402) | passes |
+| > for >= | **fails** (486 for 488) | fails (442 for 15) |
+
+Every mutant of the width passes the chain's gate and fails this one. (Mutation script in
+the fork's scratch, not in the repository.)
+
+**Not covered**
+- The deadline's cut (unreachable from the search; no input).
+- Resets in the middle of a decision (gate `decide` has them on the chain's values).
+- The sums and phase words on this bench (the history is not a frame).
