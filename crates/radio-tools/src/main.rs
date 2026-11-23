@@ -28,9 +28,9 @@ use radio_phy::rx_front::{
     STF_PERIOD,
 };
 use radio_phy::rx_front_fixed::{
-    cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
-    to_adc, FixedAcquisition, FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxFrontFixed,
-    RxHandoffFixed, SearchAloneFixed, SignalVerdict, ADC_FULL_SCALE, IQ, Y_BITS,
+    cordic_angle, cordic_table, detector_trace_fixed, latest_start, ltf_corr, ltf_taps, nco_mix,
+    nco_table, to_adc, FixedAcquisition, FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd,
+    RxFrontFixed, RxHandoffFixed, SearchAloneFixed, SignalVerdict, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_handoff::{dc_offset_of_sums, run_handoff, HandoffReader, HandoffTiming};
 use radio_phy::scrambler::Scrambler;
@@ -1610,6 +1610,132 @@ fn decide_segment(
         }
     }
     c.clear_moves_events += usize::from(moved);
+    Ok(())
+}
+
+/// Vectors for the decision's choice of T1 on energies the chain cannot produce (gate G3:
+/// `make -C hw decide_t1`): `rx_decide` behind its arbiter, the candidate and the energy ring
+/// driven by the testbench, against `latest_start`, the rule `RxFrontFixed::decide` calls. One
+/// line per candidate: `<w> <imax mod 512> <lapped> <ring address of e(imax)> <emax> <e(imax)>
+/// … <e(imax + w)> <T1 mod 512>`. As the search hands them over: e(imax) = emax, the later
+/// words at most emax, every grid position before the deadline (the search accepts at
+/// imax + 63 + w, before it). The words are drawn about the threshold keep = emax − ⌊emax/8⌋
+/// (equal, one off, 2^32 off, the low word's carry either way), the maxima log-uniform up to
+/// the bound w · 2^39; `rvec` refuses a w without the bound, a tie at the threshold, a word
+/// above 32 bits at T1, a T1 that the low 32 bits would place elsewhere, and both T1 < 160 (no
+/// decision) and T1 ≥ 160 with `lapped` 0.
+fn decide_t1_vectors(out: &mut impl Write) -> io::Result<()> {
+    const M32: i128 = 0xffff_ffff;
+    let k = FixedRxConfig::default().corr_bits;
+    writeln!(
+        out,
+        "# rvec decide_t1 — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# latest_start (RxFrontFixed::decide's T1). <w> <imax mod 512> <lapped> <ring of e(imax)>"
+    )?;
+    writeln!(out, "# <emax> <e(imax)> … <e(imax + w)> <T1 mod 512>")?;
+    let mut rng = Rng::new(0xDEC1_0001);
+    for w in [16usize, 12, 8, 1] {
+        let bound = (w as i128) << (2 * k - 1);
+        let (mut at_bound, mut tie, mut wide_t1, mut other_32, mut early, mut late0) =
+            (0, 0, 0, 0, 0, 0);
+        let mut cases = 0;
+        for c in 0..240usize {
+            let r = rng.next_u64();
+            // The maximum: the bound, the bound − 1, a keep with a large low word, or
+            // log-uniform over 1 … bound.
+            let emax = match c % 8 {
+                0 => bound,
+                1 => bound - 1,
+                2 => ((1i128 << 42) + (1 << 34)).min(bound),
+                _ => {
+                    let bits = 1 + (r % u64::from(2 * k + 3)) as u32;
+                    let v = ((i128::from(rng.next_u64()) << 64) | i128::from(rng.next_u64()))
+                        & ((1i128 << bits) - 1);
+                    v.clamp(1, bound)
+                }
+            };
+            let keep = emax - (emax >> 3);
+            let mut grid = vec![emax];
+            for _ in 0..w {
+                let q = rng.next_u64();
+                let e = match q % 12 {
+                    0 => keep,
+                    1 => keep - 1,
+                    2 => keep + 1,
+                    3 => keep - (1 << 32),
+                    4 => keep + (1 << 32),
+                    // The low word's carry: just below keep with the low word above keep's,
+                    // and just above with it below.
+                    5 => (keep & !M32) - 1,
+                    6 => (keep | M32) + 1,
+                    7 => emax,
+                    8 => keep + (((emax - keep) * i128::from((q >> 40) & 0xff)) >> 8),
+                    _ => (keep * i128::from((q >> 40) & 0xffff)) >> 16,
+                };
+                grid.push(e.clamp(0, emax));
+            }
+            let Some(off) = latest_start(emax, &grid) else {
+                return Err(io::Error::other("decide_t1: no T1 (e(imax) keeps itself)"));
+            };
+            // T1 with the threshold made of the low 32 bits, and with the comparison at 32.
+            let low_keep = (emax & M32) - ((emax & M32) >> 3);
+            let at_32 = grid.iter().rposition(|&e| (e & M32) >= low_keep);
+            let cmp_32 = grid.iter().rposition(|&e| (e & M32) >= (keep & M32));
+            // Lapped or not; unlapped positions below 160 give no decision.
+            let lapped = c % 3 == 0;
+            let imax = if lapped {
+                (r >> 20) as usize % HISTORY
+            } else if c % 3 == 1 {
+                (r >> 20) as usize % 160
+            } else {
+                160 + (r >> 20) as usize % (HISTORY - 160 - w)
+            };
+            let t1 = imax + off;
+            let ring = (r >> 40) as usize % (LTF_SYMBOL_LEN + GI_LEN + 1);
+            at_bound += usize::from(emax == bound);
+            tie += usize::from(grid[off] == keep);
+            wide_t1 += usize::from(grid[off] >= 1 << 32);
+            other_32 += usize::from(at_32 != Some(off) || cmp_32 != Some(off));
+            early += usize::from(!lapped && t1 < 160);
+            late0 += usize::from(!lapped && t1 >= 160);
+            cases += 1;
+            let words: Vec<String> = grid.iter().map(|e| e.to_string()).collect();
+            writeln!(
+                out,
+                "{w} {imax} {} {ring} {emax} {} {}",
+                u8::from(lapped),
+                words.join(" "),
+                t1 % HISTORY
+            )?;
+        }
+        let missing: Vec<&str> = [
+            (at_bound > 0, "the bound"),
+            (tie > 0, "a tie at the threshold"),
+            (wide_t1 > 0, "a word above 32 bits at T1"),
+            (other_32 > 0, "a T1 the low 32 bits would place elsewhere"),
+            (early > 0, "T1 < 160 unlapped"),
+            (late0 > 0, "T1 >= 160 unlapped"),
+        ]
+        .into_iter()
+        .filter(|(ok, _)| !ok)
+        .map(|(_, m)| m)
+        .collect();
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "decide_t1 w = {w}: missing {}",
+                missing.join(", ")
+            )));
+        }
+        writeln!(
+            out,
+            "# w = {w}: {cases} candidates; {at_bound} at the bound, {tie} T1 at a tie with keep, \
+             {wide_t1} T1 words above 32 bits, {other_32} placed elsewhere by the low 32 bits, \
+             {early} with no decision (T1 < 160)"
+        )?;
+    }
     Ok(())
 }
 
@@ -3943,6 +4069,7 @@ fn main() -> ExitCode {
         "latch" => latch_vectors(&mut out),
         "search" => search_vectors(&mut out),
         "search_alone" => search_alone_vectors(&mut out),
+        "decide_t1" => decide_t1_vectors(&mut out),
         "decide" => decide_vectors(&mut out),
         "front" => front_vectors(&mut out),
         "handoff" => handoff_vectors(&mut out),
@@ -3950,7 +4077,7 @@ fn main() -> ExitCode {
         "viterbi" => viterbi_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

@@ -774,6 +774,16 @@ impl LtfSearch {
     }
 }
 
+/// The first long symbol's place on the decision's grid: of the search's energies `grid` =
+/// e(imax) … e(imax + w), cut at the search's deadline, the offset of the last that keeps 7/8
+/// of the maximum `emax` (keep = emax − ⌊emax / 8⌋, at the energies' full width). `None` when
+/// none does. The rule of [`RxFrontFixed`]'s decision, alone: the reference of the bench of
+/// `rx_decide` on energies the chain cannot produce.
+pub fn latest_start(emax: i128, grid: &[i128]) -> Option<usize> {
+    let keep = emax - (emax >> 3);
+    grid.iter().rposition(|&e| e >= keep)
+}
+
 /// What [`SearchAloneFixed::push`] gives for a sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SearchStep {
@@ -1109,10 +1119,11 @@ impl RxFrontFixed {
         let energy = &self.search.energy;
         let emax = energy.get(imax);
         // Latest start within GI − B of the maximum keeping 7/8 of its energy.
-        let keep = emax - (emax >> 3);
-        let sym = (imax..=imax + w)
-            .rev()
-            .find(|&p| p < s.deadline && energy.get(p) >= keep)?;
+        let grid: Vec<i128> = (imax..=imax + w)
+            .take_while(|&p| p < s.deadline)
+            .map(|p| energy.get(p))
+            .collect();
+        let sym = imax + latest_start(emax, &grid)?;
         *t1 = Some(sym);
 
         // Final coarse CFO over the STF located from the timing.
