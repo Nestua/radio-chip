@@ -101,14 +101,16 @@ conv_encoder: vectors/conv_encoder.txt
 		$(SRC_conv_encoder) tb/tb_conv_encoder.cpp -o sim_conv_encoder
 	./obj_dir/conv_encoder/sim_conv_encoder vectors/conv_encoder.txt
 
-# The decoder at one trellis step a clock, against decode_windowed: every bit in its cycle,
-# idle cycles inside blocks, blocks back to back, resets with a block in flight.
+# The FFT, R2SDF: every bin of every window against fft64_window_fixed, gaps, chains, skids,
+# drops; the last bin's cycle.
 fft64: vectors/fft64.txt
 	rm -rf obj_dir/fft64 && mkdir -p obj_dir/fft64
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/fft64 --top-module fft64 \
 		$(SRC_fft64) tb/tb_fft64.cpp -o sim_fft64
 	./obj_dir/fft64/sim_fft64 vectors/fft64.txt +verilator+rand+reset+2
 
+# The decoder at one trellis step a clock, against decode_windowed: every bit in its cycle,
+# idle cycles inside blocks, blocks back to back, resets with a block in flight.
 viterbi: vectors/viterbi.txt
 	rm -rf obj_dir/viterbi && mkdir -p obj_dir/viterbi
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/viterbi --top-module viterbi \

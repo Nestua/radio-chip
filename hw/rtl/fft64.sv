@@ -40,11 +40,11 @@ module fft64
     input  wire                       clk,
     input  wire                       rst_n,     // synchronous, active low
     input  wire                       drop,
-    input  wire                       in_valid,
+    input  wire                       in_valid,  // not AXI: a beat offered while in_ready is low is consumed (the skid)
     input  wire                       in_next,
     input  wire signed [IN_BITS-1:0]  in_re,
     input  wire signed [IN_BITS-1:0]  in_im,
-    output logic                      in_ready,
+    output logic                      in_ready,  // for a registered valid: drop valid the cycle after it falls
     output logic                      out_valid,
     output logic [5:0]                out_bin,
     output logic signed [W_BITS-1:0]  out_re,
@@ -125,7 +125,7 @@ module fft64
     logic [5:0] cnt;          // the next token's label
     logic       flushing;
     logic       prev_real;    // the last complete input frame was a window
-    logic       skid_v, skid_next;
+    logic       skid_v;
     logic signed [IN_BITS-1:0] skid_re, skid_im;
 
     assign in_ready = !flushing && !skid_v;
@@ -136,7 +136,9 @@ module fft64
         take_skid = skid_v && !flushing;
         take_in   = in_valid && in_ready;
         tok_v     = flushing || take_skid || take_in;
-        tok_next  = take_skid ? skid_next : in_next;
+        // The skid fills only during a flush, so its sample is a frame's label 0: in_next is
+        // read at label 63 alone, never the skid's.
+        tok_next  = in_next;
         tok_re    = flushing ? '0 : (take_skid ? skid_re : in_re);
         tok_im    = flushing ? '0 : (take_skid ? skid_im : in_im);
     end
@@ -152,7 +154,6 @@ module fft64
         end else begin
             if (in_valid && !in_ready && !skid_v) begin
                 skid_v    <= 1'b1;
-                skid_next <= in_next;
                 skid_re   <= in_re;
                 skid_im   <= in_im;
             end else if (take_skid) begin
@@ -225,6 +226,17 @@ module fft64
                 mi = PW'(bi);
             end
         end
+
+`ifndef SYNTHESIS
+        // mulc knows only the ROM's magnitudes of stages 2 and 3; a changed ROM must not
+        // multiply by 0 silently.
+        if (s == 2 || s == 3) begin : g_check
+            always_ff @(posedge clk)
+                if (st[s].v && later &&
+                    (mulc(16'sd1, wr) == '0 && wr != '0 || mulc(16'sd1, wi) == '0 && wi != '0))
+                    $error("fft64: stage %0d twiddle (%0d, %0d) not in mulc", s, wr, wi);
+        end
+`endif
 
         always_ff @(posedge clk) begin
             if (!rst_n || drop) pv <= 1'b0;

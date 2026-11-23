@@ -2,15 +2,18 @@
 // every bin to equal radio_phy::rx_ofdm_fixed::fft64_window_fixed's, each window's 64 bins
 // exactly once, in bit-reversed order, and nothing else out.
 //
-// The windows are fed in three passes, each over every window of the file:
+// The windows are fed in four passes, each over every window of the file:
 //   1. no gaps, a reader that looks at in_ready in the same cycle, a flush after each window;
 //   2. a sample every 8 clocks (the hand-off's pace once caught up), a reader whose valid is
-//      registered (it sees in_ready a cycle late, so it hits the skid when a flush starts),
+//      registered (it sees in_ready a cycle late),
 //      every fourth window chained to the next with in_next (T1 then T2): in_ready must stay
 //      high from the chained window's first cycle on (nothing flushes between the two);
 //   3. random gaps, a random reader, random chaining, and `drop` pulsed now and then: in a
 //      window (the window is lost), during a flush (the bins not yet out are lost), or between
-//      windows. Nothing of a dropped window may come out after the drop; the next windows must.
+//      windows, random inputs (in_valid among them) during each drop and the reset. Nothing
+//      of a dropped window may come out after the drop; the next windows must;
+//   4. no gaps, a registered reader, each window right behind the last: every window's first
+//      sample is offered in the cycle in_ready falls for the flush and goes through the skid.
 // When a flush follows a window at once, its last bin must leave exactly LAST edges after the
 // edge that took its 64th sample. Registers start from random values
 // (+verilator+rand+reset+2). Exit code 0 = gate passed.
@@ -124,9 +127,11 @@ struct Gate {
         dut.in_im = rnd() & ((1 << IN_BITS) - 1);
     }
 
+    // A drop (and a reset) with random inputs, in_valid among them: nothing of it may count.
     void drop_now() {
         dut.drop = 1;
         idle_inputs();
+        dut.in_valid = rnd() & 1;
         pending.clear();
         ++drops;
         tick();
@@ -191,7 +196,11 @@ struct Gate {
     void reset() {
         dut.rst_n = 0;
         dut.drop = 0;
-        idle(3);
+        for (int i = 0; i < 3; ++i) {
+            idle_inputs();
+            dut.in_valid = rnd() & 1;
+            tick();
+        }
         dut.rst_n = 1;
         pending.clear();
     }
@@ -199,8 +208,8 @@ struct Gate {
     void pass(int which) {
         size_t k = 0;
         while (k < w.size()) {
-            int gaps = which == 1 ? 0 : which == 2 ? 1 : static_cast<int>(rnd() % 3);
-            bool registered = which == 2 || (which == 3 && (rnd() & 1));
+            int gaps = which == 1 || which == 4 ? 0 : which == 2 ? 1 : static_cast<int>(rnd() % 3);
+            bool registered = which == 2 || which == 4 || (which == 3 && (rnd() & 1));
             bool next = k + 1 < w.size() && (which == 2 ? (k % 4 == 0) : which == 3 && rnd() % 3 == 0);
             int cut = -1;
             if (which == 3 && rnd() % 6 == 0) cut = static_cast<int>(rnd() % N);
@@ -220,7 +229,7 @@ struct Gate {
                     idle(rnd() % 100);
                 }  // else the next window at once (a registered reader then hits the skid)
             } else {
-                idle(which == 1 ? 0 : 5);
+                idle(which == 2 ? 5 : 0);
             }
         }
         idle(200);
@@ -266,12 +275,12 @@ int main(int argc, char** argv) {
         return 1;
     }
     gate->reset();
-    for (int p = 1; p <= 3; ++p) gate->pass(p);
-    std::printf("fft64: %zu windows, 3 passes, %ld bins compared, %ld latencies checked, %ld skids, "
+    for (int p = 1; p <= 4; ++p) gate->pass(p);
+    std::printf("fft64: %zu windows, 4 passes, %ld bins compared, %ld latencies checked, %ld skids, "
                 "%ld drops, %ld chains, %ld edges, %ld mismatches\n",
                 gate->w.size(), gate->bins, gate->latency_checked, gate->skids, gate->drops,
                 gate->chains, gate->edge, gate->mismatches);
-    const bool ok = gate->mismatches == 0 && gate->bins > 0 && gate->skids > 0 && gate->drops > 0 &&
+    const bool ok = gate->mismatches == 0 && gate->bins > 0 && gate->skids >= static_cast<long>(gate->w.size()) / 2 && gate->drops > 0 &&
                     gate->chains > 0;
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

@@ -204,14 +204,18 @@ file saturate at the output, and internal saturation is exercised by the tones) 
 `fft64_twiddles`). The reference is `fft64_window_fixed`, new: the receiver's own `window_fft`
 (the input saturated to 13 bits and shifted by 1, then `fft64_fixed`), made public.
 
-**Gate** (`make -C hw fft64`, `hw/tb/tb_fft64.cpp`): every window in three passes — no gaps and
+**Gate** (`make -C hw fft64`, `hw/tb/tb_fft64.cpp`): every window in four passes — no gaps and
 a reader that looks at `in_ready`; a sample every 8 clocks, a registered reader, every fourth
 window chained; random gaps, readers, chains and drops (in a window, during a flush, between
-windows). Every bin compared with the model's, each window's 64 exactly once in bit-reversed
+windows; random inputs, `in_valid` among them, during each drop and the reset); no gaps, a
+registered reader and every window right behind the last, so that each window's first sample
+goes through the skid. Every bin compared with the model's, each window's 64 exactly once in bit-reversed
 order, nothing else out (no bin of a dropped window after the drop), the last bin's 75 edges
 wherever a flush follows at once, `in_ready` high throughout a chained window. Registers start
-random (`+verilator+rand+reset+2`). Result (this branch): **236 windows, 42 416 bins compared,
-541 latencies, 6 skids, 58 drops, 112 chains, 0 mismatches. PASS.**
+random (`+verilator+rand+reset+2`). Result (this branch, after the pre-PR review): **236 windows,
+57 989 bins compared, 789 latencies, 252 skids, 52 drops, 107 chains, 0 mismatches. PASS.**
+(The mutants below ran on the gate's first version, three passes; the fourth pass and the
+inputs during drops only add checks.)
 
 **Mutants** (each built fresh; the two marked lint-non-fatal built with `-Wno-fatal`, since
 they leave a signal unused):
@@ -236,6 +240,20 @@ mismatches, an equivalent mutant (the constant's sign is carried into the `case`
 product alike), replaced by the one in the table; "`in_next` ignored" first **passed** the
 gate: a flush between chained windows changes no bin, only the time. The check of `in_ready`
 through a chained window was added for it, and it now fails (113 chains, each flagged).
+
+**The pre-PR review** (fresh agent, 2026-11-24): nothing blocking. It reran the gate (numbers as
+printed), counted the 72 saturated bins, and synthesised the block with the open flow's front
+end (Yosys 0.67 `read_slang`): 0 errors, 0 warnings, ≈ 23.4k generic cells, ≈ 2.7k flip-flops
+(2041 in the delay lines and the skid); the packed struct and the array of them are new in
+`hw/rtl/` and slang takes them. Taken: `in_ready` is not AXI (a beat offered while it is low is
+consumed) — said at the ports, for the data path's top level to keep the hand-off's registered
+`out_ready`; the skid was hit 6 times only — the fourth pass and `skids ≥ windows / 2`, inputs
+during drops and the reset; `mulc` returned 0 silently for a twiddle it does not list — a
+simulation check (removing the cos π/8·sin π/8 branch now stops the gate: "stage 3 twiddle
+(392, −946) not in mulc"); `skid_next` was dead (the skid holds a frame's label 0) — removed;
+the Makefile's comment. Left open: the latency is checked at the last bin of a flushed window
+only; stage 2's `mulc` builds the products for all three constants (Yosys keeps 12 constant
+products: a stage-specific form saves a few hundred cells, for the run through the flow).
 
 **Not covered here**
 - The routed area and timing through the open flow, and the power of the shift-register delay
