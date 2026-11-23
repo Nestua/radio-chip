@@ -177,6 +177,25 @@ fn twiddles(fx: &FixedOfdmConfig) -> Option<[IQ; FFT_SIZE / 2]> {
     Some(rom)
 }
 
+/// The FFT's twiddle ROM, e^(−j2πk/64) for k < 32 in Q(T, T − 2), half to even (the RTL's
+/// generated ROM, `rvec fft64-rom`). `None` for unusable widths.
+pub fn fft64_twiddles(fx: &FixedOfdmConfig) -> Option<[IQ; FFT_SIZE / 2]> {
+    if !fx.is_valid() {
+        return None;
+    }
+    twiddles(fx)
+}
+
+/// The window's samples as the FFT takes them (`in_bits` wide, the receiver's input): each
+/// saturated to `in_bits` and shifted left by `in_shift` into the word, then transformed by
+/// [`fft64_fixed`]. The receiver's own transform of a window; `fft64`'s G3 reference.
+pub fn fft64_window_fixed(window: &[IQ], fx: &FixedOfdmConfig) -> Option<[IQ; FFT_SIZE]> {
+    if !fx.is_valid() {
+        return None;
+    }
+    window_fft(window, fx, &tables(fx)?)
+}
+
 /// The 64-point forward FFT of 64 samples already in the W-bit word: radix 2, decimation in
 /// time, every butterfly output narrowed to W bits (half to even, saturating), the stages of
 /// [`FixedOfdmConfig::fft_halve`] halved. `None` for another length or unusable widths.
