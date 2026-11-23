@@ -1345,3 +1345,18 @@ shows. `rxper stream`, `rxagc` and their reports are older than the window.
 **Open**
 - The full G2 grid and the `stream` and `rxagc` reports with the window of 96.
 - The window's loss on the longest frame and at 48 Mb/s.
+
+## 2026-11-23 · decision · the order of ADR 0010's next steps, and when the reports are rerun
+
+Asked of the founder at the start of the session, each on its own, with a recommendation:
+1. **The Viterbi decoder's RTL and its run through the open flow first, then the streaming
+   data path `RxDataFixed` (6.1b) and its schedule (6.1c), one after the other** (ADR 0010
+   allowed them side by side). The founder: first the one, then the other, as recommended:
+   the decoder's area and timing can still change decision 4. The RTL's record is
+   `viterbi.md` (2026-11-23).
+2. **`rxper stream` and `rxagc` are rerun with the window of 96 when the streaming data
+   path's model exists**, not now (recommended): the stream's reports will then be made
+   through `RxDataFixed` anyway. Until then `rx_ofdm_stream*.txt` and the `rxagc` reports
+   stay as measured, with the whole-block traceback.
+   The full G2 grid (`rxper fixed 2000`) with the window is running on the build server
+   (started 2026-11-23); its entry follows when it is in.

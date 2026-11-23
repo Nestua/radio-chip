@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch search decide front dc_estimate handoff
+VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search decide front dc_estimate handoff
 # `cordic_arb` replays the CORDIC's vectors; `handoff_forced` holds the hand-off to itself.
 BLOCKS    := ram cordic_arb handoff_forced $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
@@ -25,6 +25,7 @@ GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
 TOP_ram       := ram_bank
 TOP_scrambler := scrambler
 TOP_conv_encoder := conv_encoder
+TOP_viterbi   := viterbi
 TOP_round_sat := round_sat_bank
 TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
@@ -41,6 +42,7 @@ TOP_handoff_forced := handoff_alone
 SRC_ram       := rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv tb/ram_bank.sv
 SRC_scrambler := rtl/scrambler.sv
 SRC_conv_encoder := rtl/conv_encoder.sv
+SRC_viterbi   := rtl/viterbi.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
 SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
 SRC_cordic    := $(GEN_RTL) rtl/cordic.sv
@@ -89,6 +91,14 @@ conv_encoder: vectors/conv_encoder.txt
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/conv_encoder --top-module conv_encoder \
 		$(SRC_conv_encoder) tb/tb_conv_encoder.cpp -o sim_conv_encoder
 	./obj_dir/conv_encoder/sim_conv_encoder vectors/conv_encoder.txt
+
+# The decoder at one trellis step a clock, against decode_windowed: every bit in its cycle,
+# idle cycles inside blocks, blocks back to back, resets with a block in flight.
+viterbi: vectors/viterbi.txt
+	rm -rf obj_dir/viterbi && mkdir -p obj_dir/viterbi
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/viterbi --top-module viterbi \
+		$(SRC_viterbi) tb/tb_viterbi.cpp -o sim_viterbi
+	./obj_dir/viterbi/sim_viterbi vectors/viterbi.txt +verilator+rand+reset+2
 
 round_sat: vectors/round_sat.txt
 	rm -rf obj_dir/round_sat && mkdir -p obj_dir/round_sat

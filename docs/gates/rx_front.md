@@ -4478,3 +4478,18 @@ clock or in a tick's cycle, R below 8, D other than 4, synthesis, mutants of
 - `det_a` serial after R0-08c, then the front with its hand-off through timing as one
   block, and the open ASIC flow on it (area against ADR 0008's 2.5 mm²).
 - The enable of the correlators' arithmetic while no search is open (power).
+
+## 2026-11-23 · decision · the search energy's upper bits: a bench of `rx_search` alone
+
+Open since part d step 2 (#65, "*energy keeps 32 bits*: a gap of the gate"): the chain
+cannot drive the search's energy above 32 of its 44 bits (38 at most at W = 16 by the
+correlator's largest output), so the upper 12 bits and the comparison at full width are
+tested by no gate. Three ways were put to the founder: a testbench of `rx_search` alone,
+driven at its own inputs past what the chain can give (recommended); narrower widths cut
+to what the chain reaches; formal properties later (G4).
+
+**Decided (the founder, 2026-11-23): a bench of `rx_search` alone.** The 44 bits stay;
+the bench drives the correlator's input port directly (full-scale values the chain does
+not produce, energies up to the bound), with its reference from the model's search
+arithmetic, and the mutant "energy keeps 32 bits" must fail on it. Order: after the
+Viterbi decoder's RTL (R0-10, `viterbi.md`), before the data path's other blocks.
