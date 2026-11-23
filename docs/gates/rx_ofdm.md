@@ -1501,7 +1501,8 @@ What moved against the reports measured with the whole-block traceback:
   the abort mark (which comes in the hand-off's tail) is decoded and handed on, as ADR 0010's
   Context 3, rule 5, settles it; the old reader decoded only at an end mark. The column now
   counts the streams aborted before the data path had finished.
-- The hold, the acquisitions and the stopped streams are unchanged in every cell.
+- The acquisitions declared, the streams stopped on a failed SIGNAL and the frames with a
+  gain change (the cell's other three numbers) are unchanged in every cell.
 
 The founder's decisions that rest on these reports (decision 2's amendments: the hold, the
 clip release, the release by rate) keep their margins: the cells they were taken on move by
