@@ -241,13 +241,14 @@ pub struct FixedChannel {
 }
 
 /// The ROMs and derived constants of one configuration.
-struct Tables {
+#[derive(Debug, Clone)]
+pub(crate) struct Tables {
     twiddle: [IQ; FFT_SIZE / 2],
     nco: Vec<IQ>,
     cordic: Vec<i64>,
 }
 
-fn tables(fx: &FixedOfdmConfig) -> Option<Tables> {
+pub(crate) fn tables(fx: &FixedOfdmConfig) -> Option<Tables> {
     fx.is_valid().then_some(())?;
     Some(Tables {
         twiddle: twiddles(fx)?,
@@ -279,7 +280,7 @@ pub fn estimate_channel_fixed(ltf: &[IQ], fx: &FixedOfdmConfig) -> Option<FixedC
     channel_with(ltf, fx, &tables(fx)?)
 }
 
-fn channel_with(ltf: &[IQ], fx: &FixedOfdmConfig, t: &Tables) -> Option<FixedChannel> {
+pub(crate) fn channel_with(ltf: &[IQ], fx: &FixedOfdmConfig, t: &Tables) -> Option<FixedChannel> {
     let t1 = window_fft(ltf.get(..FFT_SIZE)?, fx, t)?;
     let t2 = window_fft(ltf.get(FFT_SIZE..2 * FFT_SIZE)?, fx, t)?;
     let mut hs = [(0i64, 0i64); FFT_SIZE];
@@ -738,7 +739,7 @@ pub fn symbol_soft_fixed(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn symbol_with(
+pub(crate) fn symbol_with(
     window: &[IQ],
     ch: &FixedChannel,
     polarity_index: usize,

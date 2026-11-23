@@ -143,6 +143,189 @@ struct Trellis {
 
 const UNREACHABLE: i64 = i64::MIN / 4;
 
+/// Branch outputs as ±1 signs: c = 0 → +1, c = 1 → −1, so the metric is Σ s·(1 − 2c).
+type Signs = [[(i64, i64); 2]; STATES];
+
+fn sign_table() -> Signs {
+    let mut sign = [[(0i64, 0i64); 2]; STATES];
+    for (s, row) in sign.iter_mut().enumerate() {
+        for (u, out) in row.iter_mut().enumerate() {
+            let (a, b) = branch_output(s, u);
+            *out = (1 - 2 * a, 1 - 2 * b);
+        }
+    }
+    sign
+}
+
+/// The metrics before the first step: the encoder starts in state 0.
+fn start_metrics() -> [i64; STATES] {
+    let mut metric = [UNREACHABLE; STATES];
+    metric[0] = 0;
+    metric
+}
+
+/// What one trellis step leaves besides the new metrics.
+struct Step {
+    /// The dropped (oldest) bit of the predecessor chosen for each state.
+    survivor: [u8; STATES],
+    /// The best state after the step (ties: lowest index).
+    best: usize,
+    /// Best minus worst metric after the step.
+    spread: i64,
+}
+
+/// One add-compare-select step on a rate-1/2 pair of soft values: the decoder's arithmetic,
+/// shared by the block decoders and [`WindowedViterbi`].
+fn acs(metric: &mut [i64; STATES], sign: &Signs, pair: &[i32]) -> Step {
+    let sa = i64::from(pair.first().copied().unwrap_or(0));
+    let sb = i64::from(pair.get(1).copied().unwrap_or(0));
+    let mut next = [UNREACHABLE; STATES];
+    let mut survivor = [0u8; STATES];
+    let (mut best_s, mut best_m, mut lo) = (0usize, i64::MIN, i64::MAX);
+    for (s, slot) in next.iter_mut().enumerate() {
+        let u = s >> 5;
+        // Predecessors: (s << 1) & 63 with the dropped bit 0 or 1.
+        let p0 = (s << 1) & (STATES - 1);
+        let p1 = p0 | 1;
+        let m = |p: usize| {
+            let (ca, cb) = sign[p][u];
+            metric[p].saturating_add(sa * ca + sb * cb)
+        };
+        let (m0, m1) = (m(p0), m(p1));
+        // Ties keep the predecessor whose dropped bit is 0.
+        if m1 > m0 {
+            *slot = m1;
+            survivor[s] = 1;
+        } else {
+            *slot = m0;
+        }
+        // Best state (ties: lowest index) and the lowest metric, in the same pass.
+        if *slot > best_m {
+            best_m = *slot;
+            best_s = s;
+        }
+        lo = lo.min(*slot);
+    }
+    *metric = next;
+    Step {
+        survivor,
+        best: best_s,
+        spread: best_m - lo,
+    }
+}
+
+/// [`decode_windowed`] as a stream, for a block terminated in state 0 after `anchor` steps
+/// (802.11: 16 + 8·LENGTH + 6): soft values go in a whole number of puncture periods at a
+/// time (a symbol), and each bit comes out in the push that brings the trellis `depth` steps
+/// past it; the last `depth` bits before the anchor come out in the push that reaches it,
+/// traced back from state 0. Its bits are those of `decode_windowed` up to the anchor, bit
+/// for bit (`tests/viterbi_stream.rs`); the pad after the anchor is not decoded. The model of
+/// the hardware decoder in the streaming data path (ADR 0010, decisions 4 and 6.1b).
+#[derive(Debug, Clone)]
+pub struct WindowedViterbi {
+    rate: CodeRate,
+    /// The window, at most the anchor (a longer one decides nothing before the flush).
+    depth: usize,
+    anchor: usize,
+    sign: Signs,
+    metric: [i64; STATES],
+    /// Steps taken.
+    steps: usize,
+    /// Survivors of the last `depth` − 6 steps, by step modulo the length: a decided bit is
+    /// the top bit of the state after i + 1 steps, which is bit 0 of the state after i + 6
+    /// (each step back shifts the state), so the walk's first five steps back read nothing
+    /// that matters. The same count as the register exchange's 90 bits a survivor for a
+    /// window of 96 (ADR 0010, decision 4).
+    survivor: Vec<[u8; STATES]>,
+    /// The best state after the latest step.
+    best: usize,
+}
+
+impl WindowedViterbi {
+    /// A decoder at `rate` with a window of `depth` steps (0 is taken as 1, as
+    /// [`decode_windowed`] does) for a block terminated after `anchor` steps.
+    pub fn new(rate: CodeRate, depth: usize, anchor: usize) -> Self {
+        let depth = depth.max(1).min(anchor);
+        Self {
+            rate,
+            depth,
+            anchor,
+            sign: sign_table(),
+            metric: start_metrics(),
+            steps: 0,
+            survivor: vec![
+                [0u8; STATES];
+                depth
+                    .saturating_sub(STATES.trailing_zeros() as usize)
+                    .max(1)
+            ],
+            best: 0,
+        }
+    }
+
+    /// Whether every bit up to the anchor has come out.
+    pub fn is_done(&self) -> bool {
+        self.steps >= self.anchor
+    }
+
+    fn at(&self, t: usize) -> usize {
+        t % self.survivor.len()
+    }
+
+    /// Follows survivors back from `state` after `from` steps down to `to` steps (at most
+    /// `depth` back); returns the state after `to` steps, and pushes the bits of steps
+    /// to..from, newest first, into `bits` when given.
+    fn walk(
+        &self,
+        mut bits: Option<&mut Vec<u8>>,
+        from: usize,
+        to: usize,
+        mut state: usize,
+    ) -> usize {
+        for t in (to..from).rev() {
+            if let Some(b) = bits.as_deref_mut() {
+                b.push((state >> 5) as u8);
+            }
+            state = ((state << 1) & (STATES - 1)) | usize::from(self.survivor[self.at(t)][state]);
+        }
+        state
+    }
+
+    /// The next soft values, a whole number of puncture periods at `rate`; returns the bits
+    /// decided by them, in order. Values after the anchor are taken and decide nothing.
+    pub fn push(&mut self, soft: &[i32]) -> Result<Vec<u8>, ViterbiError> {
+        let full = depuncture(soft, self.rate)?;
+        if !full.len().is_multiple_of(2) {
+            return Err(ViterbiError::OddLength(full.len()));
+        }
+        let mut out = Vec::new();
+        for pair in full.chunks(2) {
+            if self.is_done() {
+                break;
+            }
+            let t = self.steps;
+            let s = acs(&mut self.metric, &self.sign, pair);
+            let k = self.at(t);
+            self.survivor[k] = s.survivor;
+            self.best = s.best;
+            self.steps += 1;
+            let d = self.depth;
+            if self.steps == self.anchor {
+                // The flush: the last d bits from state 0 at the anchor, oldest first.
+                let mut tail = Vec::with_capacity(d);
+                self.walk(Some(&mut tail), self.anchor, self.anchor - d, 0);
+                out.extend(tail.iter().rev());
+            } else if self.steps >= d && self.steps - d < self.anchor - d {
+                // Bit i = steps − d, decided from the best state after i + d steps.
+                let i = self.steps - d;
+                let state = self.walk(None, i + d, i + 1, self.best);
+                out.push((state >> 5) as u8);
+            }
+        }
+        Ok(out)
+    }
+}
+
 fn forward(
     soft: &[i32],
     rate: CodeRate,
@@ -159,53 +342,18 @@ fn forward(
         }
     }
 
-    // Branch outputs as ±1 signs: c = 0 → +1, c = 1 → −1, so the metric is Σ s·(1 − 2c).
-    let mut sign = [[(0i64, 0i64); 2]; STATES];
-    for (s, row) in sign.iter_mut().enumerate() {
-        for (u, out) in row.iter_mut().enumerate() {
-            let (a, b) = branch_output(s, u);
-            *out = (1 - 2 * a, 1 - 2 * b);
-        }
-    }
-
-    let mut metric = [UNREACHABLE; STATES];
-    metric[0] = 0;
+    let sign = sign_table();
+    let mut metric = start_metrics();
     let mut survivor = vec![[0u8; STATES]; len];
     let mut best = vec![0usize; len];
     let mut max_spread = 0;
     for (t, pair) in full.chunks(2).enumerate() {
-        let (sa, sb) = (i64::from(pair[0]), i64::from(pair[1]));
-        let mut next = [UNREACHABLE; STATES];
-        let (mut best_s, mut best_m, mut lo) = (0usize, i64::MIN, i64::MAX);
-        for (s, slot) in next.iter_mut().enumerate() {
-            let u = s >> 5;
-            // Predecessors: (s << 1) & 63 with the dropped bit 0 or 1.
-            let p0 = (s << 1) & (STATES - 1);
-            let p1 = p0 | 1;
-            let m = |p: usize| {
-                let (ca, cb) = sign[p][u];
-                metric[p].saturating_add(sa * ca + sb * cb)
-            };
-            let (m0, m1) = (m(p0), m(p1));
-            // Ties keep the predecessor whose dropped bit is 0.
-            if m1 > m0 {
-                *slot = m1;
-                survivor[t][s] = 1;
-            } else {
-                *slot = m0;
-            }
-            // Best state (ties: lowest index) and the lowest metric, in the same pass.
-            if *slot > best_m {
-                best_m = *slot;
-                best_s = s;
-            }
-            lo = lo.min(*slot);
-        }
-        metric = next;
-        best[t] = best_s;
+        let s = acs(&mut metric, &sign, pair);
+        survivor[t] = s.survivor;
+        best[t] = s.best;
         if t >= STATES.trailing_zeros() as usize {
             // Every state is reachable after K − 1 steps; before that the spread is not defined.
-            max_spread = max_spread.max(best_m - lo);
+            max_spread = max_spread.max(s.spread);
         }
     }
     Ok(Trellis {
