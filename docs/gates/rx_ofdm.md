@@ -1426,7 +1426,7 @@ of depth − 7 fails it.
    (208 + 80·N_SYM, by the rate and length, not by the tracker); the top level adds the
    stream's place.
 
-**Evidence** (commit 3713323; `cargo test -p radio-phy --test viterbi_stream --test
+**Evidence** (commit 99f21a8; `cargo test -p radio-phy --test viterbi_stream --test
 g2_rx_data_stream`; the workspace's tests green; `make -C hw vectors`: no file changed, so
 the shared `acs` and the factored seed search change no bit).
 - `viterbi_stream.rs`: 252 random blocks (three code rates; depths 1, 2, 7, 64, 96, 300 and
@@ -1471,3 +1471,38 @@ the shared `acs` and the factored seed search change no bit).
 
 **Next.** `rxper stream` and `rxagc` rerun with `RxDataFixed` as the reader (the decision of
 2026-11-23 above); then 6.1c, the schedule in clocks.
+
+## 2026-11-23 · reruns · `rxper stream` and `rxagc` through `RxDataFixed`, window 96
+
+The decision above ("rerun when the streaming data path's model exists") carried out: both
+tools now read the hand-off's stream with `RxDataFixed` (its `Verdict` event carries SIGNAL's
+check, which `rxagc`'s columns read; `g2_rx_data_stream` compares it). Before the long runs,
+the old tools (buffer reader, `decode_ppdu_fixed`) and the new ones were run side by side at
+10 to 20 frames (`rxper stream 20`, `rxagc loop 10`, `rxagc per 20`): reports equal byte for
+byte but for the header's lines that name the reader.
+
+Command: `rxper stream 2000`, `rxagc loop|release|level|dc 2000` on the build server (branch
+`r0-09-rxdata` at 34bd75e, the tree of d658771; docker `rust:1-slim`). Reports replaced:
+`reports/rx_front_stream.txt`, `rx_front_agc_loop.txt`, `rx_front_agc_release.txt`,
+`rx_ofdm_agc_level.txt`, `rx_ofdm_agc_dc.txt`. **`rxagc per 2000` is still running**
+(130 rows); `rx_ofdm_agc_per.txt` follows in its own commit.
+
+What moved against the reports measured with the whole-block traceback:
+- **Frames lost: the window's cost, where 6.1a put it.** `level`, AWGN 54 Mb/s: the integer
+  columns lose 8 to 30 more of 2000 per row (2 to 3 %), the `stream` column 10 to 15 more; the
+  float columns, which decode over the whole block, repeat to the frame. Elsewhere in `level`
+  and `dc`: 0 to 2 frames a cell. `stream`: whole/slice/stream 191/189/189 → 195/194/194 (AWGN
+  54 Mb/s 20 dB), 181/179/179 → 186/185/185 (TGn D 18 Mb/s), 221/217/217 → 224/219/219 and
+  143/145/145 → 144/148/148 (TGn D, E 54 Mb/s); the stream still loses no frame the slice
+  decodes (s/s 0 / 0 in every row). `loop`, `release`: 0 to 2 frames a cell (1727 → 1729 in the
+  worst; one cell of `release` 2 → 3).
+- **Streams ended by a new declaration** (`loop`, `release`, the third number of a cell): 0 to
+  9 fewer per cell. Not the window: with `RxDataFixed` a frame whose last window is in before
+  the abort mark (which comes in the hand-off's tail) is decoded and handed on, as ADR 0010's
+  Context 3, rule 5, settles it; the old reader decoded only at an end mark. The column now
+  counts the streams aborted before the data path had finished.
+- The hold, the acquisitions and the stopped streams are unchanged in every cell.
+
+The founder's decisions that rest on these reports (decision 2's amendments: the hold, the
+clip release, the release by rate) keep their margins: the cells they were taken on move by
+at most 2 frames of 2000.
