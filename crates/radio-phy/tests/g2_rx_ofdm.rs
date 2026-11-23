@@ -188,6 +188,8 @@ fn wide() -> FixedOfdmConfig {
         coef_frac: 24,
         var_frac: 16,
         rot_round: false,
+        // As the float receiver decodes: the whole block.
+        traceback: 0,
         front: FixedRxConfig {
             cordic_iters: 24,
             cordic_bits: 30,
@@ -1518,4 +1520,97 @@ fn the_start_from_the_cfo_word_is_the_start_from_the_offset() {
     // The bound is not slack: some draw comes within a third of it.
     assert!(closest > 0.67, "{closest}");
     println!("largest difference over its bound: {closest:.2}");
+}
+
+/// The PSDU from decoded DATA bits, as the receiver makes it: the seed from the first seven
+/// SERVICE bits (IEEE 802.11-2020 §17.3.5.5), the descrambling, the octets. `None` when no
+/// seed gives seven zeros.
+fn psdu_of(bits: &[u8], length: usize) -> Option<Vec<u8>> {
+    use radio_phy::scrambler::Scrambler;
+    let seed = (1u8..128).find(|&s| {
+        Scrambler::new(s)
+            .unwrap()
+            .scramble(&bits[..7])
+            .iter()
+            .all(|b| *b == 0)
+    })?;
+    let clear = Scrambler::new(seed).unwrap().scramble(bits);
+    Some(
+        clear[16..16 + 8 * length]
+            .chunks(8)
+            .map(|c| c.iter().rev().fold(0u8, |a, &b| (a << 1) | b))
+            .collect(),
+    )
+}
+
+#[test]
+fn the_data_is_decoded_with_the_hardwares_traceback_window() {
+    use radio_phy::ppdu::data_symbols;
+    use radio_phy::viterbi::{decode, decode_windowed, Termination, TRACEBACK_DEPTH};
+    // ADR 0010, decision 6.1a: the receiver decodes as the hardware will, each bit decided
+    // 96 steps later from the best state then (`viterbi::decode_windowed`); a window of 0 is
+    // the whole block's traceback, which every figure before 2026-11-23 was measured with.
+    let fx = FixedOfdmConfig::default();
+    assert_eq!((fx.traceback, TRACEBACK_DEPTH), (96, 96));
+    let whole = FixedOfdmConfig { traceback: 0, ..fx };
+    let long = FixedOfdmConfig {
+        traceback: 1 << 20,
+        ..fx
+    };
+    let cfg = RxOfdmConfig::default();
+    // 54 Mb/s (rate 3/4, where the window costs most) near the edge: some frames decode,
+    // some do not, and in some the window decides a bit otherwise than the whole block.
+    let (rate, length) = (Rate::R54, 300);
+    let symbols = data_symbols(rate, length);
+    let tail = 16 + 8 * length + 6;
+    let mut rng = Rng::new(0x0064);
+    let (mut differ, mut same, mut right, mut wrong) = (0, 0, 0, 0);
+    for k in 0..60 {
+        let data = psdu(length, &mut rng);
+        let mut x = frame(&data, rate);
+        x.extend(vec![(0.0, 0.0); 8]);
+        let x = at_level(&awgn(&x, 17.5, mean_power(&x), &mut rng), -12.0);
+        let z = to_fixed(&x, 2048.0, 12);
+        let Ok(windowed) = decode_ppdu_fixed(&z, 192 - 6, &cfg, &fx, unknown(&fx)) else {
+            continue;
+        };
+        if windowed.signal.rate != rate || windowed.signal.length != length {
+            continue;
+        }
+        // The soft values of the data symbols, as the receiver's own steps give them (SIGNAL's
+        // 48 and each symbol's common phase taken out of `all_soft`'s list).
+        let all = all_soft(&z, 192 - 6, rate, &cfg, &fx, unknown(&fx));
+        let per = 48 * rate.modulation().bits_per_subcarrier() + 1;
+        let soft: Vec<i32> = all[49..]
+            .chunks(per)
+            .take(symbols)
+            .flat_map(|c| c[..per - 1].iter().map(|&v| v as i32))
+            .collect();
+        assert_eq!(soft.len(), symbols * (per - 1), "frame {k}");
+        let end = Termination::ZeroAfter(tail);
+        let by_window = decode_windowed(&soft, rate.code_rate(), end, 96).unwrap();
+        let by_block = decode(&soft, rate.code_rate(), end).unwrap();
+        assert_eq!(
+            Some(&windowed.psdu),
+            psdu_of(&by_window, length).as_ref(),
+            "frame {k}"
+        );
+        let block = decode_ppdu_fixed(&z, 192 - 6, &cfg, &whole, unknown(&whole)).unwrap();
+        assert_eq!(
+            Some(&block.psdu),
+            psdu_of(&by_block, length).as_ref(),
+            "frame {k}"
+        );
+        // A window longer than the frame is the whole block.
+        let longer = decode_ppdu_fixed(&z, 192 - 6, &cfg, &long, unknown(&long)).unwrap();
+        assert_eq!(longer.psdu, block.psdu, "frame {k}");
+        differ += usize::from(windowed.psdu != block.psdu);
+        same += usize::from(windowed.psdu == block.psdu);
+        right += usize::from(windowed.psdu == data);
+        wrong += usize::from(windowed.psdu != data);
+    }
+    assert!(
+        differ >= 2 && same >= 10 && right >= 5 && wrong >= 5,
+        "{differ} {same} {right} {wrong}"
+    );
 }
