@@ -15,7 +15,7 @@ use radio_phy::channel::{
     add_tone, awgn, fractional_delay, frequency_offset, gain_step, mean_power, tgn_taps, Doppler,
     Multipath, Rng, TgnModel,
 };
-use radio_phy::convolutional::ConvolutionalEncoder;
+use radio_phy::convolutional::{CodeRate, ConvolutionalEncoder, G0, G1};
 use radio_phy::fixed::{requantize, Overflow, QFormat, Rounding};
 use radio_phy::mapper::map_bits;
 use radio_phy::modulation::Modulation;
@@ -34,6 +34,9 @@ use radio_phy::rx_front_fixed::{
 };
 use radio_phy::rx_handoff::{dc_offset_of_sums, run_handoff, HandoffReader, HandoffTiming};
 use radio_phy::scrambler::Scrambler;
+use radio_phy::viterbi::{
+    decode_windowed, metric_spread, Termination, SOFT_CLIP, SOFT_MAX, TRACEBACK_DEPTH,
+};
 
 /// Deterministic xorshift32 so vectors are reproducible without a `rand` dependency.
 struct XorShift32(u32);
@@ -2167,6 +2170,272 @@ fn conv_encoder_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// Which of the 32 first-level pairs (2j, 2j + 1) of the hardware's best-state tree decide an
+/// output through a tie in a rate-1/2 soft block decoded with window `depth`: bit j is set
+/// when, at some step whose decision is output (depth − 1 ≤ t < steps − 1), state 2j is the
+/// lowest best state, 2j + 1 has the same metric, and their decided bits differ. Only picks
+/// vectors; the expected bits are `decode_windowed`'s. Metrics, ties and survivors as in
+/// `radio_phy::viterbi` (start in state 0, a tie keeps the dropped bit 0).
+fn tree_pair_ties(soft: &[i32], depth: usize) -> u32 {
+    const S: usize = 64;
+    let steps = soft.len() / 2;
+    let parity = |w: usize, g: u8| i64::from(((w as u8) & g).count_ones() & 1);
+    let mut metric = [i64::MIN / 4; S];
+    metric[0] = 0;
+    let mut survivor: Vec<[u8; S]> = Vec::with_capacity(steps);
+    let mut pairs = 0u32;
+    for t in 0..steps {
+        let (sa, sb) = (i64::from(soft[2 * t]), i64::from(soft[2 * t + 1]));
+        let mut next = [0i64; S];
+        let mut surv = [0u8; S];
+        for (s, slot) in next.iter_mut().enumerate() {
+            let u = s >> 5;
+            let cand = |p: usize| {
+                let w = (u << 6) | p;
+                metric[p] + sa * (1 - 2 * parity(w, G0)) + sb * (1 - 2 * parity(w, G1))
+            };
+            let p0 = (s << 1) & (S - 1);
+            let (m0, m1) = (cand(p0), cand(p0 | 1));
+            if m1 > m0 {
+                *slot = m1;
+                surv[s] = 1;
+            } else {
+                *slot = m0;
+            }
+        }
+        metric = next;
+        survivor.push(surv);
+        if t + 1 < depth || t + 1 >= steps {
+            continue;
+        }
+        let best = metric.iter().copied().max().unwrap_or(0);
+        let Some(low) = metric.iter().position(|&m| m == best) else {
+            continue;
+        };
+        if low % 2 == 1 || metric[low + 1] != best {
+            continue;
+        }
+        let decided = |mut state: usize| {
+            for back in survivor[t + 2 - depth..=t].iter().rev() {
+                state = ((state << 1) & (S - 1)) | usize::from(back[state]);
+            }
+            state >> 5
+        };
+        if decided(low) != decided(low + 1) {
+            pairs |= 1 << (low / 2);
+        }
+    }
+    pairs
+}
+
+/// Vectors for `hw/rtl/viterbi.sv` (gate G3: `make -C hw viterbi`): blocks of depunctured
+/// soft pairs (A, B) with the bits `viterbi::decode_windowed` gives for them, window
+/// [`TRACEBACK_DEPTH`], the encoder in state 0 after the block's last step
+/// (`Termination::ZeroAfter(steps)`, as the data path feeds the decoder up to the tail's end).
+/// A line is `<soft> <bits>`: the soft values as two hex digits each (two's complement, A then
+/// B per step) and one bit per step.
+///
+/// Blocks: every length near the window and the forced start (1 to 8, 23 to 25, 90 to 98,
+/// 189 to 193), codewords of random bits in noise at rates 1/2, 2/3 and 3/4 (the stolen
+/// values erased), some with the tail and some ending in another state, SIGNAL's 24 steps,
+/// all erasures (every comparison a tie), every value at a rail, uniform random values (no
+/// codeword: wrong decisions and a best state that jumps), noise so strong that most
+/// decisions are wrong, one block of 12 022 steps (1500 octets), 52 short blocks of values
+/// from three or five small levels (ties in the best-state tree) or uniform, blocks found by
+/// search until each of the tree's 32 first-level pairs has a tie that decides an output
+/// ([`tree_pair_ties`]), and four found by search whose last step's own decision differs from
+/// the flush's first bit. The tool refuses to write a file whose largest path-metric spread is
+/// not above 2047 (so that 12 bits of metric would be wrong somewhere), without any of those
+/// searched blocks, or without a block shorter than the window, one of exactly the window and
+/// one longer than twice the window.
+fn viterbi_vectors(out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "# rvec viterbi — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# radio_phy::viterbi::decode_windowed, window {TRACEBACK_DEPTH}, ZeroAfter(steps); soft ±{SOFT_MAX}, 0 = erasure."
+    )?;
+    writeln!(
+        out,
+        "# <soft: 4 hex digits a step, A then B, two's complement> <decoded bits, one a step>"
+    )?;
+    let mut rng = Rng::new(0x7E7B_0001);
+    let quantise = |y: f64| -> i32 {
+        let v = (y * f64::from(SOFT_MAX) / SOFT_CLIP).round();
+        v.clamp(-f64::from(SOFT_MAX), f64::from(SOFT_MAX)) as i32
+    };
+    // A codeword of `bits` through white noise of deviation `sigma` (signal amplitude 1),
+    // quantised as the demapper's contract says, with the rate's stolen values erased.
+    let noisy = |bits: &[u8], sigma: f64, rate: CodeRate, rng: &mut Rng| -> Vec<i32> {
+        let mut enc = ConvolutionalEncoder::new();
+        let pattern = rate.pattern();
+        let mut soft = Vec::with_capacity(2 * bits.len());
+        for (k, &b) in bits.iter().enumerate() {
+            let (a, c) = enc.encode_bit(b);
+            for (j, x) in [a, c].into_iter().enumerate() {
+                let kept = pattern[(2 * k + j) % pattern.len()] == 1;
+                let y = 1.0 - 2.0 * f64::from(x) + sigma * rng.gaussian();
+                soft.push(if kept { quantise(y) } else { 0 });
+            }
+        }
+        soft
+    };
+    let message = |n: usize, tail: bool, rng: &mut Rng| -> Vec<u8> {
+        (0..n)
+            .map(|i| {
+                if tail && i + 6 >= n {
+                    0
+                } else {
+                    (rng.next_u64() & 1) as u8
+                }
+            })
+            .collect()
+    };
+    let max = SOFT_MAX;
+    let mut blocks: Vec<Vec<i32>> = Vec::new();
+    for n in (1..=8).chain(23..=25).chain(90..=98).chain(189..=193) {
+        let bits = message(n, n % 2 == 0, &mut rng);
+        blocks.push(noisy(&bits, 0.8, CodeRate::R1_2, &mut rng));
+    }
+    for (rate, sigma) in [
+        (CodeRate::R1_2, 0.6),
+        (CodeRate::R1_2, 1.0),
+        (CodeRate::R2_3, 0.5),
+        (CodeRate::R2_3, 0.8),
+        (CodeRate::R3_4, 0.4),
+        (CodeRate::R3_4, 0.7),
+    ] {
+        for n in [150, 400, 1000] {
+            let bits = message(n, true, &mut rng);
+            blocks.push(noisy(&bits, sigma, rate, &mut rng));
+        }
+    }
+    for sigma in [0.0, 0.5, 1.0, 2.0] {
+        let bits = message(24, true, &mut rng);
+        blocks.push(noisy(&bits, sigma, CodeRate::R1_2, &mut rng));
+    }
+    blocks.push(vec![0; 2 * 60]);
+    blocks.push(vec![0; 2 * 200]);
+    blocks.push(vec![max; 2 * 200]);
+    blocks.push(vec![-max; 2 * 200]);
+    let bits = message(300, true, &mut rng);
+    blocks.push(noisy(&bits, 0.0, CodeRate::R1_2, &mut rng));
+    for n in [300, 2000] {
+        let uniform = (0..2 * n)
+            .map(|_| (rng.next_u64() % (2 * max as u64 + 1)) as i32 - max)
+            .collect();
+        blocks.push(uniform);
+        let rails = (0..2 * n)
+            .map(|_| if rng.next_u64() & 1 == 1 { max } else { -max })
+            .collect();
+        blocks.push(rails);
+    }
+    for rate in [CodeRate::R1_2, CodeRate::R3_4] {
+        let bits = message(1000, true, &mut rng);
+        blocks.push(noisy(&bits, 1.6, rate, &mut rng));
+    }
+    let bits = message(16 + 8 * 1500 + 6, true, &mut rng);
+    blocks.push(noisy(&bits, 0.55, CodeRate::R3_4, &mut rng));
+    // Ties in the best-state tree (the independent review found three tie mutants of the
+    // tree that the blocks above miss): short blocks of values from three levels, where equal
+    // metrics are common, and of uniform values, at lengths around and above the window.
+    let pick =
+        |levels: &[i32], rng: &mut Rng| levels[(rng.next_u64() % levels.len() as u64) as usize];
+    for (k, n) in (97..=200).step_by(4).enumerate() {
+        let levels: &[i32] = match k % 3 {
+            0 => &[-1, 0, 1],
+            1 => &[-max, 0, max],
+            _ => &[-2, -1, 0, 1, 2],
+        };
+        blocks.push((0..2 * n).map(|_| pick(levels, &mut rng)).collect());
+        let uniform = (0..2 * n)
+            .map(|_| (rng.next_u64() % (2 * max as u64 + 1)) as i32 - max)
+            .collect();
+        blocks.push(uniform);
+    }
+    // For each of the 32 pairs (2j, 2j + 1) that the tree's first level compares, a block with
+    // a decision where 2j is the lowest best state and 2j + 1 is as good with another decided
+    // bit: a tie taken the wrong way in that one pair changes an output (the review's mutants
+    // of one pair or one group of four lived through the blocks above).
+    let mut covered = 0u32;
+    for _ in 0..200_000 {
+        if covered == u32::MAX {
+            break;
+        }
+        let n = 97 + (rng.next_u64() % 104) as usize;
+        let levels: &[i32] = match rng.next_u64() % 3 {
+            0 => &[-1, 0, 1],
+            1 => &[-max, 0, max],
+            _ => &[-2, -1, 0, 1, 2],
+        };
+        let soft: Vec<i32> = (0..2 * n).map(|_| pick(levels, &mut rng)).collect();
+        let pairs = tree_pair_ties(&soft, TRACEBACK_DEPTH);
+        if pairs & !covered != 0 {
+            covered |= pairs;
+            blocks.push(soft);
+        }
+    }
+    if covered != u32::MAX {
+        return Err(io::Error::other(format!(
+            "viterbi vectors: tree pairs without a deciding tie: {:#010x}",
+            !covered
+        )));
+    }
+    // Blocks whose last step's own decision (the best state's oldest bit) differs from the
+    // flush's first bit (state 0's): the flush must take that output slot. Searched among
+    // short blocks of strong noise that do not end in the tail.
+    let mut found = 0;
+    for _ in 0..20_000 {
+        if found == 4 {
+            break;
+        }
+        let n = 100 + (rng.next_u64() % 60) as usize;
+        let bits = message(n, false, &mut rng);
+        let soft = noisy(&bits, 1.4, CodeRate::R1_2, &mut rng);
+        let depth = TRACEBACK_DEPTH;
+        let free = decode_windowed(&soft, CodeRate::R1_2, Termination::Free, depth)
+            .map_err(io::Error::other)?;
+        let zero = decode_windowed(&soft, CodeRate::R1_2, Termination::ZeroAfter(n), depth)
+            .map_err(io::Error::other)?;
+        if free[n - depth] != zero[n - depth] {
+            blocks.push(soft);
+            found += 1;
+        }
+    }
+    if found < 4 {
+        return Err(io::Error::other(format!(
+            "viterbi vectors: only {found} blocks whose last decision differs from the flush"
+        )));
+    }
+
+    let (mut widest, mut short, mut exact, mut long) = (0i64, false, false, false);
+    for soft in &blocks {
+        let steps = soft.len() / 2;
+        let bits = decode_windowed(
+            soft,
+            CodeRate::R1_2,
+            Termination::ZeroAfter(steps),
+            TRACEBACK_DEPTH,
+        )
+        .map_err(io::Error::other)?;
+        widest = widest.max(metric_spread(soft, CodeRate::R1_2).map_err(io::Error::other)?);
+        short |= steps < TRACEBACK_DEPTH;
+        exact |= steps == TRACEBACK_DEPTH;
+        long |= steps > 2 * TRACEBACK_DEPTH;
+        let hex: String = soft.iter().map(|&v| format!("{:02x}", v as u8)).collect();
+        writeln!(out, "{hex} {}", bits_to_string(&bits))?;
+    }
+    if widest <= 2047 || !(short && exact && long) {
+        return Err(io::Error::other(format!(
+            "viterbi vectors miss: spread {widest} (needs > 2047), short {short}, window {exact}, long {long}"
+        )));
+    }
+    writeln!(out, "# largest path-metric spread: {widest}")?;
+    Ok(())
+}
+
 /// Vectors for the offset's arithmetic (gate G3: `make -C hw dc_estimate`):
 /// `hw/rtl/dc_estimate.sv` against `rx_handoff::dc_offset_of_sums`. A line is
 /// `<cfo word> <Σ₁ re> <Σ₁ im> <Σ₂ re> <Σ₂ im> <offset re> <offset im>`. The sums: of
@@ -3351,9 +3620,10 @@ fn main() -> ExitCode {
         "front" => front_vectors(&mut out),
         "handoff" => handoff_vectors(&mut out),
         "dc_estimate" => dc_estimate_vectors(&mut out),
+        "viterbi" => viterbi_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

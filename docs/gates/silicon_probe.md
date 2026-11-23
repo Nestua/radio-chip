@@ -116,3 +116,42 @@ was running a simulation on every core at the time; no gate reruns it.
   been tried.
 - One corner, default settings, no sign-off, as before.
 
+## 2026-11-23 · probe · the Viterbi decoder (register exchange, a step a clock)
+
+**What was run.** `hw/rtl/viterbi.sv` (R0-10, `viterbi.md` of this date; ADR 0010
+decision 4 asked for this run before the blocks around the decoder) through the same flow,
+image (1671deadac53), platform, corner, clock (6.25 ns) and settings as above
+(`tools/syn/orfs_block.sh`, 40 % utilisation at the floorplan). By hand on the build server
+(`/data/radio-chip/asic/viterbi`), beside a simulation on every core; about 40 minutes. The
+sources were the branch's RTL one step before the version committed: since then the step
+index's reset was removed and state 0's metric reset added (7 and 13 flip-flops' reset
+logic); not rerun for that.
+
+| `viterbi` | Cells | Flip-flops | Area after synthesis | Design area, routed | Worst slack at 6.25 ns | Power (flow's estimate) |
+|---|---|---|---|---|---|---|
+| register exchange, window 96 | 54 432 routed (90 973 after synthesis) | 7012 | 1.43 mm² | **0.96 mm²** | **+0.35 ns** | 241 mW |
+
+**What it says**
+- **It closes 160 MHz**, by 0.35 ns. The worst path is the add-compare-select loop (from
+  a registered branch metric through a state's two sums, their comparison and the
+  selection into a metric register); the best-state tree's three stages are not near it.
+- **Area: 0.96 mm² routed, against ADR 0010's estimate of 0.5 to 0.7 mm².** Of it
+  0.34 mm² are the 7012 flip-flops (5760 survivor bits, 832 metric bits, the tree's 282,
+  the flush's 96, the rest input and control), 0.52 mm² combinational cells, 0.09 mm²
+  clock and repair buffers. The 0.6 mm² of buffers after synthesis (the survivor bits'
+  select drives 103 multiplexers a state) were mostly removed by the flow's repair. The
+  estimate counted one multiplexer per survivor bit; there are two, because the cell
+  library has no flip-flop with an enable: the survivor and metric registers hold on idle
+  cycles through a second multiplexer each (about 6600 of the 13 400 two-way
+  multiplexers after synthesis).
+- That second multiplexer is what a gated clock for the 6592 survivor and metric
+  flip-flops would remove (about 0.12 mm² by the cells' size, and their share of the
+  power on idle cycles); clock gating goes through a wrapper in `hw/rtl/lib/` (CLAUDE.md),
+  which does not exist yet. Not tried.
+- The power figure is the flow's default-activity estimate, a ranking: 54 % combinational,
+  30 % flip-flops, 17 % clock tree. Every survivor bit can toggle on every step, so this
+  block's real figure needs a switching simulation more than most.
+- The traceback memory of ADR 0010's alternative was not built; its "perhaps a third of
+  the area" is still unchecked.
+- One corner, default settings, no sign-off, as before.
+

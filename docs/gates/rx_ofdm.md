@@ -1345,3 +1345,41 @@ shows. `rxper stream`, `rxagc` and their reports are older than the window.
 **Open**
 - The full G2 grid and the `stream` and `rxagc` reports with the window of 96.
 - The window's loss on the longest frame and at 48 Mb/s.
+
+## 2026-11-23 · decision · the order of ADR 0010's next steps, and when the reports are rerun
+
+Asked of the founder at the start of the session, each on its own, with a recommendation:
+1. **The Viterbi decoder's RTL and its run through the open flow first, then the streaming
+   data path `RxDataFixed` (6.1b) and its schedule (6.1c), one after the other** (ADR 0010
+   allowed them side by side). The founder: first the one, then the other, as recommended:
+   the decoder's area and timing can still change decision 4. The RTL's record is
+   `viterbi.md` (2026-11-23).
+2. **`rxper stream` and `rxagc` are rerun with the window of 96 when the streaming data
+   path's model exists**, not now (recommended): the stream's reports will then be made
+   through `RxDataFixed` anyway. Until then `rx_ofdm_stream*.txt` and the `rxagc` reports
+   stay as measured, with the whole-block traceback.
+   The full G2 grid (`rxper fixed 2000`) with the window is running on the build server
+   (started 2026-11-23); its entry follows when it is in.
+
+## 2026-11-23 · G2 rerun · the full grid with the window of 96
+
+Command: `rxper fixed 2000` on the build server (sources of `main` at 3ae897f, the window of
+96 in `decode_ppdu_fixed`; docker `ubuntu:24.04`, about 4 h beside other work). Report:
+`reports/rx_ofdm_fixed.txt`, replacing the one measured with the whole-block traceback. The
+two float columns decode over the whole block as before and repeat the old report to the
+frame; only the integer column moved.
+
+Loss of the integer receiver against float at PER 10 %, worst cell per channel (dB):
+
+| Channel | whole block (old report) | window 96 |
+|---|---|---|
+| AWGN | +0.04 | +0.07 (54 Mb/s) |
+| TGn B | +0.03 | +0.04 (54 Mb/s) |
+| TGn D | +0.04 | +0.08 (9 Mb/s) |
+| TGn E | +0.03 | +0.07 (9 Mb/s) |
+
+The worst cell of the whole grid went from +0.04 to +0.08 dB, within the 0.2 dB budget.
+What moved is at the rates coded at 3/4 (9, 18, 36, 54 Mb/s), as the measurement of 6.1a
+said. Loss at the PER-10 % crossing, as the report's summary lines give it; one seed a
+point. The journal's last open item "the full G2 grid with the window of 96" is closed;
+`stream` and `rxagc` wait for `RxDataFixed` (the decision above).

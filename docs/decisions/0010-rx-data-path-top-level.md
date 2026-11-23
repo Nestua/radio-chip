@@ -20,6 +20,12 @@ found is at the end.
   survivor for 58 (5760 flip-flops for 3712, about 0.1 mm² of cells more with their
   multiplexers), 96 steps of latency for 64 (the last octet 0.2 µs later, the flush 96
   bits), and a traceback memory correspondingly deeper in the alternative.
+  **Confirmed the same day on the decoder's run through the open flow** (`silicon_probe.md`,
+  `viterbi.md`, 2026-11-23): 0.96 mm² routed against the 0.5 to 0.7 estimated below,
+  +0.35 ns at 160 MHz. The founder kept register exchange; a gated clock for the survivors
+  (about 0.12 mm² less, through a wrapper in `hw/rtl/lib/` yet to be written) and a
+  switching simulation for its power come later. The area table below still says 0.5 to
+  0.7: read 0.96.
 - **Decision 5:** octets and a status to the MAC; the frame check sequence is the MAC's.
 
 Decisions 1 (the blocks) and 6 (the order of work) were not asked on their own: they are
