@@ -679,6 +679,170 @@ struct Search {
     best: Option<(usize, i128)>,
 }
 
+/// The LTF search's arithmetic and control (steps 1 and 3 of [`RxFrontFixed`]): the energy
+/// metric of the correlator's outputs, the search window an event opens or extends, the
+/// running maximum and its acceptance. One copy of it, run by the front and by
+/// [`SearchAloneFixed`].
+#[derive(Debug, Clone)]
+struct LtfSearch {
+    w: usize,
+    pair: Ring<i128>,
+    energy: Ring<i128>,
+    search: Option<Search>,
+}
+
+impl LtfSearch {
+    fn new(w: usize) -> Self {
+        Self {
+            w,
+            pair: Ring::new(GI_LEN, 0),
+            energy: Ring::new(LTF_SYMBOL_LEN + GI_LEN + 1, 0),
+            search: None,
+        }
+    }
+
+    fn searching(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Step 1: a detection event at sample `n` opens a search or moves its deadline.
+    fn event(&mut self, n: usize) {
+        let deadline = n + SEARCH_OFFSET + SEARCH_LEN;
+        match &mut self.search {
+            Some(s) => s.deadline = deadline,
+            None => {
+                self.search = Some(Search {
+                    opened_by: n,
+                    first: n + SEARCH_OFFSET,
+                    deadline,
+                    best: None,
+                })
+            }
+        }
+    }
+
+    /// An acquisition closes the search.
+    fn close(&mut self) {
+        self.search = None;
+    }
+
+    /// Step 3: the correlator's output `cq` of the window that starts at position `i`. Returns
+    /// the energy completed by it and the candidate accepted, if any (only while
+    /// `decision_free`: no decision in flight).
+    fn position(
+        &mut self,
+        i: usize,
+        cq: IQ,
+        decision_free: bool,
+    ) -> (Option<i128>, Option<Accepted>) {
+        self.pair.put(i, iabs2(cq));
+        if self.w == 0 {
+            return (None, None);
+        }
+        let Some(j) = (i + 1).checked_sub(self.w) else {
+            return (None, None);
+        };
+        let e: i128 = (j..j + self.w).map(|p| self.pair.get(p)).sum();
+        self.energy.put(j, e);
+        let Some(mut s) = self.search else {
+            return (Some(e), None);
+        };
+        if j < s.first {
+            return (Some(e), None);
+        }
+        if j >= s.deadline {
+            self.search = None;
+            return (Some(e), None);
+        }
+        if s.best.is_none_or(|(_, emax)| e > emax) {
+            s.best = Some((j, e));
+        }
+        let mut accepted = None;
+        if let Some((imax, emax)) = s.best {
+            if decision_free && j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
+                accepted = Some(Accepted {
+                    imax,
+                    emax,
+                    deadline: s.deadline,
+                    opened_by: s.opened_by,
+                });
+                s.best = None;
+            }
+        }
+        self.search = if j + 1 >= s.deadline { None } else { Some(s) };
+        (Some(e), accepted)
+    }
+}
+
+/// What [`SearchAloneFixed::push`] gives for a sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchStep {
+    /// The energy completed at this sample ([`SampleTrace::energy`]).
+    pub energy: Option<i128>,
+    /// The candidate accepted at this sample ([`SampleTrace::accepted`]).
+    pub accepted: Option<Accepted>,
+    /// Whether an acquisition was applied at this sample (it closed the search).
+    pub acquired: bool,
+    /// Whether a search is open after this sample ([`RxFrontFixed::searching`]).
+    pub searching: bool,
+}
+
+/// The LTF search of [`RxFrontFixed`] alone, driven at the correlator's output: the reference
+/// of the RTL's `rx_search` on values the chain in front of it cannot produce (full-scale
+/// correlator outputs, energies up to 2^(2K+3)). The same code as the front's steps 1, 3 and
+/// 4, in the same order; the decision is not modelled, its result is an input.
+#[derive(Debug, Clone)]
+pub struct SearchAloneFixed {
+    search: LtfSearch,
+    latency: usize,
+    n: usize,
+    /// The decision in flight: the sample it is applied at, and whether it acquires.
+    pending: Option<(usize, bool)>,
+}
+
+impl SearchAloneFixed {
+    /// A search over `w` = GI − B energy positions whose decisions take `decision_latency`
+    /// samples (at most [`MAX_DECISION_LATENCY`], as [`RxConfig::decision_latency`]).
+    pub fn new(w: usize, decision_latency: usize) -> Self {
+        Self {
+            search: LtfSearch::new(w),
+            latency: decision_latency.min(MAX_DECISION_LATENCY),
+            n: 0,
+            pending: None,
+        }
+    }
+
+    /// The next sample: its detection event and the correlator's output of the window ending
+    /// at it ([`SampleTrace::corr`]; ignored for the first [`PAIR_LEN`] − 1 samples, which have
+    /// none). `acquire` is read only when a candidate is accepted at this sample: the result
+    /// of its decision, applied `decision_latency` samples later.
+    pub fn push(&mut self, event: bool, corr: IQ, acquire: bool) -> SearchStep {
+        let n = self.n;
+        self.n += 1;
+        if event {
+            self.search.event(n);
+        }
+        let mut out = SearchStep::default();
+        if let Some(i) = n.checked_sub(PAIR_LEN - 1) {
+            let (e, a) = self.search.position(i, corr, self.pending.is_none());
+            out.energy = e;
+            if a.is_some() {
+                out.accepted = a;
+                self.pending = Some((n + self.latency, acquire));
+            }
+        }
+        if let Some((_, acq)) = self.pending.filter(|&(due, _)| due == n) {
+            self.pending = None;
+            if acq {
+                self.search.close();
+                out.acquired = true;
+            }
+        }
+        out.searching = self.search.searching();
+        out
+    }
+}
+
 /// The fixed-point streaming receiver front; the float counterpart is
 /// [`crate::rx_front::RxFront`] (same control flow, see its documentation). Always detector A
 /// with the threshold `theta_num/2^theta_shift`: `RxConfig::detector` and `threshold` are not
@@ -696,15 +860,13 @@ pub struct RxFrontFixed {
     count: usize,
     y: Ring<IQ>,
     z: Ring<IQ>,
-    pair: Ring<i128>,
-    energy: Ring<i128>,
     step: i64,
     phase: i64,
     taps: [IQ; LTF_SYMBOL_LEN],
     tap_energy: i128,
     cordic: Vec<i64>,
     nco: Vec<IQ>,
-    search: Option<Search>,
+    search: LtfSearch,
     pending: Option<Pending<FixedAcquisition>>,
     trace: SampleTrace,
 }
@@ -805,15 +967,13 @@ impl RxFrontFixed {
             count: 0,
             y: Ring::new(HISTORY, (0, 0)),
             z: Ring::new(PAIR_LEN, (0, 0)),
-            pair: Ring::new(GI_LEN, 0),
-            energy: Ring::new(LTF_SYMBOL_LEN + GI_LEN + 1, 0),
             step: 0,
             phase: 0,
             tap_energy: taps.iter().map(|t| iabs2(*t)).sum(),
             taps,
             cordic: cordic_table(&fx),
             nco: nco_table(&fx),
-            search: None,
+            search: LtfSearch::new(w),
             pending: None,
             trace: SampleTrace::default(),
         }
@@ -821,7 +981,7 @@ impl RxFrontFixed {
 
     /// Whether an LTF search is open.
     pub fn searching(&self) -> bool {
-        self.search.is_some()
+        self.search.searching()
     }
 
     /// Σ_{k<len} v(start+k)·v*(start+k+lag) over the history narrowed to `bits`.
@@ -870,18 +1030,7 @@ impl RxFrontFixed {
             self.count = 0;
         }
         if event {
-            let deadline = n + SEARCH_OFFSET + SEARCH_LEN;
-            match &mut self.search {
-                Some(s) => s.deadline = deadline,
-                None => {
-                    self.search = Some(Search {
-                        opened_by: n,
-                        first: n + SEARCH_OFFSET,
-                        deadline,
-                        best: None,
-                    })
-                }
-            }
+            self.search.event(n);
             if let Some(k0) = (n + 1).checked_sub(LATCH_LAG + STF_PERIOD + COARSE_LEN) {
                 let c = self.lag_sum(k0, COARSE_LEN, STF_PERIOD, fx.det_bits);
                 // The correction step is +∠/16 per sample (rx_front: step = −2π·cfo/fs).
@@ -918,7 +1067,7 @@ impl RxFrontFixed {
         self.pending = None;
         let mut a = p.result?;
         a.decided_at = n;
-        self.search = None;
+        self.search.close();
         self.count = 0;
         Some(a)
     }
@@ -929,48 +1078,18 @@ impl RxFrontFixed {
         let window: [IQ; PAIR_LEN] = std::array::from_fn(|k| self.z.get(i + k));
         let cq = ltf_corr_with(&window, &fx, &self.taps);
         self.trace.corr = Some(cq);
-        self.pair.put(i, iabs2(cq));
-        if self.w == 0 {
-            return None;
-        }
-        let j = (i + 1).checked_sub(self.w)?;
-        let e: i128 = (j..j + self.w).map(|p| self.pair.get(p)).sum();
-        self.energy.put(j, e);
-        self.trace.energy = Some(e);
-        let mut s = self.search?;
-        if j < s.first {
-            return None;
-        }
-        if j >= s.deadline {
-            self.search = None;
-            return None;
-        }
-        if s.best.is_none_or(|(_, emax)| e > emax) {
-            s.best = Some((j, e));
-        }
-        if let Some((imax, emax)) = s.best {
-            if self.pending.is_none() && j >= imax + LTF_SYMBOL_LEN + self.w - 1 {
-                self.trace.accepted = Some(Accepted {
-                    imax,
-                    emax,
-                    deadline: s.deadline,
-                    opened_by: s.opened_by,
-                });
-                let (mut t1, mut sums) = (None, None);
-                let result = self.decide(&s, imax, n, &mut t1, &mut sums);
-                self.trace.t1 = t1;
-                self.trace.sums = sums;
-                self.pending = Some(Pending {
-                    due: n + self.cfg.decision_latency.min(MAX_DECISION_LATENCY),
-                    result,
-                });
-                s.best = None;
-            }
-        }
-        if j + 1 >= s.deadline {
-            self.search = None;
-        } else {
-            self.search = Some(s);
+        let (e, accepted) = self.search.position(i, cq, self.pending.is_none());
+        self.trace.energy = e;
+        if let Some(a) = accepted {
+            self.trace.accepted = Some(a);
+            let (mut t1, mut sums) = (None, None);
+            let result = self.decide(&a, n, &mut t1, &mut sums);
+            self.trace.t1 = t1;
+            self.trace.sums = sums;
+            self.pending = Some(Pending {
+                due: n + self.cfg.decision_latency.min(MAX_DECISION_LATENCY),
+                result,
+            });
         }
         None
     }
@@ -979,20 +1098,21 @@ impl RxFrontFixed {
     /// position and the sums it got to.
     fn decide(
         &self,
-        s: &Search,
-        imax: usize,
+        s: &Accepted,
         n: usize,
         t1: &mut Option<usize>,
         sums: &mut Option<DecisionSums>,
     ) -> Option<FixedAcquisition> {
         let fx = self.fx;
         let w = self.w;
-        let emax = self.energy.get(imax);
+        let imax = s.imax;
+        let energy = &self.search.energy;
+        let emax = energy.get(imax);
         // Latest start within GI − B of the maximum keeping 7/8 of its energy.
         let keep = emax - (emax >> 3);
         let sym = (imax..=imax + w)
             .rev()
-            .find(|&p| p < s.deadline && self.energy.get(p) >= keep)?;
+            .find(|&p| p < s.deadline && energy.get(p) >= keep)?;
         *t1 = Some(sym);
 
         // Final coarse CFO over the STF located from the timing.

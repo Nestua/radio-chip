@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search decide front dc_estimate handoff
+VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide front dc_estimate handoff
 # `cordic_arb` replays the CORDIC's vectors; `handoff_forced` holds the hand-off to itself.
 BLOCKS    := ram cordic_arb handoff_forced $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
@@ -34,6 +34,7 @@ TOP_nco       := nco
 TOP_det       := det_chain
 TOP_latch     := latch_chain
 TOP_search    := search_chain
+TOP_search_alone := rx_search
 TOP_decide    := decide_chain
 TOP_front     := rx_front
 TOP_handoff   := handoff_chain
@@ -54,7 +55,8 @@ SRC_latch     := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2
 SRC_search    := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
                  rtl/det_a.sv rtl/cordic.sv rtl/cordic_arb.sv rtl/nco.sv rtl/rx_latch.sv rtl/ltf_corr.sv rtl/rx_search.sv \
                  tb/search_chain.sv
-SRC_decide    := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
+SRC_search_alone := $(GEN_RTL) rtl/lib/ram_1w1r.sv rtl/rx_search.sv
+SRC_decide   := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv rtl/dc_block.sv \
                  rtl/det_a.sv rtl/cordic.sv rtl/cordic_arb.sv rtl/nco.sv rtl/rx_latch.sv rtl/ltf_corr.sv rtl/rx_search.sv \
                  rtl/ltf_corr1.sv rtl/rx_decide.sv rtl/rx_front.sv tb/decide_chain.sv
 SRC_front     := $(filter-out tb/decide_chain.sv,$(SRC_decide))
@@ -166,6 +168,21 @@ search: vectors/search.txt
 			--top-module search_chain $(SRC_search) tb/tb_search.cpp -o sim_search; \
 		for r in 8 11 16; do \
 			./obj_dir/search/d$${d}w$$w/sim_search vectors/search.txt $$r $$d $$w +verilator+rand+reset+2; \
+		done; \
+	done
+
+# The search alone, driven at its correlator's port past what the chain gives (the energy's
+# upper 12 of 44 bits; the founder's decision of 2026-11-23, docs/gates/rx_front.md). One build
+# per W.L.PATH_DELAY: GI − B = 16 (the bound, 2^43), 12, 8, 4 and 1; L = 64, 20 and 63 + W (the
+# largest the RTL takes); PATH_DELAY = 19 (the chain's), 7 and 1. R = 8 and 13.
+SEARCH_ALONE_BUILDS := 16.64.19 12.64.19 8.20.7 4.67.1 1.64.19
+search_alone: vectors/search_alone.txt
+	rm -rf obj_dir/search_alone && mkdir -p obj_dir/search_alone
+	set -e; for b in $(SEARCH_ALONE_BUILDS); do w=$${b%%.*}; r=$${b#*.}; l=$${r%.*}; p=$${r#*.}; \
+		$(VERILATOR) $(VFLAGS) -GW=$$w -GL=$$l -GPATH_DELAY=$$p --Mdir obj_dir/search_alone/w$$w \
+			--top-module rx_search $(SRC_search_alone) tb/tb_search_alone.cpp -o sim_search_alone; \
+		for c in 8 13; do \
+			./obj_dir/search_alone/w$$w/sim_search_alone vectors/search_alone.txt $$c $$w $$l $$p +verilator+rand+reset+2; \
 		done; \
 	done
 
