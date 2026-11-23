@@ -163,3 +163,21 @@ Slack (MET) :             0.244ns  (required time - arrival time)
 Slack (VIOLATED) :        -0.379ns  (required time - arrival time)
   Source:                 u_det/pp__1/DSP_A_B_DATA_INST/CLK
   Destination:            u_det/rhs3_reg[76]/D
+# Added 2026-11-23: rx_handoff with dc_estimate (part d step 4b), the same part, Vivado 2024.2, build server,
+# tools/syn/ooc_probe.tcl as committed (a clock only: no input or output delays).
+== rx_handoff
+    WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoi
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  ----------------
+      1.693        0.000                      0                 2997        0.034        0.000                      0                 2
+| Block RAM Tile    |  1.5 |     0 |          0 |       144 |  1.04 |
+| CARRY8                     |  114 |     0 |          0 |     14640 |  0.78 |
+| CARRY8   |  114 |                 CLB |
+| CLB LUTs                   | 1242 |     0 |          0 |    117120 |  1.06 |
+| CLB Registers                              |  785 |     0 |          0 |    234240 |  0.34 |
+| CLB Registers              |  785 |     0 |          0 |    234240 |  0.34 |
+| DSPs           |   18 |     0 |          0 |      1248 |  1.44 |
+Slack (MET) :             1.693ns  (required time - arrival time)
+  Source:                 tkn_reg[11]/C
+  Destination:            open_reg/D
+  Data Path Delay:        4.552ns  (logic 2.301ns (50.551%)  route 2.251ns (49.449%))
+  Logic Levels:           14  (CARRY8=7 LUT2=1 LUT4=3 LUT5=1 LUT6=2)

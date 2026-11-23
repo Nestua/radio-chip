@@ -2818,6 +2818,22 @@ fn handoff_scripted(out: &mut dyn Write, c: &mut HandoffCover) -> io::Result<()>
         Some(vec![(d, end)]),
         packet.clone(),
     )?;
+    // A unit inside each rail is not on it.
+    let mut near = x.clone();
+    near[at] = (2046, -2047);
+    near[at + 1] = (-2047, 2046);
+    near[at + 2] = (2046, 2046);
+    near[at + 3] = (-2047, -2047);
+    segment(
+        out,
+        c,
+        "a_unit_inside_the_rails",
+        &near,
+        vec![],
+        length(false),
+        Some(vec![(d, end)]),
+        packet.clone(),
+    )?;
     // A sample on a rail before the declaration's and the declaration's own: the hold it
     // raises is given up by it.
     let at_d = handoff_rails(&x, d - 1, 2);
@@ -2943,6 +2959,25 @@ fn handoff_scripted(out: &mut dyn Write, c: &mut HandoffCover) -> io::Result<()>
             "lost_a_cycle_later"
         };
         segment(out, c, what, &x_long, away, vec![], None, Some(marks))?;
+    }
+
+    // A length that comes at the very tick the reader first stands 512 behind, and ends
+    // the stream before where the reader is: a packet's end, not a loss.
+    {
+        let stop = d + 300;
+        let lost = stop + 513;
+        let away = vec![(tick(stop) + 2, tick(lost) + 20)];
+        let strobes: Strobes = vec![(tick(lost) - 1, 1, short)];
+        segment(
+            out,
+            c,
+            "a_length_at_the_tick_of_the_loss",
+            &x_long,
+            away,
+            strobes,
+            Some(vec![(d, lost)]),
+            Some(vec![(lost + 2, 0)]),
+        )?;
     }
 
     // ---- two frames a SIFS apart

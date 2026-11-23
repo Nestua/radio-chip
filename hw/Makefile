@@ -17,8 +17,8 @@ VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
 VEC_BLOCKS := scrambler conv_encoder round_sat ltf_corr cordic nco det latch search decide front dc_estimate handoff
-# `cordic_arb` replays the CORDIC's vectors.
-BLOCKS    := ram cordic_arb $(VEC_BLOCKS)
+# `cordic_arb` replays the CORDIC's vectors; `handoff_forced` holds the hand-off to itself.
+BLOCKS    := ram cordic_arb handoff_forced $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
 GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
 # Sources and top module per block, packages first.
@@ -37,6 +37,7 @@ TOP_decide    := decide_chain
 TOP_front     := rx_front
 TOP_handoff   := handoff_chain
 TOP_dc_estimate := dc_estimate
+TOP_handoff_forced := handoff_alone
 SRC_ram       := rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2r.sv tb/ram_bank.sv
 SRC_scrambler := rtl/scrambler.sv
 SRC_conv_encoder := rtl/conv_encoder.sv
@@ -56,6 +57,8 @@ SRC_decide    := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/lib/ram_1w2
                  rtl/ltf_corr1.sv rtl/rx_decide.sv rtl/rx_front.sv tb/decide_chain.sv
 SRC_front     := $(filter-out tb/decide_chain.sv,$(SRC_decide))
 SRC_dc_estimate := $(GEN_RTL) rtl/dc_estimate.sv
+SRC_handoff_forced := $(GEN_RTL) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/dc_estimate.sv rtl/rx_handoff.sv \
+                 tb/handoff_alone.sv
 SRC_handoff   := $(SRC_front) rtl/dc_estimate.sv rtl/rx_handoff.sv tb/handoff_chain.sv
 
 .PHONY: all lint vectors clean $(BLOCKS)
@@ -201,6 +204,14 @@ handoff: vectors/handoff.txt
 	for b in $(HANDOFF_RUNS); do w=$${b%.*}; r=$${b#*.}; \
 		./obj_dir/handoff/w$$w/sim_handoff vectors/handoff.txt $$r 4 $$w +verilator+rand+reset+2; \
 	done
+
+# The hand-off alone with its acquisitions forced: a declaration 1 to 80 samples before
+# another, which the front does not give. The reference is the second declaration alone.
+handoff_forced:
+	rm -rf obj_dir/handoff_forced && mkdir -p obj_dir/handoff_forced
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/handoff_forced --top-module handoff_alone \
+		$(SRC_handoff_forced) tb/tb_handoff_forced.cpp -o sim_handoff_forced
+	./obj_dir/handoff_forced/sim_handoff_forced +verilator+rand+reset+2
 
 clean:
 	rm -rf obj_dir

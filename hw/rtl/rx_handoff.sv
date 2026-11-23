@@ -41,7 +41,9 @@
 // out_kind: 1 stopped, 2 acquisition, 3 overrun; 0 a packet read to its end, which is not
 // in the register but follows the last sample taken); the buffer's oldest sample, from
 // START_DELAY ticks after the declaration's on. out_first marks the first sample of T1's
-// window; out_cfo and out_tag belong to it and mean nothing on other beats.
+// window; out_cfo and out_tag belong to it and mean nothing on other beats. out_valid does
+// not wait for out_ready. A beat that is not taken may be replaced at a tick: a sample by
+// the mark of its stream's end, and the pins go quiet until the next stream's first cycle.
 //
 // After a reset nothing of a packet is left: no beat, no hold, the tag 0.
 
@@ -149,7 +151,7 @@ module rx_handoff
     logic signed [P-1:0]  cfo_q;
     // The newest sample written, counted from the window. It matters while the reader is
     // short of the stream's end, and then it is at most HISTORY past the reader (the
-    // overrun): below WATCHDOG + TAIL + HISTORY = 110 024 + BACKOFF, inside C_W bits. Past
+    // overrun): below WATCHDOG + TAIL + HISTORY = 110 008 + BACKOFF, inside C_W bits. Past
     // that it may wrap: nothing compares it once the last sample is taken.
     logic [C_W-1:0]       wr_off;
     logic [C_W-1:0]       tkn;          // samples the reader has taken
@@ -334,7 +336,9 @@ module rx_handoff
     assign w_re = signed'(rd_word[2*X_W-1:X_W]);
     assign w_im = signed'(rd_word[X_W-1:0]);
     always_ff @(posedge clk) begin
-        w_v      <= est_rd;
+        // (Not the word of an estimate that a declaration abandons in this cycle: it
+        // would arrive after the sums are cleared.)
+        w_v      <= est_rd && !declare;
         w_second <= ec > 8'(LTF_SYMBOL_LEN);
         if (declare) begin
             s1_re <= '0;

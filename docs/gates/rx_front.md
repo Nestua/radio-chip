@@ -4249,8 +4249,9 @@ the packet's state, the two sums, the replay's rotator, the buffer and the pins.
 `hw/rtl/dc_estimate.sv`: the offset from the two sums (e, d, S, the numerator, two
 restoring dividers). Golden: `RxHandoffFixed` for every value, `rx_handoff::run_handoff`
 for every cycle, `rx_handoff::dc_offset_of_sums` for the offset. Gates:
-`make -C hw handoff` (behind `rx_front`, through `hw/tb/handoff_chain.sv`) and
-`make -C hw dc_estimate`.
+`make -C hw handoff` (behind `rx_front`, through `hw/tb/handoff_chain.sv`),
+`make -C hw dc_estimate`, and `make -C hw handoff_forced` (the hand-off alone with its
+acquisitions forced, held to itself: added with the independent review, below).
 
 **G0: the pins of `rx_handoff`**
 - In: the front's own stream and reset (`in_valid`, 12-bit I and Q), `acq_valid` with
@@ -4274,7 +4275,10 @@ for every cycle, `rx_handoff::dc_offset_of_sums` for the offset. Gates:
   written, the reader's position, the replay's, the hold's end, the last sample. The
   window's age at the declaration is (samples written − 1 − `acq_fft`) modulo 512.
 - *Resets:* `open`, `hold`, the mark's valid, the tag, the rail flags and their count,
-  the sample count, the tick's shift register and the waiting acquisition. Everything
+  the sample count, the tick's shift register and the waiting acquisition; also the
+  rotator's valids, the buffer's pointers and count, and `dc_estimate`'s clock and `done`
+  (the review's list: these last look redundant by the same argument and were left; no
+  mutant without them was run). Everything
   else of a packet hangs on `open` and is loaded by a declaration: nine resets I had
   written first changed nothing at the pins (mutation, below) and are gone.
 - *What was read ahead* is dropped by the next declaration only: the pins show the buffer
@@ -4291,7 +4295,9 @@ mutation run showed how little the first vectors held: **of 163 mutants 48 passe
 gate was then rebuilt in two rounds (the offset's arithmetic into a module with a gate of
 its own; 35 scripted segments; a probe of the offset; resets in flight followed by a
 compared run), the RTL lost what the mutants showed to be without effect, and the numbers
-below are the last ones. Neither gate has failed on the RTL itself at any point.
+below are the last ones. Neither of those two gates has failed on the RTL itself at any
+point. **The RTL did have a defect, which they could not see and the independent review
+found** (below): the third gate was written for it and failed on the RTL as it then was.
 
 **Vectors**
 - `hw/vectors/dc_estimate.txt` (`rvec dc_estimate`): 1736 lines `<cfo> <Σ₁> <Σ₂> <offset>`
@@ -4302,12 +4308,12 @@ below are the last ones. Neither gate has failed on the RTL itself at any point.
   −2^17 (a quotient of exactly −2048: the early test's edge). The tool refuses to write
   without both rails (118 and 85 lines), ties to even and to odd (101, 111), skipped
   divisions (180) and the edge (212).
-- `hw/vectors/handoff.txt` (`rvec handoff`, 4.5 MB): per segment the ADC samples with the
+- `hw/vectors/handoff.txt` (`rvec handoff`, 4.6 MB): per segment the ADC samples with the
   hold after each one's tick, the reader's pattern and the intervals it is away, the
   verdict strobes by cycle, every beat by cycle with its fields (or, for 10 segments,
   their count and a digest), and the cycle and value of each offset. The tool runs
   `run_handoff` on the testbench's clock pattern and **holds it to `RxHandoffFixed::push`
-  period by period before it writes a segment.** 55 segments:
+  period by period before it writes a segment.** 57 segments:
   - the front's long stream of short frames (7 to 12 frames, every seventh over full
     scale) with each of six reader patterns at w = 12, R = 8, and at w = 16, 8, 4 and
     R = 11, 16; the reader's verdict for its k-th stream one of eight kinds (a length;
@@ -4315,13 +4321,14 @@ below are the last ones. Neither gate has failed on the RTL itself at any point.
     cycle; patient and far too long);
   - eight frames of 35 data symbols on a DC offset, one for each kind of verdict, two
     of them with a reader at three quarters of the antenna's pace;
-  - 35 scripted segments, each made for one outcome that the tool checks before it
-    writes: the release's windows (2 in 4 and not in 5; 24 in 32, not in 33, not 23), a
-    release by the declaring sample; strobes the cycle before a tick, in it and after;
+  - 37 scripted segments, each made for one outcome that the tool checks before it
+    writes: the release's windows (2 in 4 and not in 5; 24 in 32, not in 33, not 23),
+    samples a unit inside each rail, a release by the declaring sample; strobes the cycle before a tick, in it and after;
     another tag, two of its own, a failure after a length, a second verdict periods later,
     a failure twice, a failure before any packet and during the estimate, a late length;
     an end mark waiting 600 periods; a reader 512 behind but for the beat of the tick's
-    own cycle, and a cycle later; two frames 30 samples apart with the first one's mark
+    own cycle, and a cycle later; a length at the very tick of a loss; two frames 30
+    samples apart with the first one's mark
     waiting, its last sample taken in the declaring tick's cycle and the cycle after, a
     loss at the very sample of the declaration and a sample before; two frames a SIFS
     apart with an abort, a length the cycle before the declaring tick, the old and the
@@ -4330,19 +4337,21 @@ below are the last ones. Neither gate has failed on the RTL itself at any point.
   - the watchdog: a frame told 5000 symbols and 5.4 ms of silence (beats as a digest).
   The tool refuses to write without every kind of mark, each kind of verdict, a release,
   an offset that is not zero, a period of more than 8 beats and a full buffer. Over the
-  file: 328 775 samples, 145 acquisitions, 241 528 beats; marks 51 packet, 16 stopped,
+  file: 333 715 samples, 147 acquisitions, 243 045 beats; marks 53 packet, 16 stopped,
   47 acquisition, 4 overrun; the history's spare down to 6 words.
 
 **Evidence** (commit of this entry; `scripts/check.sh` green)
 - `make -C hw dc_estimate`: 1736 vectors, 1736 offsets compared, 248 estimates abandoned
   by a new start, 0 mismatches. `done` in exactly the 17th cycle after `start` and in no
   other; the offset still there after the inputs have gone.
+- `make -C hw handoff_forced`: 240 cases (a declaration 1 to 80 samples before another,
+  three readers), 216 000 sample beats compared, 0 cases differ from the declaration alone.
 - `make -C hw handoff`: four builds (W = 12, 16, 8, 4 at D = 4), six runs, 0 mismatches
   in each.
 
 | Run | Segments | Samples | Resets in flight |
 |---|---|---|---|
-| W = 12, R = 8 | 50 | 293 091 | 144 |
+| W = 12, R = 8 | 52 | 298 031 | 150 |
 | W = 12, R = 11 | 1 | 7303 | 3 |
 | W = 12, R = 16 | 1 | 6413 | 3 |
 | W = 16, R = 8 | 1 | 7653 | 3 |
@@ -4351,7 +4360,9 @@ below are the last ones. Neither gate has failed on the RTL itself at any point.
 
 - Compared in every cycle: `hold` against the model's value after the latest tick; a beat
   taken in exactly the cycles of the model's beats and no other, with its fields; the
-  offset registered in the schedule's cycle, not the cycle before, with its value.
+  offset registered in the schedule's cycle, not the cycle before, with its value;
+  `out_valid` and the pins the same with `out_ready` turned round (a beat waits for the
+  reader in 478 152 cycles of the main run); no `out_first` on a mark.
 - The first segment of a run is played straight after the power-on reset (registers
   without a reset and the memories from random values). Before every other one the same
   segment is played part of the way and reset for one clock, three times: five cycles
@@ -4362,55 +4373,108 @@ below are the last ones. Neither gate has failed on the RTL itself at any point.
 **Mutations** (each built from scratch in a private copy of `hw/`, five in parallel;
 runner `target/handoff/mutate_handoff_rtl.py`, logs `handoff_rtl_mut.log`, `_mut2.log`,
 `_mut3.log` beside it, not committed). Mutants of `rx_handoff.sv` against `handoff` at
-W = 12 (R = 8 and 11) and, if both pass, at W = 4; mutants of `dc_estimate.sv` against
-`dc_estimate`.
+W = 12 (R = 8 and 11) and, if both pass, at W = 4 and against `handoff_forced`; mutants
+of `dc_estimate.sv` against `dc_estimate`.
 - **First run, on the first vectors: 163 mutants, 115 fail, 48 pass.** Among the 48: the
   patient rule's count and window, the inheritance, five ways of taking a verdict, the
   overrun's conditions, which mark a declaration leaves, the dividers' early test, ties
   and rails, a quotient of 10 bits, an estimate a cycle long, twelve resets.
 - Second run, after the first round (167 mutants): 18 pass.
-- **Last run, on the gate and the RTL as committed: 158 mutants, 152 fail, 6 pass.** Ten
-  of the 152 are stopped by a simulation check of the RTL before the comparison says
+- Third run, before the review (158 mutants): 6 pass.
+- **Last run, on the gates and the RTL as committed, with the review's seven
+  (`handoff_rtl_mut4.log`): 165 mutants, 159 fail, 6 pass.** Ten
+  of the 159 are stopped by a simulation check of the RTL before the comparison says
   anything (a read and a write of one address in a cycle; a word for a full buffer); one
   of those, *words in flight survive a declaration*, passes at R = 11 and is stopped at
-  R = 8 only. The six:
-  - *a buffer of 8* (7 is the least that keeps a beat a clock; 8 is the same at the pins);
+  R = 8 only. Two fail `handoff_forced` alone: the review's defect put back (45 of 240
+  cases), and *a buffer of 8*, which is the same at the pins and is refused by that
+  bench's look at the buffer's fill (7 is the least that keeps a beat a clock). The six:
+  - *the acquisition's address and word follow the pins* (no latch at `acq_valid`):
+    behind `rx_front` the pins do not move in the two cycles to the tick; alone it is not
+    equivalent (the review's), and `handoff_forced` gives garbage only without the strobe
+    in other cycles than those two;
   - *a mark taken also ends the stream*: a mark waits while the stream behind it stands
     at its end only if the reader took that stream's samples past the mark, which the
     pins' order forbids. My argument; no scene can be built for it;
   - *the dividers' early test with > for ≥*: at equality the steps give 2047 and a
-    remainder equal to the divisor, which rounds to 2048, a rail by the RTL's own test of
-    the twelfth bit (the vectors have the case: 212 lines);
+    remainder of the divisor and the dividend's low bits (inside the register: the
+    divisor and 2047 are below 2^28), which rounds to 2048, a rail by the RTL's own test
+    of the twelfth bit (the vectors have the case: 212 lines);
   - *the dividers' comparison with > for ≥*: it changes a result only if a prefix of the
     dividend is an exact multiple of the divisor and the rest more than half of it, which
-    needs a divisor below 2^11; the divisor is 64·|d|², at least 2^18 where the division
-    is not skipped. My argument;
+    needs a divisor below 2^11; the divisor is 64·|d|², at least 261 632 where the
+    division is not skipped. My argument, checked by the reviewer;
   - *no reset of the estimate's clock* in `dc_estimate`: a stray `done` after power-on,
-    which `rx_handoff` does not use (its own count of the 147 cycles hangs on `open`);
+    which `rx_handoff` does not use (its own count of the 147 cycles hangs on `open`).
+    Not equivalent for the module alone: its gate passes because no stray `done` lands in
+    an idle cycle of this run;
   - *no reset of the tick's shift register*: a tick without a sample in the six cycles
     after a reset, which shifts one more flag into the rail window and nothing else.
     Not seen at the pins; I do not call it equivalent.
 
 **Timing probe** (Vivado 2024.2, out of context, KV260 part, 6.25 ns,
 `tools/syn/ooc_probe.tcl` with `dc_estimate.sv` as an extra source, on the RTL as
-committed): **+1.359 ns, no failing endpoint.** 1243 LUTs, 785 registers, 18 DSP blocks,
-1.5 block RAM tiles. The worst path is the tick: from the last sample's register through
-the comparison with the reader's position to the mark's valid (15 logic levels, 4.9 ns).
-The same path was the worst in two earlier versions (+1.00 and +1.57 ns). Not run: the
-open ASIC flow.
+committed; excerpt appended to `docs/gates/reports/rx_front_timing_ooc.txt`):
+**+1.693 ns, no failing endpoint of 2997.** 1242 LUTs, 785 registers, 18 DSP blocks,
+1.5 block RAM tiles. The worst path is the tick: from the reader's position through the
+comparisons to `open` (14 logic levels, 4.6 ns). The tick was the worst path in three
+earlier versions too (+1.00, +1.57, +1.36 ns). **The probe sets a clock and no input or
+output delays** (the reviewer's point): the paths from `out_ready` through the beat's
+count and the tick's comparisons into `open`, `hold` and the mark, from the verdict's
+pins, and from the buffer's read and the end's comparison to the output pins are not
+timed. A reader whose `out_ready` is combinational is the risk. Not run: the open ASIC
+flow (`dc_estimate` holds some 14 multipliers used once a packet).
 
 **What this is not**
 - The gate holds the RTL to the schedule model, and the tool holds that model to
   `RxHandoffFixed` on the same streams; it has no reference from outside the project.
-- A declaration while an estimate runs, or within 20 periods of another: no vector (the
-  real front gives none, and there is no model run for a forced one). The RTL restarts
-  the estimate and drops what was read ahead; unproven.
+- A declaration while an estimate runs, or within 20 periods of another: the real front
+  gives none and there is no model run for a forced one. `handoff_forced` holds the RTL
+  to its own run of the later declaration alone, for 1 to 80 samples between them at
+  R = 8; that the front cannot declare twice within 16 samples is not shown anywhere.
+- `out_cfo` and `out_tag` off a stream's first beat, I and Q on a mark: not compared (by
+  contract, nothing). That `out_valid` stays up and the pins stay still between ticks
+  while a beat waits: not checked as such.
 - A tag's wrap; a reset longer than a clock or in the cycle of a tick; R below 8; D other
   than 4; a `sig_valid` held for more than a cycle.
-- `hw/vectors/handoff.txt` is 4.5 MB, more than twice any other vector file.
+- `hw/vectors/handoff.txt` is 4.6 MB, more than twice any other vector file.
+
+**Independent review** (a fresh agent in its own worktree on b0489e3; the code, the
+schedule model and ADR 0008, not the conclusions). On everything the front can produce it
+found no mismatch: the RTL read line by line against `run_handoff`; 132 random segments
+of its own through the gate (other seeds, one to three frames at random gaps, clipping
+bursts, six reader patterns, random absences, strobes at random cycles and around ticks;
+R = 8 to 13 and 24; W = 1, 4, 6, 8, 12, 15, 16), none refused by the generator's check
+against `RxHandoffFixed`, 0 mismatches; 207 312 further vectors through `dc_estimate`,
+0 mismatches; the arithmetic's bounds rebuilt; both vector files regenerated byte for
+byte and this entry's counts checked. Its vectors are not in the repo. Found:
+1. **A defect in the case this entry had called unproven.** A declaration within 16
+   samples of the one before (the abandoned estimate still reading) left that estimate's
+   last word, which arrives a cycle after the sums are cleared, in the new sums: 129
+   words, a wrong offset, every beat of the new stream wrong (its forced bench: all of
+   k = 1 to 16, none of 17 to 80). The first text here said "the RTL restarts the estimate
+   and drops what was read ahead; unproven": false for those k. Corrected (the word is not
+   taken in the declaring cycle), and its bench is the gate `handoff_forced`, which
+   **failed on the RTL as it was: 45 of 240 cases** (k = 2 to 16 for each reader; at
+   k = 1 the offset happens to round the same) and passes now.
+2. **`out_valid` was looked at only where `out_ready` was up**: a block that waits for
+   ready before it shows valid passed. The testbench now turns ready round in every cycle.
+3. Mutants of its own that passed and are not equivalent: the overrun tested against the
+   last sample of before the verdict (a length at the tick of the loss: a segment now), a
+   unit inside each rail taken for the rail (a segment now), `out_first` on a mark
+   (compared now), the acquisition's latch (above). All but the last fail now.
+4. This entry's list of resets was incomplete; a comment's sum was 110 024 for 110 008;
+   "at least 2^18" was 261 632; one product in `dc_estimate` relied on the tool widening
+   it; a start in the finishing cycle overwrote the offset. Corrected.
+5. The timing probe has no input or output delays (above); the buffer is a register array
+   outside `hw/rtl/lib/`, as `det_a`'s line is.
+Not checked by it: a tag's wrap, a reader asleep past 2^17 samples, a reset longer than a
+clock or in a tick's cycle, R below 8, D other than 4, synthesis, mutants of
+`dc_estimate.sv`, `scripts/check.sh`.
 
 **Open**
-- The decoder's side of the stream (R0-09's RTL): who gives the verdict and when.
+- The decoder's side of the stream (R0-09's RTL): who gives the verdict and when, and
+  whether its `out_ready` is a register.
 - `det_a` serial after R0-08c, then the front with its hand-off through timing as one
   block, and the open ASIC flow on it (area against ADR 0008's 2.5 mm²).
 - The enable of the correlators' arithmetic while no search is open (power).

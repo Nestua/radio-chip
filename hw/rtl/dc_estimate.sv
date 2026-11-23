@@ -87,7 +87,7 @@ module dc_estimate
         endcase
         d_re <= (Q+2)'(AMP) - (Q+2)'(e_re);
         d_im <= -(Q+2)'(e_im);
-        d2   <= (2*Q+2)'(d_re * d_re) + (2*Q+2)'(d_im * d_im);
+        d2   <= (2*Q+2)'(d_re) * (2*Q+2)'(d_re) + (2*Q+2)'(d_im) * (2*Q+2)'(d_im);
         skip <= {d2, 8'b0} < (2*Q+10)'(AMP * AMP);
     end
 
@@ -155,7 +155,7 @@ module dc_estimate
         end
     end
     always_ff @(posedge clk) begin
-        if (finish) begin
+        if (finish && !start) begin
             dc_re <= skip ? '0 : q_re;
             dc_im <= skip ? '0 : q_im;
         end

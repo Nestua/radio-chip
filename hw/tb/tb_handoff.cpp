@@ -8,6 +8,8 @@
 //     also out_first, the CFO word and the tag; a mark's out_end and kind;
 //   - hold in every cycle: the vectors' value after the tick of the latest sample (the tick
 //     is kTick cycles after the sample, and hold is a register: it shows from the next);
+//   - out_valid and the pins the same whatever out_ready is in that cycle, and no
+//     out_first on a mark;
 //   - the offset (a probe the wrapper brings out of the block): registered in exactly the
 //     cycle the schedule says, not the cycle before, with the model's value.
 // A segment with a digest lists no beats: their count and a digest over cycle and fields.
@@ -103,7 +105,7 @@ struct Segment {
 struct Gate {
     Vhandoff_chain dut;
     long mismatches = 0, beats = 0, marks = 0, firsts = 0, strobes = 0, hold_cycles = 0, cycles = 0;
-    long offsets = 0, away_cycles = 0;
+    long offsets = 0, away_cycles = 0, valid_waiting = 0;
     long resets_in_flight = 0, after_reset = 0;
     bool first_done = false;
     const Segment* seg = nullptr;
@@ -188,8 +190,20 @@ struct Gate {
                 dut.sig_symbols = 0x555;
                 dut.sig_patient = 1;
             }
+            // out_valid and what the pins show do not depend on out_ready: looked at with
+            // the reader's answer turned round first.
+            dut.out_ready = !ready;
+            dut.eval();
+            const int v_other = dut.out_valid, e_other = dut.out_end;
+            const long long re_other = dut.out_re, im_other = dut.out_im;
+            dut.out_ready = ready;
             dut.eval();
             if (check) {
+                if (dut.out_valid != v_other) fail("out_valid follows out_ready", c, dut.out_valid, v_other);
+                if (dut.out_valid && (dut.out_end != e_other || dut.out_re != re_other || dut.out_im != im_other))
+                    fail("the pins follow out_ready", c, dut.out_end, e_other);
+                if (dut.out_valid && dut.out_end && dut.out_first) fail("out_first on a mark", c, 1, 0);
+                valid_waiting += dut.out_valid && !ready;
                 ++cycles;
                 hold_cycles += hold;
                 if (dut.hold != hold) fail("hold", c, dut.hold, hold);
@@ -376,9 +390,9 @@ int main(int argc, char** argv) {
     if (run_segments == 1) g.run(*only, index + 3);
     std::printf("handoff G3 (R = %d, D = %d, W = %d): %ld segments, %ld samples, %ld cycles, %ld beats "
                 "(%ld streams, %ld marks), %ld offsets, %ld verdict strobes, hold up in %ld cycles, the reader "
-                "away in %ld, %ld resets in flight, %ld mismatches\n",
+                "away in %ld, a beat waiting for the reader in %ld, %ld resets in flight, %ld mismatches\n",
                 r, d, w, run_segments, samples, g.cycles, g.beats, g.firsts, g.marks, g.offsets, g.strobes,
-                g.hold_cycles, g.away_cycles, g.resets_in_flight, g.mismatches);
+                g.hold_cycles, g.away_cycles, g.valid_waiting, g.resets_in_flight, g.mismatches);
     if (run_segments == 0 || g.beats == 0 || g.firsts == 0 || g.marks == 0 || g.hold_cycles == 0 || g.offsets == 0) {
         std::cerr << "nothing compared — refusing to pass an empty gate\n";
         return 1;
