@@ -17,6 +17,7 @@ pub mod mapper;
 pub mod modulation;
 pub mod ofdm;
 pub mod ppdu;
+pub mod rx_data;
 pub mod rx_data_fixed;
 pub mod rx_decision;
 pub mod rx_front;
