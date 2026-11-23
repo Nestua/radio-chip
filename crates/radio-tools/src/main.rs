@@ -29,8 +29,10 @@ use radio_phy::rx_front::{
 };
 use radio_phy::rx_front_fixed::{
     cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
-    to_adc, FixedRxConfig, RxFrontFixed, ADC_FULL_SCALE, IQ, Y_BITS,
+    to_adc, FixedAcquisition, FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxFrontFixed,
+    RxHandoffFixed, SignalVerdict, ADC_FULL_SCALE, IQ, Y_BITS,
 };
+use radio_phy::rx_handoff::{dc_offset_of_sums, run_handoff, HandoffReader, HandoffTiming};
 use radio_phy::scrambler::Scrambler;
 
 /// Deterministic xorshift32 so vectors are reproducible without a `rand` dependency.
@@ -2165,6 +2167,1169 @@ fn conv_encoder_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// Vectors for the offset's arithmetic (gate G3: `make -C hw dc_estimate`):
+/// `hw/rtl/dc_estimate.sv` against `rx_handoff::dc_offset_of_sums`. A line is
+/// `<cfo word> <Σ₁ re> <Σ₁ im> <Σ₂ re> <Σ₂ im> <offset re> <offset im>`. The sums: of
+/// fields of noise about an offset, of full-scale noise and of two symbols at opposite
+/// rails; equal sums 64·c (a constant: its own offset) and 64·c + 32 (a tie, to the even
+/// number); −2^17 in a component (a quotient of exactly −2048: the dividers' early test at
+/// its edge); and any 18-bit numbers. The CFO words: none, the edge of the skipped division
+/// and its neighbours, half a turn in 64 samples (the largest divisor), a whole turn, and
+/// random ones. The tool refuses to write a file without both rails, both kinds of tie,
+/// skipped divisions and quotients at the edges of the early test.
+fn dc_estimate_vectors(out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "# rvec dc_estimate — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# <cfo> <s1 re> <s1 im> <s2 re> <s2 im> <dc re> <dc im>"
+    )?;
+    let fx = FixedRxConfig::default();
+    let mut rng = Rng::new(0xDC0F_F5E7);
+    let mut draw = |span: i64| (rng.next_u64() % (2 * span as u64 + 1)) as i64 - span;
+    let mut words: Vec<i64> = vec![0, 1, -1, 703, 704, 705, -703, -704, -705, 5000, -123_456];
+    words.extend([1 << 15, -(1 << 15), (1 << 15) + 77, 1 << 16, (1 << 21) - 1]);
+    words.extend([-(1 << 21), 9000, -9000, 77_777, 200_000, -310_000]);
+    for _ in 0..40 {
+        words.push(draw(1 << 21).clamp(-(1 << 21), (1 << 21) - 1));
+    }
+    let (mut high, mut low, mut skipped, mut even_ties, mut odd_ties) = (0, 0, 0, 0, 0);
+    let (mut edge, mut lines) = (0, 0);
+    let line = |out: &mut dyn Write, word: i64, s1: IQ, s2: IQ| -> io::Result<IQ> {
+        let dc = dc_offset_of_sums(s1, s2, word, &fx)
+            .ok_or_else(|| io::Error::other("the default front is not valid"))?;
+        writeln!(
+            out,
+            "{word} {} {} {} {} {} {}",
+            s1.0, s1.1, s2.0, s2.1, dc.0, dc.1
+        )?;
+        Ok(dc)
+    };
+    let field_sum = |mid: i64, amp: i64, draw: &mut dyn FnMut(i64) -> i64| {
+        (0..64).fold(0i64, |s, _| s + (mid + draw(amp)).clamp(-2048, 2047))
+    };
+    for &word in &words {
+        for k in 0..24 {
+            let (s1, s2) = match k % 6 {
+                0 => {
+                    let f = |d: &mut dyn FnMut(i64) -> i64| {
+                        (field_sum(300, 600, d), field_sum(-150, 600, d))
+                    };
+                    (f(&mut draw), f(&mut draw))
+                }
+                1 => {
+                    let f = |d: &mut dyn FnMut(i64) -> i64| {
+                        (field_sum(0, 2048, d), field_sum(0, 2048, d))
+                    };
+                    (f(&mut draw), f(&mut draw))
+                }
+                // Two symbols at opposite rails: no offset explains them.
+                2 => (
+                    (64 * -2040 + draw(300), 64 * 2040 - draw(300)),
+                    (64 * 2040 - draw(300), 64 * -2040 + draw(300)),
+                ),
+                // A constant c, and c + 1/2: a tie.
+                3 => {
+                    let (a, b) = (draw(2047), draw(2047));
+                    ((64 * a, 64 * b), (64 * a, 64 * b))
+                }
+                4 => {
+                    let (a, b) = (draw(2040), draw(2040));
+                    ((64 * a + 32, 64 * b - 32), (64 * a + 32, 64 * b - 32))
+                }
+                _ => (
+                    (draw(131_071), draw(131_071)),
+                    (draw(131_071), draw(131_071)),
+                ),
+            };
+            let dc = line(out, word, s1, s2)?;
+            lines += 1;
+            let nonzero = dc != (0, 0);
+            high += usize::from(dc.0 == 2047 || dc.1 == 2047);
+            low += usize::from(dc.0 == -2048 || dc.1 == -2048);
+            skipped += usize::from(!nonzero && s1 != (0, 0) && k % 6 != 4);
+            if k % 6 == 4 && nonzero {
+                // The tie's quotient is a + 1/2 and b − 1/2: to the even neighbour.
+                let a = (s1.0 - 32) / 64;
+                even_ties += usize::from(a % 2 == 0 && dc.0 == a);
+                odd_ties += usize::from(a % 2 != 0 && dc.0 == a + 1);
+            }
+        }
+        // The early test's edge: a quotient of exactly −2048, of −2048 + 1/64 and of 2047
+        // and a half (which rounds to 2048: a rail without the early test).
+        for (s, t) in [
+            (-131_072i64, 131_071i64),
+            (-131_071, 131_040),
+            (131_040, -131_072),
+            (-131_072, -131_072),
+        ] {
+            let dc = line(out, word, (s, t), (s, t))?;
+            lines += 1;
+            edge += usize::from(dc.0 == -2048 || dc.0 == 2047);
+        }
+    }
+    if high < 50 || low < 50 || skipped < 50 || even_ties < 50 || odd_ties < 50 || edge < 100 {
+        return Err(io::Error::other(format!(
+            "the offset's vectors leave a case out: {high} {low} {skipped} {even_ties} {odd_ties} {edge}"
+        )));
+    }
+    eprintln!(
+        "rvec dc_estimate: {lines} lines, {high} at the upper rail, {low} at the lower, {skipped} skipped, \
+         ties to {even_ties} even and {odd_ties} odd, {edge} at the early test's edge"
+    );
+    Ok(())
+}
+
+/// Whether the hand-off's reader is ready in cycle `clock`, by the pattern `id`; the same
+/// rule, in 32-bit arithmetic, is in `hw/tb/tb_handoff.cpp`.
+fn handoff_ready(id: u32, clock: usize) -> bool {
+    let c = clock as u32;
+    let hash = (c.wrapping_mul(0x9e37_79b9).wrapping_add(c >> 3) >> 7) & 0xff;
+    match id {
+        0 => true,
+        1 => c.is_multiple_of(2),
+        2 => hash < 128,
+        3 => hash < 24,
+        // Away 700 cycles in 2100.
+        4 => (c / 700) % 3 != 1,
+        // The first cycle after a tick only (samples 8 cycles apart, no idle clocks apart).
+        _ => c % 8 == 7,
+    }
+}
+
+/// What the hand-off's segments exercise.
+#[derive(Debug, Default, Clone, Copy)]
+struct HandoffCover {
+    samples: usize,
+    acquisitions: usize,
+    beats: usize,
+    /// Marks by kind: packet, stopped, acquisition, overrun.
+    marks: [usize; 4],
+    /// Verdict strobes: a length, a failure, a patient length, one with another tag.
+    lengths: usize,
+    failures: usize,
+    patient: usize,
+    foreign: usize,
+    /// Samples at which the hold went down before the frame's last one, the stream left
+    /// open (the release on a clipping ADC).
+    releases: usize,
+    /// Offsets that are not zero, and the largest magnitude of a component.
+    offsets: usize,
+    offset_max: i64,
+    /// The fewest words of the history to spare at a read, and the fullest buffer.
+    spare: usize,
+    buffered: usize,
+    /// Streams whose reader caught up with the antenna, and periods with more than 8 beats.
+    long_periods: usize,
+}
+
+/// The reader of the hand-off's vectors: ready by a pattern of the cycle, and for the k-th
+/// stream it reads a verdict by k, some cycles after the beat that completes SIGNAL's
+/// window.
+struct VectorReader {
+    pattern: u32,
+    /// The data symbols of the scene's frames.
+    symbols: usize,
+    due: Vec<(usize, u8, Option<SignalVerdict>)>,
+    streams: usize,
+    taken: usize,
+    tag: u8,
+}
+
+impl HandoffReader for VectorReader {
+    fn ready(&mut self, clock: usize) -> bool {
+        handoff_ready(self.pattern, clock)
+    }
+
+    fn beat(&mut self, clock: usize, beat: &HandoffBeat) {
+        let HandoffBeat::Sample { first, .. } = beat else {
+            return;
+        };
+        if let Some(s) = first {
+            self.tag = s.packet;
+            self.taken = 0;
+            self.streams += 1;
+        }
+        self.taken += 1;
+        if self.taken != PAIR_LEN + GI_LEN + LTF_SYMBOL_LEN {
+            return;
+        }
+        let told = |data_symbols, patient| {
+            Some(SignalVerdict {
+                data_symbols,
+                patient,
+            })
+        };
+        // By the stream's number: its length; nothing; a failure; a patient length; a
+        // length with another packet's tag; a length above the longest; the length in the
+        // very next cycle; a patient length far too long.
+        let (after, tag, verdict) = match self.streams % 8 {
+            0 => (300, self.tag, told(self.symbols, false)),
+            1 => return,
+            2 => (250, self.tag, None),
+            3 => (400, self.tag, told(self.symbols, true)),
+            4 => (300, self.tag.wrapping_add(3), told(self.symbols, false)),
+            5 => (300, self.tag, told(5000, false)),
+            6 => (1, self.tag, told(self.symbols, false)),
+            _ => (37, self.tag, told(900, true)),
+        };
+        self.due.push((clock + after, tag, verdict));
+    }
+
+    fn verdict(&mut self, clock: usize) -> Option<(u8, Option<SignalVerdict>)> {
+        let i = self.due.iter().position(|d| d.0 == clock)?;
+        let d = self.due.remove(i);
+        Some((d.1, d.2))
+    }
+}
+
+/// The digest of a segment's beats, for segments too long to list them: over each beat's
+/// cycle and fields in order (64-bit wrapping arithmetic, the same in the testbench).
+fn handoff_digest(h: u64, cycle: usize, fields: [i64; 5]) -> u64 {
+    let mut h = h;
+    for v in std::iter::once(cycle as i64).chain(fields) {
+        h = (h ^ v as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The fields of a beat as the vectors list them: kind (0 a sample, 1 a stream's first
+/// sample, 2 a mark), then I and Q and for a first sample the CFO word and the tag, or the
+/// mark's kind.
+fn handoff_fields(beat: &HandoffBeat) -> [i64; 5] {
+    match *beat {
+        HandoffBeat::Sample { z, first: None } => [0, z.0, z.1, 0, 0],
+        HandoffBeat::Sample { z, first: Some(s) } => {
+            [1, z.0, z.1, s.cfo_phase, i64::from(s.packet)]
+        }
+        HandoffBeat::End(e) => {
+            let kind = match e {
+                HandoffEnd::Packet => 0,
+                HandoffEnd::Stopped => 1,
+                HandoffEnd::Acquisition => 2,
+                HandoffEnd::Overrun => 3,
+            };
+            [2, kind, 0, 0, 0]
+        }
+    }
+}
+
+/// A reader by script: ready by a pattern of the cycle but for the intervals it is away,
+/// and verdict strobes at given cycles.
+struct ScriptReader {
+    pattern: u32,
+    away: Vec<(usize, usize)>,
+    strobes: Vec<(usize, u8, Option<SignalVerdict>)>,
+}
+
+impl HandoffReader for ScriptReader {
+    fn ready(&mut self, clock: usize) -> bool {
+        handoff_ready(self.pattern, clock)
+            && !self.away.iter().any(|a| a.0 <= clock && clock <= a.1)
+    }
+
+    fn verdict(&mut self, clock: usize) -> Option<(u8, Option<SignalVerdict>)> {
+        let i = self.strobes.iter().position(|d| d.0 == clock)?;
+        let d = self.strobes.remove(i);
+        Some((d.1, d.2))
+    }
+}
+
+/// What a segment gave, for the scenes that are made for one outcome.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct HandoffOutcome {
+    acquired: Vec<FixedAcquisition>,
+    /// The hold as (first, one past the last) sample of each stretch it was up.
+    holds: Vec<(usize, usize)>,
+    /// The marks: the sample in whose period each was taken, and its kind (0 packet,
+    /// 1 stopped, 2 acquisition, 3 overrun).
+    marks: Vec<(usize, i64)>,
+}
+
+/// The cycle of sample n's tick in the testbench's clock pattern.
+fn tb_tick(n: usize, period: usize) -> usize {
+    (0..=n).map(|k| period + tb_idle(k)).sum::<usize>() + HandoffTiming::default().tick()
+}
+
+/// One segment of the hand-off's gate (see [`handoff_vectors`]); with no `out`, the run
+/// alone.
+#[allow(clippy::too_many_arguments)]
+fn handoff_segment(
+    out: Option<&mut dyn Write>,
+    label: &str,
+    x: &[(i16, i16)],
+    w: usize,
+    period: usize,
+    pattern: u32,
+    away: &[(usize, usize)],
+    reader: &mut dyn HandoffReader,
+    digest: bool,
+    c: &mut HandoffCover,
+) -> io::Result<HandoffOutcome> {
+    let cfg = search_config(w);
+    let fx = FixedRxConfig::default();
+    let pace = HandoffConfig::default();
+    let timing = HandoffTiming {
+        clocks_per_sample: period,
+        ..HandoffTiming::default()
+    };
+    let run = run_handoff(x, &cfg, &fx, &pace, &timing, &tb_idle, reader)
+        .map_err(|e| io::Error::other(format!("{label}: the schedule refuses: {e:?}")))?;
+
+    // The stream is the model's: every period's beats, the hold and the acquisition.
+    let free = HandoffConfig {
+        rate: usize::MAX,
+        ..pace
+    };
+    let mut model = RxHandoffFixed::new(cfg, fx, free);
+    let (mut b, mut v) = (0, 0);
+    let mismatch = |what: &str, n: usize| {
+        io::Error::other(format!(
+            "{label}: the clocks and the model differ, {what} at {n}"
+        ))
+    };
+    let mut outcome = HandoffOutcome::default();
+    let (mut held, mut from_hold, mut releases, mut long_periods) = (false, 0, 0, 0);
+    for (n, &s) in x.iter().enumerate() {
+        while let Some(strobe) = run.verdicts.get(v).filter(|strobe| strobe.before <= n) {
+            model.signal(strobe.packet, strobe.verdict);
+            v += 1;
+        }
+        let step = model.push(s, run.room[n]);
+        let end = run.ticks.get(n + 1).copied().unwrap_or(run.end);
+        let from = b;
+        while run.beats.get(b).is_some_and(|beat| beat.0 <= end) {
+            b += 1;
+        }
+        let got: Vec<HandoffBeat> = run.beats[from..b].iter().map(|beat| beat.1).collect();
+        if got != step.beats {
+            return Err(mismatch("beats", n));
+        }
+        if run.hold[n] != step.hold || run.acquired[n] != step.acquired {
+            return Err(mismatch("hold or acquisition", n));
+        }
+        let mut marked = false;
+        for beat in &got {
+            let f = handoff_fields(beat);
+            if f[0] == 2 {
+                outcome.marks.push((n, f[1]));
+                marked = true;
+            }
+        }
+        releases += usize::from(held && !step.hold && !marked && step.acquired.is_none());
+        long_periods += usize::from(got.len() > 8);
+        match (held, step.hold) {
+            (false, true) => from_hold = n,
+            (true, false) => outcome.holds.push((from_hold, n)),
+            _ => {}
+        }
+        held = step.hold;
+    }
+    if held {
+        outcome.holds.push((from_hold, x.len()));
+    }
+    outcome.acquired = run.acquired.iter().flatten().copied().collect();
+    let Some(out) = out else {
+        return Ok(outcome);
+    };
+    c.releases += releases;
+    c.long_periods += long_periods;
+
+    writeln!(
+        out,
+        "reset {label} {w} {period} {pattern} {}",
+        u8::from(digest)
+    )?;
+    let mut k = 0;
+    while k < x.len() {
+        let same = |j: usize| x[j] == x[k] && run.hold[j] == run.hold[k];
+        let more = (k + 1..x.len()).take_while(|&j| same(j)).count();
+        writeln!(out, "x {} {} {}", x[k].0, x[k].1, u8::from(run.hold[k]))?;
+        if more > 0 {
+            writeln!(out, "r {more}")?;
+        }
+        k += 1 + more;
+    }
+    for a in away {
+        writeln!(out, "A {} {}", a.0, a.1)?;
+    }
+    for e in &run.estimates {
+        writeln!(out, "D {} {} {}", e.done, e.dc.0, e.dc.1)?;
+    }
+    for strobe in &run.verdicts {
+        let (failed, symbols, patient) = match strobe.verdict {
+            Some(verdict) => (0, verdict.data_symbols.min(2047), u8::from(verdict.patient)),
+            None => (1, 0, 0),
+        };
+        writeln!(
+            out,
+            "V {} {} {failed} {symbols} {patient}",
+            strobe.clock, strobe.packet
+        )?;
+        match strobe.verdict {
+            None => c.failures += 1,
+            Some(verdict) if verdict.patient => c.patient += 1,
+            Some(_) => c.lengths += 1,
+        }
+    }
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for (cycle, beat) in &run.beats {
+        let f = handoff_fields(beat);
+        h = handoff_digest(h, *cycle, f);
+        if !digest {
+            match f[0] {
+                0 => writeln!(out, "B {cycle} 0 {} {}", f[1], f[2])?,
+                1 => writeln!(out, "B {cycle} 1 {} {} {} {}", f[1], f[2], f[3], f[4])?,
+                _ => writeln!(out, "B {cycle} 2 {}", f[1])?,
+            }
+        }
+        if f[0] == 2 {
+            c.marks[f[1] as usize] += 1;
+        }
+    }
+    writeln!(out, "end {} {} {h}", run.end, run.beats.len())?;
+
+    c.samples += x.len();
+    c.acquisitions += outcome.acquired.len();
+    c.beats += run.beats.len();
+    let tags: Vec<u8> = run
+        .beats
+        .iter()
+        .filter_map(|beat| match beat.1 {
+            HandoffBeat::Sample { first: Some(s), .. } => Some(s.packet),
+            _ => None,
+        })
+        .collect();
+    c.foreign += run
+        .verdicts
+        .iter()
+        .filter(|strobe| !tags.contains(&strobe.packet))
+        .count();
+    for e in &run.estimates {
+        c.offsets += usize::from(e.dc != (0, 0));
+        c.offset_max = c.offset_max.max(e.dc.0.abs()).max(e.dc.1.abs());
+    }
+    c.spare = c.spare.min(run.history_spare);
+    c.buffered = c.buffered.max(run.buffered);
+    Ok(outcome)
+}
+
+/// Frames at 6 Mb/s of `octets` octets each behind `lead` samples, `gap` samples after
+/// each, at −12 dBFS and 30 dB, with a CFO of 71 kHz, on a DC offset of −20 dBFS. A frame of
+/// n octets has ⌈(22 + 8·n) / 24⌉ data symbols (IEEE 802.11-2020 §17.3.5.4).
+fn handoff_scene(
+    octets: &[usize],
+    lead: usize,
+    gap: usize,
+    seed: u64,
+) -> io::Result<Vec<(i16, i16)>> {
+    let cfg = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+    let mut rng = Rng::new(seed);
+    let mut x = vec![(0.0, 0.0); lead];
+    let mut p = 1.0;
+    for &n in octets {
+        let f: Vec<(f64, f64)> = build_ppdu(&vec![0xa7; n], Rate::R6, 0x5d, &cfg)
+            .map_err(io::Error::other)?
+            .iter()
+            .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+            .collect();
+        p = mean_power(&f);
+        x.extend_from_slice(&f);
+        x.extend(vec![(0.0, 0.0); gap]);
+    }
+    let x = frequency_offset(&x, 71e3, 20e6, 1.0);
+    let x = awgn(&x, 30.0, p, &mut rng);
+    let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-12.0 / 20.0) / p.sqrt();
+    let dc = 10f64.powf(-20.0 / 20.0) / gain * f64::from(ADC_FULL_SCALE);
+    let x: Vec<(f64, f64)> = x.iter().map(|s| (s.0 - 0.8 * dc, s.1 + 0.6 * dc)).collect();
+    Ok(to_adc(&x, gain))
+}
+
+/// `x` with `count` samples from `from` on a rail: I on the upper, Q on the lower, I on the
+/// lower and Q on the upper in turn.
+fn handoff_rails(x: &[(i16, i16)], from: usize, count: usize) -> Vec<(i16, i16)> {
+    let mut out = x.to_vec();
+    for (i, v) in out[from..from + count].iter_mut().enumerate() {
+        *v = match i % 4 {
+            0 => (2047, v.1),
+            1 => (v.0, -2048),
+            2 => (-2048, v.1),
+            _ => (v.0, 2047),
+        };
+    }
+    out
+}
+
+/// The scripted segments of the hand-off's gate: scenes made for one outcome each, which
+/// is checked here before the segment is written (the outcomes are `g2_rx_handoff_schedule`'s,
+/// on this tool's clock pattern).
+fn handoff_scripted(out: &mut dyn Write, c: &mut HandoffCover) -> io::Result<()> {
+    const SIGNAL_END: usize = PAIR_LEN + GI_LEN + LTF_SYMBOL_LEN;
+    const B: usize = 4;
+    // 24 octets: 9 data symbols; 3 octets: 2.
+    const SYMBOLS: usize = 9;
+    let told = |data_symbols: usize, patient: bool| {
+        Some(SignalVerdict {
+            data_symbols,
+            patient,
+        })
+    };
+    let tick = |n: usize| tb_tick(n, 8);
+    type Strobes = Vec<(usize, u8, Option<SignalVerdict>)>;
+    let mut number = 0;
+    // One scripted segment: written, and its outcome held to the expected one.
+    let mut segment = |out: &mut dyn Write,
+                       c: &mut HandoffCover,
+                       what: &str,
+                       x: &[(i16, i16)],
+                       away: Vec<(usize, usize)>,
+                       strobes: Strobes,
+                       holds: Option<Vec<(usize, usize)>>,
+                       marks: Option<Vec<(usize, i64)>>|
+     -> io::Result<()> {
+        number += 1;
+        let label = format!("script_{number:02}_{what}");
+        let mut reader = ScriptReader {
+            pattern: 0,
+            away: away.clone(),
+            strobes,
+        };
+        let got = handoff_segment(Some(out), &label, x, 12, 8, 0, &away, &mut reader, false, c)?;
+        if holds.as_ref().is_some_and(|h| *h != got.holds)
+            || marks.as_ref().is_some_and(|m| *m != got.marks)
+        {
+            return Err(io::Error::other(format!(
+                "{label}: expected the hold {holds:?} and the marks {marks:?}, got {got:?}"
+            )));
+        }
+        Ok(())
+    };
+    // The acquisitions of a scene, with a reader that takes everything and no verdict.
+    let probe = |x: &[(i16, i16)]| -> io::Result<Vec<FixedAcquisition>> {
+        let mut reader = ScriptReader {
+            pattern: 0,
+            away: Vec::new(),
+            strobes: Vec::new(),
+        };
+        let mut none = HandoffCover::default();
+        Ok(handoff_segment(
+            None,
+            "probe",
+            x,
+            12,
+            8,
+            0,
+            &[],
+            &mut reader,
+            false,
+            &mut none,
+        )?
+        .acquired)
+    };
+    let one = |x: &[(i16, i16)]| -> io::Result<FixedAcquisition> {
+        match probe(x)?[..] {
+            [a] => Ok(a),
+            ref other => Err(io::Error::other(format!(
+                "one acquisition expected: {other:?}"
+            ))),
+        }
+    };
+    let two = |x: &[(i16, i16)]| -> io::Result<(FixedAcquisition, FixedAcquisition)> {
+        match probe(x)?[..] {
+            [a, b] => Ok((a, b)),
+            ref other => Err(io::Error::other(format!(
+                "two acquisitions expected: {other:?}"
+            ))),
+        }
+    };
+
+    // ---- the release's two rules and their windows, on one frame
+    let x = handoff_scene(&[24], 500, 500, 0x4A0D_5001)?;
+    let a = one(&x)?;
+    let (d, len) = (a.decided_at, x.len());
+    let end = a.fft_start + SIGNAL_END + 80 * SYMBOLS + B;
+    let last = end + 8;
+    let at = a.fft_start + SIGNAL_END + 200;
+    let length = |patient: bool| -> Strobes { vec![(tick(d + 60), 1, told(SYMBOLS, patient))] };
+    let apart = |gap: usize| handoff_rails(&handoff_rails(&x, at, 1), at + gap, 1);
+    let spread = |gap: usize| handoff_rails(&handoff_rails(&x, at, 1), at + 1 + gap, 23);
+    let packet = Some(vec![(last - 1, 0)]);
+    segment(
+        out,
+        c,
+        "two_in_four",
+        &apart(3),
+        vec![],
+        length(false),
+        Some(vec![(d, at + 3)]),
+        packet.clone(),
+    )?;
+    segment(
+        out,
+        c,
+        "two_in_five",
+        &apart(4),
+        vec![],
+        length(false),
+        Some(vec![(d, end)]),
+        packet.clone(),
+    )?;
+    segment(
+        out,
+        c,
+        "patient_two",
+        &apart(1),
+        vec![],
+        length(true),
+        Some(vec![(d, end)]),
+        packet.clone(),
+    )?;
+    segment(
+        out,
+        c,
+        "patient_24_in_32",
+        &spread(8),
+        vec![],
+        length(true),
+        Some(vec![(d, at + 31)]),
+        packet.clone(),
+    )?;
+    segment(
+        out,
+        c,
+        "patient_24_in_33",
+        &spread(9),
+        vec![],
+        length(true),
+        Some(vec![(d, end)]),
+        packet.clone(),
+    )?;
+    let rails_23 = handoff_rails(&x, at, 23);
+    segment(
+        out,
+        c,
+        "patient_23",
+        &rails_23,
+        vec![],
+        length(true),
+        Some(vec![(d, end)]),
+        packet.clone(),
+    )?;
+    // A unit inside each rail is not on it.
+    let mut near = x.clone();
+    near[at] = (2046, -2047);
+    near[at + 1] = (-2047, 2046);
+    near[at + 2] = (2046, 2046);
+    near[at + 3] = (-2047, -2047);
+    segment(
+        out,
+        c,
+        "a_unit_inside_the_rails",
+        &near,
+        vec![],
+        length(false),
+        Some(vec![(d, end)]),
+        packet.clone(),
+    )?;
+    // A sample on a rail before the declaration's and the declaration's own: the hold it
+    // raises is given up by it.
+    let at_d = handoff_rails(&x, d - 1, 2);
+    segment(
+        out,
+        c,
+        "release_at_the_declaration",
+        &at_d,
+        vec![],
+        vec![],
+        Some(vec![]),
+        None,
+    )?;
+
+    // ---- verdict strobes between ticks
+    let m = d + 100;
+    let t = tick(m);
+    let short = told(3, false);
+    let long = told(SYMBOLS, false);
+    let short_end = a.fft_start + SIGNAL_END + 80 * 3 + B;
+    let cases: [(&str, Strobes, usize); 9] = [
+        ("the_cycle_before_a_tick", vec![(t - 1, 1, long)], end),
+        (
+            "another_tag_then_its_own",
+            vec![(t, 7, short), (t + 2, 1, long)],
+            end,
+        ),
+        (
+            "two_of_its_own",
+            vec![(t + 1, 1, long), (t + 2, 1, short)],
+            end,
+        ),
+        (
+            "its_own_then_a_failure",
+            vec![(t + 3, 1, long), (t + 7, 1, None)],
+            end,
+        ),
+        (
+            "in_a_tick_then_after_it",
+            vec![(t, 1, long), (t + 3, 1, None)],
+            end,
+        ),
+        (
+            "a_second_periods_later",
+            vec![(t, 1, long), (t + 80, 1, short)],
+            end,
+        ),
+        (
+            "a_shorter_second",
+            vec![(t, 1, short), (t + 80, 1, long)],
+            short_end,
+        ),
+        (
+            "failures_of_other_tags",
+            vec![(t, 0, None), (t + 100, 2, None)],
+            len,
+        ),
+        (
+            "a_failure_before_any_packet",
+            vec![(tick(100), 0, None), (tick(300) + 3, 1, None)],
+            len,
+        ),
+    ];
+    for (what, strobes, hold_end) in cases {
+        segment(
+            out,
+            c,
+            what,
+            &x,
+            vec![],
+            strobes,
+            Some(vec![(d, hold_end.min(len))]),
+            None,
+        )?;
+    }
+    // A failure in the estimate; and a second failure with the same tag once the stream
+    // is stopped: one mark.
+    let stopped = Some(vec![(d + 7, 1)]);
+    let twice: Strobes = vec![(tick(d) + 50, 1, None), (tick(d + 200), 1, None)];
+    segment(
+        out,
+        c,
+        "a_failure_twice",
+        &x,
+        vec![],
+        twice,
+        Some(vec![(d, d + 7)]),
+        stopped,
+    )?;
+    // A late length ends hold and stream at the tick that takes it.
+    let late: Strobes = vec![(tick(end + 40), 1, long)];
+    segment(
+        out,
+        c,
+        "a_late_length",
+        &x,
+        vec![],
+        late,
+        Some(vec![(d, end + 41)]),
+        Some(vec![(end + 41, 0)]),
+    )?;
+    // An end mark that waits 600 sample periods is not an overrun.
+    let x_long = handoff_scene(&[24], 500, 1200, 0x4A0D_5001)?;
+    let asleep = vec![(tick(last - 1) + 2, tick(last + 600))];
+    segment(
+        out,
+        c,
+        "asleep_at_the_end_mark",
+        &x_long,
+        asleep,
+        length(false),
+        Some(vec![(d, end)]),
+        Some(vec![(last + 600, 0)]),
+    )?;
+    // A reader 512 behind at a tick but for the beat it takes in that tick's own cycle:
+    // not lost; away a cycle longer: lost.
+    let stop = d + 300;
+    for (more, marks) in [(0usize, vec![]), (1, vec![(stop + 513, 3)])] {
+        let away = vec![(tick(stop) + 2, tick(stop + 513) - 1 + more)];
+        let what = if more == 0 {
+            "kept_by_the_beat_of_the_tick"
+        } else {
+            "lost_a_cycle_later"
+        };
+        segment(out, c, what, &x_long, away, vec![], None, Some(marks))?;
+    }
+
+    // A length that comes at the very tick the reader first stands 512 behind, and ends
+    // the stream before where the reader is: a packet's end, not a loss.
+    {
+        let stop = d + 300;
+        let lost = stop + 513;
+        let away = vec![(tick(stop) + 2, tick(lost) + 20)];
+        let strobes: Strobes = vec![(tick(lost) - 1, 1, short)];
+        segment(
+            out,
+            c,
+            "a_length_at_the_tick_of_the_loss",
+            &x_long,
+            away,
+            strobes,
+            Some(vec![(d, lost)]),
+            Some(vec![(lost + 2, 0)]),
+        )?;
+    }
+
+    // ---- two frames a SIFS apart
+    let x = handoff_scene(&[24, 24], 500, 320, 0x4A0D_5002)?;
+    let (a, b) = two(&x)?;
+    let len = x.len();
+    let end = a.fft_start + SIGNAL_END + 80 * SYMBOLS + B;
+    let t2 = tick(b.decided_at);
+    // Two frames 30 samples apart: the second is declared less than a history after the
+    // first one's last sample. The first read to its end mark, the mark not taken: a
+    // packet's mark at the second declaration. With its last sample taken in the declaring
+    // tick's own cycle: the same. A cycle later: an abort.
+    {
+        let x = handoff_scene(&[24, 24], 500, 30, 0x4A0D_5004)?;
+        let (a, b) = two(&x)?;
+        let last = a.fft_start + SIGNAL_END + 80 * SYMBOLS + B + 8;
+        if b.decided_at <= last || b.decided_at >= last + 505 {
+            return Err(io::Error::other(format!(
+                "the second frame is declared {} samples after the first one's last",
+                b.decided_at as i64 - last as i64
+            )));
+        }
+        let t2 = tick(b.decided_at);
+        let length: Strobes = vec![(tick(a.decided_at + 60), 1, told(SYMBOLS, false))];
+        let cases = [
+            (
+                "the_mark_waits_for_the_declaration",
+                tick(last - 1) + 2,
+                t2 + 20,
+                0,
+                b.decided_at + 2,
+            ),
+            (
+                "the_last_sample_in_the_declaring_tick",
+                tick(last - 1) + 1,
+                t2 - 1,
+                0,
+                b.decided_at,
+            ),
+            (
+                "the_last_sample_after_the_declaring_tick",
+                tick(last - 1) + 1,
+                t2,
+                2,
+                b.decided_at,
+            ),
+        ];
+        // No verdict, and a reader that stops so that its stream is lost at the very
+        // sample of the second declaration: the declaration's mark, an abort. A sample
+        // earlier: the overrun's.
+        for (short, kind) in [(0usize, 2i64), (1, 3)] {
+            let stop = b.decided_at - 513 - short;
+            let away = vec![(tick(stop) + 2, t2 + 20)];
+            let what = if short == 0 {
+                "lost_at_the_declaration"
+            } else {
+                "lost_a_sample_before_the_declaration"
+            };
+            let marks = Some(vec![(b.decided_at + 2, kind)]);
+            segment(out, c, what, &x, away, vec![], None, marks)?;
+        }
+        for (what, from, to, kind, taken) in cases {
+            let marks = Some(vec![(taken, kind)]);
+            segment(
+                out,
+                c,
+                what,
+                &x,
+                vec![(from, to)],
+                length.clone(),
+                None,
+                marks,
+            )?;
+        }
+    }
+    // No verdict: the second declaration aborts the first stream; the second runs past
+    // where the first would have ended (its own watchdog, not the first one's length).
+    segment(
+        out,
+        c,
+        "an_abort",
+        &x,
+        vec![],
+        vec![],
+        Some(vec![(a.decided_at, len)]),
+        Some(vec![(b.decided_at, 2)]),
+    )?;
+    let second_runs: Strobes = vec![(tick(a.decided_at + 60), 1, told(1, false))];
+    // (Told a symbol 60 samples after the declaration, which is past that frame's end:
+    // the hold and the stream end at the tick that takes it.)
+    let first_end = a.decided_at + 61;
+    segment(
+        out,
+        c,
+        "a_short_first_and_a_second_without_verdict",
+        &x,
+        vec![],
+        second_runs,
+        Some(vec![(a.decided_at, first_end), (b.decided_at, len)]),
+        Some(vec![(first_end, 0)]),
+    )?;
+    // The first frame's length in the cycle before the declaring tick: taken before the
+    // declaration, the first stream ends as a packet. In the tick's own cycle: it is the
+    // next tick's, with a tag that is no longer open.
+    let before: Strobes = vec![(t2 - 1, 1, told(SYMBOLS, false))];
+    segment(
+        out,
+        c,
+        "a_length_before_the_declaring_tick",
+        &x,
+        vec![],
+        before,
+        None,
+        Some(vec![(b.decided_at, 0)]),
+    )?;
+    let in_tick: Strobes = vec![(t2, 1, None)];
+    segment(
+        out,
+        c,
+        "the_old_tag_in_the_declaring_tick",
+        &x,
+        vec![],
+        in_tick,
+        Some(vec![(a.decided_at, len)]),
+        Some(vec![(b.decided_at, 2)]),
+    )?;
+    // The new packet's tag in the declaring tick's own cycle counts for the new packet, also
+    // after a strobe for the old one in the same period.
+    let both: Strobes = vec![(t2 - 3, 1, told(SYMBOLS, false)), (t2, 2, None)];
+    segment(
+        out,
+        c,
+        "old_and_new_tags_around_the_declaring_tick",
+        &x,
+        vec![],
+        both,
+        Some(vec![(a.decided_at, b.decided_at + 1)]),
+        Some(vec![(b.decided_at, 0), (b.decided_at + 1, 1)]),
+    )?;
+    // Inheritance: the first told patient and far too long, its hold up at the second
+    // declaration: two samples on a rail do nothing. Told its true length: the hold is
+    // down before, the second is not patient, and they take its hold.
+    let clipped = handoff_rails(&x, b.decided_at + 30, 2);
+    let patient_long: Strobes = vec![(tick(a.decided_at + 60), 1, told(1366, true))];
+    segment(
+        out,
+        c,
+        "patience_inherited",
+        &clipped,
+        vec![],
+        patient_long,
+        Some(vec![(a.decided_at, len)]),
+        None,
+    )?;
+    let patient_true: Strobes = vec![(tick(a.decided_at + 60), 1, told(SYMBOLS, true))];
+    segment(
+        out,
+        c,
+        "patience_not_inherited",
+        &clipped,
+        vec![],
+        patient_true,
+        Some(vec![(a.decided_at, end), (b.decided_at, b.decided_at + 31)]),
+        None,
+    )?;
+    // The hold that ends at the very sample of the second declaration: down before the
+    // declaration looks at it. The gap is searched for a length that ends it there.
+    let mut found = None;
+    for gap in 320..520 {
+        let x = handoff_scene(&[24, 24], 500, gap, 0x4A0D_5003)?;
+        if let Ok((a, b)) = two(&x) {
+            let span = b.decided_at - a.fft_start - SIGNAL_END - B;
+            if span.is_multiple_of(80) {
+                found = Some((x, a, b, span / 80));
+                break;
+            }
+        }
+    }
+    let (x, a, b, symbols) =
+        found.ok_or_else(|| io::Error::other("no gap ends a hold at the declaration"))?;
+    let clipped = handoff_rails(&x, b.decided_at + 30, 2);
+    for (more, holds) in [
+        (0usize, vec![(a.decided_at, b.decided_at + 31)]),
+        (1, vec![(a.decided_at, x.len())]),
+    ] {
+        let strobes: Strobes = vec![(tick(a.decided_at + 60), 1, told(symbols + more, true))];
+        let what = if more == 0 {
+            "the_hold_ends_at_the_declaration"
+        } else {
+            "the_hold_ends_a_symbol_later"
+        };
+        segment(out, c, what, &clipped, vec![], strobes, Some(holds), None)?;
+    }
+    Ok(())
+}
+
+/// Vectors for the hand-off (gate G3: `make -C hw handoff`): `hw/rtl/rx_handoff.sv` behind
+/// `rx_front.sv` against `rx_handoff::run_handoff`, a cycle at a time, which this tool
+/// first holds to `RxHandoffFixed::push` period by period (it refuses to write otherwise).
+///
+/// A segment is `reset <label> <w> <R> <ready pattern> <digest>`, then per ADC sample
+/// `x <re> <im> <hold after its tick>` (`r <count>`: the line before that many times
+/// more), then `A <from> <to>` (cycles the reader is away, whatever its pattern),
+/// `D <cycle> <re> <im>` (the first cycle an offset is registered in, and the offset: a
+/// probe inside the block), the verdict strobes
+/// `V <cycle> <tag> <failed> <data symbols> <patient>` and the beats
+/// `B <cycle> <kind> …` (kind 0 a sample: I, Q; 1 a stream's first: I, Q, the CFO word, the
+/// tag; 2 a mark: its kind 0 packet, 1 stopped, 2 acquisition, 3 overrun), then
+/// `end <last cycle> <beats> <digest of the beats>`. A segment with digest 1 lists no
+/// beats. Cycles count from the reset's release; sample n is at the pins in cycle
+/// X(n) = X(n − 1) + R + the testbenches' idle clocks ([`tb_idle`]), X(−1) = 0, and the
+/// reader is ready by [`handoff_ready`].
+fn handoff_vectors(out: &mut impl Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "# rvec handoff — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# reset <label> <w> <R> <ready pattern> <digest>; x <re> <im> <hold>; r <count>;"
+    )?;
+    writeln!(
+        out,
+        "# A <from> <to>; D <cycle> <dc re> <dc im>; V <cycle> <tag> <failed> <symbols> <patient>;"
+    )?;
+    writeln!(
+        out,
+        "# B <cycle> <kind> ...; end <last cycle> <beats> <digest>"
+    )?;
+    let mut c = HandoffCover {
+        spare: usize::MAX,
+        ..HandoffCover::default()
+    };
+    let by_number = |pattern: u32, symbols: usize, first_stream: usize| VectorReader {
+        pattern,
+        symbols,
+        due: Vec::new(),
+        streams: first_stream,
+        taken: 0,
+        tag: 0,
+    };
+    // The front's long stream of short frames (two data symbols), every pattern of the
+    // reader at w = 12 and R = 8; other back-offs and clocks with one pattern each.
+    for (pattern, frames) in [(0u32, 12usize), (1, 8), (2, 10), (3, 8), (4, 8), (5, 8)] {
+        let x = front_stream(frames, 0x4A0D_0000 + u64::from(pattern))?;
+        let label = format!("long_stream_p{pattern}");
+        let mut reader = by_number(pattern, 2, 0);
+        handoff_segment(
+            Some(out),
+            &label,
+            &x,
+            12,
+            8,
+            pattern,
+            &[],
+            &mut reader,
+            pattern % 2 == 1,
+            &mut c,
+        )?;
+    }
+    for (w, period, pattern) in [
+        (16usize, 8usize, 2u32),
+        (8, 8, 0),
+        (4, 8, 2),
+        (12, 11, 2),
+        (12, 16, 0),
+    ] {
+        let x = front_stream(7, 0x4A0D_1000 + (w * 100 + period) as u64)?;
+        let label = format!("long_stream_w{w}_r{period}");
+        let mut reader = by_number(pattern, 2, 0);
+        handoff_segment(
+            Some(out),
+            &label,
+            &x,
+            w,
+            period,
+            pattern,
+            &[],
+            &mut reader,
+            false,
+            &mut c,
+        )?;
+    }
+    // A frame of 35 data symbols on a DC offset: an offset that is not zero, a reader at
+    // the antenna for a long stream, each of the eight verdicts (the reader's count of
+    // streams starts so that the frame's is the k-th kind), and readers slow enough to
+    // lose it.
+    for (k, pattern) in [0u32, 1, 2, 3, 0, 3, 1, 2].into_iter().enumerate() {
+        let x = handoff_scene(&[100], 500 + 37 * k, 700, 0x4A0D_2000 + k as u64)?;
+        let label = format!("frame_{k}");
+        let mut reader = by_number(pattern, 35, k + 7);
+        handoff_segment(
+            Some(out),
+            &label,
+            &x,
+            12,
+            8,
+            pattern,
+            &[],
+            &mut reader,
+            k >= 2,
+            &mut c,
+        )?;
+    }
+    handoff_scripted(out, &mut c)?;
+    // The watchdog: a frame, then silence to the end of the longest PPDU's 5.5 ms, told a
+    // length above the longest (the fifth kind of verdict). Its beats as a digest.
+    let mut x = handoff_scene(&[100], 500, 700, 0x4A0D_3000)?;
+    x.extend(vec![(0, 0); 108_000]);
+    let mut reader = by_number(0, 35, 4);
+    let got = handoff_segment(
+        Some(out),
+        "watchdog",
+        &x,
+        12,
+        8,
+        0,
+        &[],
+        &mut reader,
+        true,
+        &mut c,
+    )?;
+    let watchdog = PAIR_LEN + GI_LEN + LTF_SYMBOL_LEN + 80 * 1366 + 4;
+    let ends = got
+        .acquired
+        .first()
+        .map(|a| (a.decided_at, a.fft_start + watchdog));
+    if got.holds.first().copied() != ends || got.marks.len() != 1 {
+        return Err(io::Error::other(format!(
+            "the watchdog's segment does not end by the watchdog: {:?} {:?}",
+            got.holds, got.marks
+        )));
+    }
+
+    if c.marks.contains(&0)
+        || c.lengths == 0
+        || c.failures == 0
+        || c.patient == 0
+        || c.foreign == 0
+        || c.releases == 0
+        || c.offsets == 0
+        || c.long_periods == 0
+        || c.buffered != 7
+    {
+        return Err(io::Error::other(format!(
+            "the hand-off's vectors leave a case out: {c:?}"
+        )));
+    }
+    eprintln!("rvec handoff: {c:?}");
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let stdout = io::stdout();
@@ -2184,9 +3349,11 @@ fn main() -> ExitCode {
         "search" => search_vectors(&mut out),
         "decide" => decide_vectors(&mut out),
         "front" => front_vectors(&mut out),
+        "handoff" => handoff_vectors(&mut out),
+        "dc_estimate" => dc_estimate_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, front, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
