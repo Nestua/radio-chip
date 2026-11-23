@@ -1383,3 +1383,91 @@ What moved is at the rates coded at 3/4 (9, 18, 36, 54 Mb/s), as the measurement
 said. Loss at the PER-10 % crossing, as the report's summary lines give it; one seed a
 point. The journal's last open item "the full G2 grid with the window of 96" is closed;
 `stream` and `rxagc` wait for `RxDataFixed` (the decision above).
+
+## 2026-11-23 · G0 + gate · ADR 0010 step 6.1b: the streaming data path (`RxDataFixed`)
+
+**Block.** `radio_phy::rx_data_fixed::RxDataFixed`: the hand-off's beats in, one at a time;
+out, as events in order: `Verdict` (the stream's tag, SIGNAL's `SignalVerdict` or `None`),
+`Start` (the SIGNAL field, the frame's end at the antenna), `Octet` (the PSDU descrambled,
+the seed and SERVICE with the first), `End` (a status). Golden: `decode_ppdu_fixed` and
+`decode_signal_checked_fixed` — its arithmetic is theirs (`channel_with`, `symbol_with`,
+`signal_checked`, the seed's search, now one function `scrambler_seed_of` that both use).
+
+**G0: what it holds.** The long training field (128 samples, for the channel) until
+SIGNAL's verdict, then one FFT window of 64 samples. One symbol after another (ADR 0010,
+decision 2): symbol i + 1's window starts at its nominal place plus the tracker's shift as
+symbol i's step left it, so 15, 16 or 17 samples pass between two windows. No addressed
+buffer of samples.
+
+**G0: the decoder.** `radio_phy::viterbi::WindowedViterbi`: `decode_windowed` as a stream,
+soft values in whole puncture periods (a symbol), bit i out in the push that brings the
+trellis `depth` steps past it, the last `depth` bits before the anchor (16 + 8·LENGTH + 6)
+from state 0 in the push that reaches it; the pad is not decoded. The add-compare-select step
+is now one function (`acs`) shared with the block decoders. It keeps the survivors of the
+last depth − 6 steps: a decided bit is the top bit of the state after i + 1 steps, which is
+bit 0 of the state after i + 6, so the walk's first five steps back read nothing that matters
+— the register exchange's 90 bits a survivor for a window of 96 (ADR 0010, decision 4).
+Found by mutation: rings of depth + 1, depth, depth − 1 … depth − 6 all passed the test; one
+of depth − 7 fails it.
+
+**G0: ADR 0010's Context 3, settled** (the founder to see in the PR):
+1. *A scrambler seed of zero* is known from the first seven SERVICE bits, before the first
+   octet: no octet, `End(Seed)`.
+2. *A window past the stream's end* (the end mark first): `End(Truncated)`, after the octets
+   already out.
+3. *The number of data symbols* for the verdict: `SignalVerdict::of`'s.
+4. *An abort mark after some octets*: `End(Aborted(kind))`; the frame check is the MAC's.
+5. *A new packet's first beat while the last is being decoded*: the last is finished first,
+   the new stream waits in the hand-off's history. Here nothing takes time (a frame is done
+   at the beat that completes its last window); that the wait fits is 6.1c's. A first beat
+   with no mark before it ends the packet in flight as `Aborted(Acquisition)` (the hand-off
+   always marks; defensive, not reached by the gate).
+6. *The frame's end at the antenna*: with the start, in samples from the stream's first one
+   (208 + 80·N_SYM, by the rate and length, not by the tracker); the top level adds the
+   stream's place.
+
+**Evidence** (commit 3713323; `cargo test -p radio-phy --test viterbi_stream --test
+g2_rx_data_stream`; the workspace's tests green; `make -C hw vectors`: no file changed, so
+the shared `acs` and the factored seed search change no bit).
+- `viterbi_stream.rs`: 252 random blocks (three code rates; depths 1, 2, 7, 64, 96, 300 and
+  unbounded; anchors anywhere in the block; pieces of 12 to 96 values) equal to
+  `decode_windowed` up to the anchor; a bit comes out exactly `depth` steps after it; a piece
+  of a partial puncture period is refused. Mutants: the flush from the best state instead of
+  state 0, the best state a step early, no clamp of the window to the anchor, the flush
+  reversed, the survivor ring one short: all fail.
+- `g2_rx_data_stream.rs`, through the front: `RxHandoffFixed` with `RxDataFixed` as its
+  reader (every beat taken, the verdict back 50 periods later, as `rxper stream`; the verdict's
+  pace off its default), each stream compared when its mark comes with the whole-buffer
+  decoder on the same samples: the verdict and its beat, the start, the seed, every octet, the
+  status; SERVICE zero on clean right frames; the frame's end against the hand-off's end mark
+  (12 later: the back-off and `HANDOFF_TAIL`) where the verdict came in time. Scenes: the
+  eight rates at 1, 24 and 300 octets with ±20 to ±40 ppm; 2000 octets at 6 Mb/s and ±40 ppm;
+  480 frames of 4 to 6 octets at −1 to 6.5 dB; a frame starting inside another's data.
+  Result: **409 streams decoded as the buffer decodes them (182 right PSDUs, the rest wrong
+  octets handed on as the MAC would get them), 4 SIGNAL failures, 3 seeds of zero, 7 aborts,
+  4 window moves, 13 frame ends against the mark; 0 differences.**
+- The same file, from the buffer: 8 frames (every rate, ±40 ppm) cut every 37 samples and
+  closed by an end mark: 177 streams `Truncated` exactly where the buffer's decoder says so,
+  the rest decoded.
+- The gate was written after the code, so it was shown to bite by mutation: 14 mutants of
+  `rx_data_fixed.rs` — the window without the tracker's shift; no end on a failed SIGNAL; a
+  seed of zero taken as 1; the octet's bit order; a cut stream reported decoded; the whole-block
+  traceback; SERVICE's head, and its reserved bits, not descrambled; the anchor a step late;
+  an abort reported as truncated; one octet too many; the pilots' polarity a symbol off; the
+  verdict by the default pace; the frame's end a window short — **all 14 fail**. (The last
+  two passed the first version of the gate, which compared neither; it does now.)
+- Found on the way: a seed of zero decided from the first data symbol and then an abort mark —
+  the buffer's decoder says `Truncated` because it wants the whole stream first. The streaming
+  answer (`Seed`, rule 1) is the right one; the gate runs the buffer's decoder on such a stream
+  padded with zeros, which cannot change bits the window has already decided.
+
+**Not covered**
+- Time: the order of the events only. Cycles, the shared CORDIC, divider and multipliers,
+  and whether a new stream's wait fits the history are 6.1c (the schedule in clocks).
+- A first beat with no mark before it (rule 5's defensive case); an overrun mark (the reader
+  here always has room).
+- `traceback = 0` (the whole-block decoder) through `RxDataFixed`: equal by
+  `viterbi_stream.rs`'s unbounded depth, not run through the stream.
+
+**Next.** `rxper stream` and `rxagc` rerun with `RxDataFixed` as the reader (the decision of
+2026-11-23 above); then 6.1c, the schedule in clocks.
