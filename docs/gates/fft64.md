@@ -6,7 +6,11 @@ Model: `radio_phy::rx_ofdm_fixed::fft64_fixed` (G2 done with the integer data pa
 known by hand and the float FFT, which has its own G1). RTL: `hw/rtl/fft64.sv` (to come), gate
 `make -C hw fft64`.
 
-## 2026-11-23 · G0 · the specification and the architecture (proposal, for the founder)
+## 2026-11-23 · G0 · the specification and the architecture
+
+**Decided by the founder, 2026-11-23: B, R2SDF in natural order** (the recommendation, after
+the review below). ADR 0010 is not amended: it left the architecture to this G0. Its area line
+for `fft64` (≈ 0.25 mm²) is low; this entry's ≈ 0.4 stands until the flow measures it.
 
 ADR 0010 left the architecture to this G0 ("in place on a register array with two butterfly
 units, or a pipelined single-path transform in the model's order fed in bit-reversed order from
@@ -175,3 +179,70 @@ and the abort; the bin store's third slot; the schedule model needs rules, not n
 constant-geometry A′ and R2MDC were missing; radix 2² saves nothing at 64 points; the
 butterfly adders and the shift registers' power were not in the area; the scaling argument
 was overstated (now withdrawn as a reason). All taken.
+
+## 2026-11-23 · G3 · `hw/rtl/fft64.sv`, R2SDF, against `fft64_window_fixed`
+
+**The block** (its header has the contract): a window's 64 samples of 13 bits in time order,
+`in_valid` with gaps anywhere; `in_next` with the 64th sample when the next window follows at
+once (T1 → T2), otherwise a frame of 64 zero tokens flushes the window, `in_ready` low meanwhile,
+with a skid of one for a reader whose valid is registered; bins out in bit-reversed order with
+their index and `out_valid`, never stalling; `drop` (an abort) and `rst_n` drop every token in
+flight and put the labels back to a frame's start, the delay lines left as they are. The labels
+travel with the data (each stage's output is label − D); a bin is valid if its window was: label
+0 leaves with its own window's 64th sample, the others with the next frame's first 63 tokens.
+An input register, then per stage a twiddle register and a butterfly register: **a window's
+last bin 75 edges after the edge that took its 64th sample** when the flush follows at once
+(G0 estimated ≈ 76). Stages 0 and 1 multiply by shifts (1, −j), stages 2 and 3 by the ROM's
+constant magnitudes (cos π/4, cos π/8, sin π/8, selected), stages 4 and 5 a general 16 × 12
+complex product from the ROM. Delay lines as shift registers (the power question of the G0
+stays open for the flow).
+
+**Generated**: `rvec fft64` (236 windows: 160 random at the full 13 bits, a full-scale tone on
+each of the 64 bins, constants, impulses and alternating signs at the rails; 72 bins of the
+file saturate at the output, and internal saturation is exercised by the tones) and
+`rvec fft64-rom` → `hw/rtl/gen/fft64_rom_pkg.sv` (widths, `HALVE`, the twiddle ROM from the new
+`fft64_twiddles`). The reference is `fft64_window_fixed`, new: the receiver's own `window_fft`
+(the input saturated to 13 bits and shifted by 1, then `fft64_fixed`), made public.
+
+**Gate** (`make -C hw fft64`, `hw/tb/tb_fft64.cpp`): every window in three passes — no gaps and
+a reader that looks at `in_ready`; a sample every 8 clocks, a registered reader, every fourth
+window chained; random gaps, readers, chains and drops (in a window, during a flush, between
+windows). Every bin compared with the model's, each window's 64 exactly once in bit-reversed
+order, nothing else out (no bin of a dropped window after the drop), the last bin's 75 edges
+wherever a flush follows at once, `in_ready` high throughout a chained window. Registers start
+random (`+verilator+rand+reset+2`). Result (this branch): **236 windows, 42 416 bins compared,
+541 latencies, 6 skids, 58 drops, 112 chains, 0 mismatches. PASS.**
+
+**Mutants** (each built fresh; the two marked lint-non-fatal built with `-Wno-fatal`, since
+they leave a signal unused):
+
+| Mutant | Mismatches |
+|---|---|
+| half up on ties (`narrow`) | 5396 |
+| no upper saturation | 381 |
+| halving stages mirrored | 24 840 |
+| twiddle index's low bit flipped at stage 5 | 29 533 |
+| sin π/8's product by its constant + 1 | 3699 |
+| −j as +j in stage 1 | 17 076 |
+| skid never filled | 4190 |
+| `in_next` ignored (lint non-fatal) | 113 |
+| `drop` keeps the input counter | 13 874 |
+| `out_valid` from the token's own frame only | 44 655 |
+| labels move + D | 34 647 |
+| the input not shifted into the word | 31 873 |
+
+12 of 12. Two first attempts did not count: "sin π/8's constant negated" passed with 0
+mismatches, an equivalent mutant (the constant's sign is carried into the `case` item and the
+product alike), replaced by the one in the table; "`in_next` ignored" first **passed** the
+gate: a flush between chained windows changes no bin, only the time. The check of `in_ready`
+through a chained window was added for it, and it now fails (113 chains, each flagged).
+
+**Not covered here**
+- The routed area and timing through the open flow, and the power of the shift-register delay
+  lines against circular buffers (G0's open item): with the data path's next run on the build
+  server.
+- The flush rule against the schedule (zero frame, as proposed in G0) and the schedule model's
+  new rules for a transform that runs while its window arrives (G0, "The schedule model"):
+  `radio_phy::rx_data` is restated when the top level of ADR 0010 6.2 is built; its
+  `DataTiming::fft` allowance (96) is now 75 after the window's last sample for this block.
+- The bin store (a third slot or T1 + T2 accumulated): the channel's block.

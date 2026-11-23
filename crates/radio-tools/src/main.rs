@@ -33,6 +33,7 @@ use radio_phy::rx_front_fixed::{
     RxFrontFixed, RxHandoffFixed, SearchAloneFixed, SignalVerdict, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_handoff::{dc_offset_of_sums, run_handoff, HandoffReader, HandoffTiming};
+use radio_phy::rx_ofdm_fixed::{fft64_twiddles, fft64_window_fixed, FixedOfdmConfig};
 use radio_phy::scrambler::Scrambler;
 use radio_phy::viterbi::{
     decode_windowed, metric_spread, Termination, SOFT_CLIP, SOFT_MAX, TRACEBACK_DEPTH,
@@ -4051,6 +4052,116 @@ fn handoff_vectors(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// `fft64`'s windows: one line a window, `<64 samples re,im> <64 bins re,im>`, the samples
+/// at the hand-off's 13 bits in time order, the bins in natural order as
+/// `fft64_window_fixed` gives them. Random full-scale windows, then windows that saturate
+/// (full-scale tones on every bin, constants and impulses at the rails, alternating signs).
+fn fft64_vectors(out: &mut impl Write) -> io::Result<()> {
+    const RANDOM: usize = 160;
+    let fx = FixedOfdmConfig::default();
+    let bad = || io::Error::other("unusable FFT widths");
+    let hi = (1i64 << (fx.in_bits - 1)) - 1;
+    let lo = -hi - 1;
+    writeln!(
+        out,
+        "# rvec fft64 — generated, do not edit. Regenerate: make -C hw vectors\n\
+         # radio_phy::rx_ofdm_fixed::fft64_window_fixed, FixedOfdmConfig::default() ({} bits in, \
+         shift {}, W {}, T {}, halve {:#08b}).\n\
+         # <64 samples re,im in time order> <64 bins re,im in bin order>",
+        fx.in_bits, fx.in_shift, fx.fft_bits, fx.twiddle_bits, fx.fft_halve
+    )?;
+    let mut rng = Rng::new(0xff7_0064);
+    let mut windows: Vec<Vec<IQ>> = Vec::new();
+    let span = (hi - lo + 1) as u64;
+    for _ in 0..RANDOM {
+        windows.push(
+            (0..64)
+                .map(|_| {
+                    let r = (rng.next_u64() % span) as i64 + lo;
+                    let i = (rng.next_u64() % span) as i64 + lo;
+                    (r, i)
+                })
+                .collect(),
+        );
+    }
+    // A full-scale tone on bin k: every bin's sum is coherent, the late stages saturate.
+    for k in 0..64 {
+        let ph = |n: usize| 2.0 * std::f64::consts::PI * (k * n) as f64 / 64.0;
+        windows.push(
+            (0..64)
+                .map(|n| {
+                    let q = |v: f64| ((v * hi as f64).round() as i64).clamp(lo, hi);
+                    (q(ph(n).cos()), q(ph(n).sin()))
+                })
+                .collect(),
+        );
+    }
+    for &(r, i) in &[(hi, hi), (lo, lo), (hi, lo), (lo, hi)] {
+        windows.push(vec![(r, i); 64]);
+        let mut imp = vec![(0, 0); 64];
+        imp[0] = (r, i);
+        windows.push(imp);
+        windows.push(
+            (0..64)
+                .map(|n| {
+                    if n % 2 == 0 {
+                        (r, i)
+                    } else {
+                        ((-r).clamp(lo, hi), (-i).clamp(lo, hi))
+                    }
+                })
+                .collect(),
+        );
+    }
+    for w in &windows {
+        let bins = fft64_window_fixed(w, &fx).ok_or_else(bad)?;
+        let s: Vec<String> = w.iter().map(|v| format!("{},{}", v.0, v.1)).collect();
+        let b: Vec<String> = bins.iter().map(|v| format!("{},{}", v.0, v.1)).collect();
+        writeln!(out, "{} {}", s.join(" "), b.join(" "))?;
+    }
+    Ok(())
+}
+
+/// `fft64_rom_pkg`: the FFT's widths and twiddle ROM (`fft64_twiddles`).
+fn fft64_rom(out: &mut impl Write) -> io::Result<()> {
+    let fx = FixedOfdmConfig::default();
+    let rom = fft64_twiddles(&fx).ok_or_else(|| io::Error::other("unusable FFT widths"))?;
+    writeln!(
+        out,
+        "// rvec fft64-rom — generated from radio_phy::rx_ofdm_fixed, do not edit.\n\
+         // Regenerate: make -C hw vectors\n\
+         \n\
+         `default_nettype none\n\
+         \n\
+         package fft64_rom_pkg;\n\
+         \x20   // Widths of FixedOfdmConfig::default().\n\
+         \x20   localparam int IN_BITS  = {};\n\
+         \x20   localparam int IN_SHIFT = {};\n\
+         \x20   localparam int W_BITS   = {};\n\
+         \x20   localparam int T_BITS   = {};\n\
+         \x20   // Bit s set: stage s (0 first) halves its outputs.\n\
+         \x20   localparam logic [5:0] HALVE = 6'b{:06b};",
+        fx.in_bits, fx.in_shift, fx.fft_bits, fx.twiddle_bits, fx.fft_halve
+    )?;
+    let re: Vec<i64> = rom.iter().map(|v| v.0).collect();
+    let im: Vec<i64> = rom.iter().map(|v| v.1).collect();
+    rom_function(
+        out,
+        "tw_re",
+        "Twiddle e^(-j2pi k/64), k < 32, real part, Q(T, T - 2): fft64_twiddles()",
+        fx.twiddle_bits,
+        &re,
+    )?;
+    rom_function(
+        out,
+        "tw_im",
+        "Twiddle e^(-j2pi k/64), k < 32, imaginary part, Q(T, T - 2): fft64_twiddles()",
+        fx.twiddle_bits,
+        &im,
+    )?;
+    writeln!(out, "endpackage\n\n`default_nettype wire")
+}
+
 fn main() -> ExitCode {
     let block = std::env::args().nth(1).unwrap_or_default();
     let stdout = io::stdout();
@@ -4075,6 +4186,8 @@ fn main() -> ExitCode {
         "handoff" => handoff_vectors(&mut out),
         "dc_estimate" => dc_estimate_vectors(&mut out),
         "viterbi" => viterbi_vectors(&mut out),
+        "fft64" => fft64_vectors(&mut out),
+        "fft64-rom" => fft64_rom(&mut out),
         _ => {
             eprintln!(
                 "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
