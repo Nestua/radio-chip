@@ -1484,8 +1484,8 @@ byte but for the header's lines that name the reader.
 Command: `rxper stream 2000`, `rxagc loop|release|level|dc 2000` on the build server (branch
 `r0-09-rxdata` at 34bd75e, the tree of d658771; docker `rust:1-slim`). Reports replaced:
 `reports/rx_front_stream.txt`, `rx_front_agc_loop.txt`, `rx_front_agc_release.txt`,
-`rx_ofdm_agc_level.txt`, `rx_ofdm_agc_dc.txt`. **`rxagc per 2000` is still running**
-(130 rows); `rx_ofdm_agc_per.txt` follows in its own commit.
+`rx_ofdm_agc_level.txt`, `rx_ofdm_agc_dc.txt`, and (its own commit, the same run)
+`rx_ofdm_agc_per.txt`.
 
 What moved against the reports measured with the whole-block traceback:
 - **Frames lost: the window's cost, where 6.1a put it.** `level`, AWGN 54 Mb/s: the integer
@@ -1507,3 +1507,14 @@ What moved against the reports measured with the whole-block traceback:
 The founder's decisions that rest on these reports (decision 2's amendments: the hold, the
 clip release, the release by rate) keep their margins: the cells they were taken on move by
 at most 2 frames of 2000.
+
+**`rxagc per`** (the same run, finished later): 51 of 126 rows move, by a few frames, at the
+rates coded at 3/4. SNR at 10 % PER against 'float known' (which decodes over the whole
+block), integer columns, worst per channel: AWGN 54 Mb/s int 12/2 −0.03 → +0.00 dB, 36 Mb/s
++0.01 → +0.03; **TGn D (static) 36 Mb/s: +0.16 → +0.27 (int 13/1)**, 9 and 18 Mb/s +0.04 →
++0.10. Against the column 'float' behind the same gain control (also over the whole block)
+the 36 Mb/s point is +0.16 (it was +0.05): the window of 96 costs about 0.1 dB there, inside
+the 0.2 dB budget, and larger than the +0.08 of the G2 grid (`rxper fixed`, no gain control) by
+about the spread of one seed a point at 2000 frames (±0.05). The 'stream' column moves with
+the integer ones (TGn D 36 Mb/s −0.83 → −0.81; its offsets against 'float known' are the
+loop's own hold and front, as before).
