@@ -12,7 +12,14 @@ found is at the end.
   this one's tracker step has ended), the model as it is; the pace that follows, 2.3 to 3
   times real time.
 - **Decision 4:** register exchange, and the Viterbi decoder through the open flow before
-  the blocks around it.
+  the blocks around it. **Amended the same day, on the first measurement of decision
+  6.1a (`docs/gates/rx_ofdm.md`): the window is 96 steps, not 64.** Through the receiver a
+  window of 64 loses 11 to 25 % more frames of 1000 octets than the whole block at the
+  rates coded at 3/4 (AWGN and TGn D, E; 2000 frames a point), 96 loses 1 to 3 % more,
+  128 at most 3 frames of 2000 more. The text below still says 64: read 90 bits a
+  survivor for 58 (5760 flip-flops for 3712, about 0.1 mm² of cells more with their
+  multiplexers), 96 steps of latency for 64 (the last octet 0.2 µs later, the flush 96
+  bits), and a traceback memory correspondingly deeper in the alternative.
 - **Decision 5:** octets and a status to the MAC; the frame check sequence is the MAC's.
 
 Decisions 1 (the blocks) and 6 (the order of work) were not asked on their own: they are
