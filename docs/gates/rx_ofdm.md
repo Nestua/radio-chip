@@ -1360,3 +1360,26 @@ Asked of the founder at the start of the session, each on its own, with a recomm
    stay as measured, with the whole-block traceback.
    The full G2 grid (`rxper fixed 2000`) with the window is running on the build server
    (started 2026-11-23); its entry follows when it is in.
+
+## 2026-11-23 · G2 rerun · the full grid with the window of 96
+
+Command: `rxper fixed 2000` on the build server (sources of `main` at 3ae897f, the window of
+96 in `decode_ppdu_fixed`; docker `ubuntu:24.04`, about 4 h beside other work). Report:
+`reports/rx_ofdm_fixed.txt`, replacing the one measured with the whole-block traceback. The
+two float columns decode over the whole block as before and repeat the old report to the
+frame; only the integer column moved.
+
+Loss of the integer receiver against float at PER 10 %, worst cell per channel (dB):
+
+| Channel | whole block (old report) | window 96 |
+|---|---|---|
+| AWGN | +0.04 | +0.07 (54 Mb/s) |
+| TGn B | +0.03 | +0.04 (54 Mb/s) |
+| TGn D | +0.04 | +0.08 (9 Mb/s) |
+| TGn E | +0.03 | +0.07 (9 Mb/s) |
+
+The worst cell of the whole grid went from +0.04 to +0.08 dB, within the 0.2 dB budget.
+What moved is at the rates coded at 3/4 (9, 18, 36, 54 Mb/s), as the measurement of 6.1a
+said. Loss at the PER-10 % crossing, as the report's summary lines give it; one seed a
+point. The journal's last open item "the full G2 grid with the window of 96" is closed;
+`stream` and `rxagc` wait for `RxDataFixed` (the decision above).
