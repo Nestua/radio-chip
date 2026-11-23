@@ -698,6 +698,13 @@ fn decode_tracked(
 }
 
 /// The PSDU from the decoded DATA field: scrambler seed, descrambling, octets.
+/// The scrambler seed whose first seven outputs are `head` (the received first seven SERVICE
+/// bits, IEEE 802.11-2020 §17.3.5.5); `None` when they are all zero, which no seed gives.
+pub(crate) fn scrambler_seed_of(head: &[u8]) -> Option<u8> {
+    (1u8..128)
+        .find(|&s| Scrambler::new(s).is_ok_and(|mut sc| sc.scramble(head).iter().all(|b| *b == 0)))
+}
+
 pub(crate) fn descramble(
     bits: &[u8],
     signal: Signal,
@@ -707,9 +714,7 @@ pub(crate) fn descramble(
     // scrambler's first seven outputs and identify its seed. (Hardware loads them as the state;
     // the model searches the 127 seeds.) An error in these seven bits loses the frame.
     let head = bits.get(..7).ok_or(RxOfdmError::ScramblerSeed)?;
-    let scrambler_seed = (1u8..128)
-        .find(|&s| Scrambler::new(s).is_ok_and(|mut sc| sc.scramble(head).iter().all(|b| *b == 0)))
-        .ok_or(RxOfdmError::ScramblerSeed)?;
+    let scrambler_seed = scrambler_seed_of(head).ok_or(RxOfdmError::ScramblerSeed)?;
     let clear = Scrambler::new(scrambler_seed)
         .map_err(|_| RxOfdmError::ScramblerSeed)?
         .scramble(bits);
