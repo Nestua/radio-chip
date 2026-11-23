@@ -30,7 +30,7 @@ use radio_phy::rx_front::{
 use radio_phy::rx_front_fixed::{
     cordic_angle, cordic_table, detector_trace_fixed, ltf_corr, ltf_taps, nco_mix, nco_table,
     to_adc, FixedAcquisition, FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxFrontFixed,
-    RxHandoffFixed, SignalVerdict, ADC_FULL_SCALE, IQ, Y_BITS,
+    RxHandoffFixed, SearchAloneFixed, SignalVerdict, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_handoff::{dc_offset_of_sums, run_handoff, HandoffReader, HandoffTiming};
 use radio_phy::scrambler::Scrambler;
@@ -1610,6 +1610,332 @@ fn decide_segment(
         }
     }
     c.clear_moves_events += usize::from(moved);
+    Ok(())
+}
+
+/// One sample at the search's own inputs (the bench of `rx_search` alone): the detection
+/// event, the correlator's output (ignored before sample [`PAIR_LEN`] − 1), and the result of
+/// a decision on a candidate accepted at this sample.
+type AloneInput = (bool, IQ, bool);
+
+/// What the vectors of the search alone exercise (the cases `rvec search_alone` refuses to do
+/// without).
+#[derive(Debug, Default, Clone, Copy)]
+struct AloneCover {
+    /// The widest energy, in bits.
+    energy_bits: u32,
+    /// Energies of more than 32 bits (the chain reaches 32).
+    wide_energies: usize,
+    /// Accepted maxima of more than 32 bits.
+    wide_acceptances: usize,
+    /// Acceptances where a comparison of the energies' low 32 bits would have chosen another
+    /// maximum among the same positions.
+    other_at_32: usize,
+    /// Acceptances with an energy equal to the maximum after it (the first is kept).
+    ties: usize,
+    acceptances: usize,
+    acquisitions: usize,
+    failed: usize,
+    deadline_closes: usize,
+    extensions: usize,
+    /// Searches opened by an event at the very sample an acquisition closes them.
+    opened_at_acquisition: usize,
+}
+
+impl AloneCover {
+    fn missing(&self, w: usize) -> Vec<&'static str> {
+        let k = FixedRxConfig::default().corr_bits;
+        // The bound: w squares of 2·2^(2K−2), at full scale for both components.
+        let top = 128 - ((w as i128) << (2 * k - 1)).leading_zeros();
+        [
+            (self.energy_bits == top, "the energy's bound for this w"),
+            (self.wide_energies > 0, "an energy above 32 bits"),
+            (
+                self.wide_acceptances > 0,
+                "an accepted maximum above 32 bits",
+            ),
+            (
+                self.other_at_32 > 0,
+                "a maximum the low 32 bits would not choose",
+            ),
+            (self.ties > 0, "a tie with the maximum"),
+            (self.acquisitions > 0, "an acquisition"),
+            (self.failed > 0, "a failed decision (restart)"),
+            (self.deadline_closes > 0, "a search closed by its deadline"),
+            (self.extensions > 0, "an event in an open search"),
+            (
+                self.opened_at_acquisition > 0,
+                "a search opened at an acquisition",
+            ),
+        ]
+        .into_iter()
+        .filter(|(ok, _)| !ok)
+        .map(|(_, m)| m)
+        .collect()
+    }
+
+    fn add(&mut self, o: &Self) {
+        self.energy_bits = self.energy_bits.max(o.energy_bits);
+        self.wide_energies += o.wide_energies;
+        self.wide_acceptances += o.wide_acceptances;
+        self.other_at_32 += o.other_at_32;
+        self.ties += o.ties;
+        self.acceptances += o.acceptances;
+        self.acquisitions += o.acquisitions;
+        self.failed += o.failed;
+        self.deadline_closes += o.deadline_closes;
+        self.extensions += o.extensions;
+        self.opened_at_acquisition += o.opened_at_acquisition;
+    }
+}
+
+/// The lines of one segment of the search alone, what it exercises, and the samples at which
+/// an acquisition was applied.
+fn search_alone_trace(
+    x: &[AloneInput],
+    w: usize,
+    latency: usize,
+) -> io::Result<(Vec<String>, AloneCover, Vec<usize>)> {
+    let mut s = SearchAloneFixed::new(w, latency);
+    let mut c = AloneCover::default();
+    let mut lines = Vec::with_capacity(x.len());
+    let mut acquired_at = Vec::new();
+    let mut energy: Vec<i128> = Vec::new();
+    let mut was_open = false;
+    // The first position the running maximum may take since the last acceptance.
+    let mut restart = 0usize;
+    let low = |e: i128| e & 0xffff_ffff;
+    for (n, &(event, corr, acquire)) in x.iter().enumerate() {
+        let t = s.push(event, corr, acquire);
+        if let Some(e) = t.energy {
+            energy.push(e);
+            c.energy_bits = c.energy_bits.max(128 - e.leading_zeros());
+            c.wide_energies += usize::from(e >= 1 << 32);
+        }
+        if event {
+            c.extensions += usize::from(was_open);
+            c.opened_at_acquisition += usize::from(!was_open && t.acquired);
+            if !was_open {
+                restart = 0;
+            }
+        }
+        if let Some(a) = t.accepted {
+            let j = energy.len() - 1;
+            let start = restart.max(a.opened_by + SEARCH_OFFSET);
+            let window = energy.get(start..=j).unwrap_or_default();
+            // The first maximum, at full width and at 32 bits.
+            let first_max = |key: &dyn Fn(i128) -> i128| {
+                window
+                    .iter()
+                    .enumerate()
+                    .fold(None, |b: Option<(usize, i128)>, (p, &e)| match b {
+                        Some((_, m)) if key(e) <= m => b,
+                        _ => Some((p, key(e))),
+                    })
+                    .map(|(p, _)| start + p)
+            };
+            if first_max(&|e| e) != Some(a.imax) {
+                return Err(io::Error::other(format!(
+                    "search_alone: the maximum at {} is not the window's ({start}..={j})",
+                    a.imax
+                )));
+            }
+            c.other_at_32 += usize::from(first_max(&low) != Some(a.imax));
+            c.ties += usize::from(energy[a.imax + 1..=j].contains(&a.emax));
+            c.acceptances += 1;
+            c.wide_acceptances += usize::from(a.emax >= 1 << 32);
+            c.failed += usize::from(!acquire);
+            restart = j + 1;
+        }
+        if t.acquired {
+            c.acquisitions += 1;
+            acquired_at.push(n);
+        }
+        if (was_open || event) && !t.searching && !t.acquired {
+            c.deadline_closes += 1;
+        }
+        was_open = t.searching;
+        let cq = if n + 1 >= PAIR_LEN {
+            format!("{} {}", corr.0, corr.1)
+        } else {
+            "- -".to_string()
+        };
+        let e = t.energy.map_or("-".to_string(), |e| e.to_string());
+        let a = t.accepted.map_or("- - -".to_string(), |a| {
+            format!("{} {} {}", a.imax, a.emax, a.opened_by)
+        });
+        lines.push(format!(
+            "{} {cq} {} {} {} {e} {a}",
+            u8::from(event),
+            u8::from(acquire),
+            u8::from(t.acquired),
+            u8::from(t.searching)
+        ));
+    }
+    Ok((lines, c, acquired_at))
+}
+
+/// A correlator output with heavy tails: each component's magnitude below 2^b, b uniform in
+/// 0 … K − 1, a random sign; one in sixteen at a rail (−2^(K−1) or 2^(K−1) − 1).
+fn heavy_corr(rng: &mut Rng, k: u32) -> IQ {
+    let mut comp = || {
+        let r = rng.next_u64();
+        let lo = -(1i64 << (k - 1));
+        match r & 0xf {
+            0 => lo,
+            1 => -lo - 1,
+            _ => {
+                let b = ((r >> 4) % u64::from(k)) as u32;
+                let m = ((r >> 16) & ((1u64 << b) - 1)) as i64;
+                if (r >> 63) == 1 {
+                    -m
+                } else {
+                    m
+                }
+            }
+        }
+    };
+    (comp(), comp())
+}
+
+/// Vectors for the LTF search alone (gate G3: `make -C hw search_alone`): `rx_search` driven at
+/// its own inputs against `SearchAloneFixed`, the search of `RxFrontFixed`, sample by sample —
+/// the energy, whether a search is open, the candidate accepted, at values the chain cannot
+/// produce (it reaches 32 of the energy's 44 bits; the founder's decision of 2026-11-23,
+/// `docs/gates/rx_front.md`). A segment is for one (GI − B, decision latency), in its `reset`
+/// line; the testbench of a build runs the segments of its own. Scenes: every correlator
+/// output at the negative rail (the bound; equal energies); the rails' combinations in turn;
+/// heavy-tailed outputs under random events with random decisions, chosen by their seed for
+/// maxima that the energies' low 32 bits would not choose; a peak late in a search window, its
+/// acquisition due after the deadline, and an event on the acquisition's sample.
+fn search_alone_vectors(out: &mut impl Write) -> io::Result<()> {
+    let k = FixedRxConfig::default().corr_bits;
+    let lo = -(1i64 << (k - 1));
+    let hi = -lo - 1;
+    writeln!(
+        out,
+        "# rvec search_alone — generated, do not edit. Regenerate: make -C hw vectors"
+    )?;
+    writeln!(
+        out,
+        "# SearchAloneFixed (the search of RxFrontFixed at its correlator's output, K = {k})."
+    )?;
+    writeln!(
+        out,
+        "# reset <label> <w> <decision latency> starts a segment; then <event> <c re> <c im>"
+    )?;
+    writeln!(
+        out,
+        "# (- - before the first correlator output) <acquire> <acquired> <searching> <energy | ->"
+    )?;
+    writeln!(
+        out,
+        "# <imax> <emax> <opened by> (- - - without an acceptance). <acquire>: the decision's"
+    )?;
+    writeln!(
+        out,
+        "# result for a candidate accepted at this sample; <acquired>: an acquisition applied here."
+    )?;
+    // (w, decision latency): the builds of `make -C hw search_alone`.
+    for (w, latency) in [(16usize, 64usize), (12, 64), (8, 20), (4, 67), (1, 64)] {
+        let mut scenes: Vec<(String, Vec<AloneInput>)> = Vec::new();
+        // The negative rail everywhere: the bound, every energy equal. A search acquired, then
+        // one whose decision fails and that closes by its deadline.
+        scenes.push((
+            "full_scale".to_string(),
+            (0..1100)
+                .map(|n| (n == 3 || n == 600, (lo, lo), n < 600))
+                .collect(),
+        ));
+        // The rails' combinations in turn: energies near the bound that differ in their low
+        // bits only.
+        let rails = [
+            (lo, lo),
+            (hi, hi),
+            (lo, hi),
+            (hi, lo),
+            (lo, 0),
+            (0, hi),
+            (hi, 1),
+            (-1, lo),
+        ];
+        scenes.push((
+            "rails".to_string(),
+            (0..900)
+                .map(|n| {
+                    (
+                        n % 300 == 7,
+                        rails[(n * 5 + n / 7) % rails.len()],
+                        n % 2 == 0,
+                    )
+                })
+                .collect(),
+        ));
+        // Heavy tails under random events and decisions: seeds until both segments together
+        // have maxima the low 32 bits would not choose.
+        let mut found = 0;
+        for seed in 0..200u64 {
+            let mut rng = Rng::new(0x5EA1_0000 + seed * 31 + w as u64);
+            let x: Vec<AloneInput> = (0..1400)
+                .map(|n| {
+                    let r = rng.next_u64();
+                    let event = n < 1100 && r.is_multiple_of(97) || n == 20;
+                    (event, heavy_corr(&mut rng, k), !(r >> 20).is_multiple_of(3))
+                })
+                .collect();
+            let (_, c, _) = search_alone_trace(&x, w, latency)?;
+            if c.other_at_32 > 0 && c.acceptances >= 3 {
+                scenes.push((format!("heavy_tails_{seed}"), x));
+                found += 1;
+                if found == 2 {
+                    break;
+                }
+            }
+        }
+        // A peak late in the window: the search closes by its deadline while the decision is
+        // in flight, and an event on the acquisition's sample opens a search it closes.
+        let peak = (0..64usize).find_map(|back| {
+            let mut rng = Rng::new(0x5EA1_9000 + back as u64);
+            let ev = 10usize;
+            let p = ev + SEARCH_OFFSET + SEARCH_LEN - LTF_SYMBOL_LEN - w - back;
+            let mut x: Vec<AloneInput> = (0..1000)
+                .map(|n| {
+                    let c = heavy_corr(&mut rng, 11);
+                    (n == ev, c, true)
+                })
+                .collect();
+            for v in x.iter_mut().skip(p + PAIR_LEN - 1).take(w) {
+                v.1 = (hi, lo);
+            }
+            let (_, _, acq) = search_alone_trace(&x, w, latency).ok()?;
+            let q = *acq.first()?;
+            x[q].0 = true;
+            let (_, c, _) = search_alone_trace(&x, w, latency).ok()?;
+            (c.opened_at_acquisition > 0).then_some(x)
+        });
+        let x = peak.ok_or_else(|| {
+            io::Error::other(format!("w = {w}: no search opened at an acquisition"))
+        })?;
+        scenes.push(("opened_at_acquisition".to_string(), x));
+
+        let mut total = AloneCover::default();
+        for (label, x) in &scenes {
+            let (lines, c, _) = search_alone_trace(x, w, latency)?;
+            total.add(&c);
+            writeln!(out, "reset {label} {w} {latency}")?;
+            for l in lines {
+                writeln!(out, "{l}")?;
+            }
+        }
+        let missing = total.missing(w);
+        if !missing.is_empty() {
+            return Err(io::Error::other(format!(
+                "search_alone w = {w}: missing {}",
+                missing.join(", ")
+            )));
+        }
+        writeln!(out, "# w = {w}, L = {latency}: {total:?}")?;
+    }
     Ok(())
 }
 
@@ -3616,6 +3942,7 @@ fn main() -> ExitCode {
         "det" => det_vectors(&mut out),
         "latch" => latch_vectors(&mut out),
         "search" => search_vectors(&mut out),
+        "search_alone" => search_alone_vectors(&mut out),
         "decide" => decide_vectors(&mut out),
         "front" => front_vectors(&mut out),
         "handoff" => handoff_vectors(&mut out),
@@ -3623,7 +3950,7 @@ fn main() -> ExitCode {
         "viterbi" => viterbi_vectors(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, decide, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
