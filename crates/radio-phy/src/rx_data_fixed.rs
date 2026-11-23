@@ -32,7 +32,7 @@ use crate::modulation::Modulation;
 use crate::ppdu::data_symbols;
 use crate::rx_front_fixed::{HandoffBeat, HandoffConfig, HandoffEnd, SignalVerdict, IQ};
 use crate::rx_ofdm::{
-    scrambler_seed_of, signal_checked, symbol_start, RxOfdmConfig, RxOfdmError, Signal,
+    scrambler_seed_of, signal_checked, symbol_start, RxOfdmConfig, RxOfdmError, Signal, SignalCheck,
 };
 use crate::rx_ofdm_fixed::{
     channel_with, symbol_with, tables, FixedChannel, FixedOfdmConfig, FixedTracking, Tables,
@@ -79,6 +79,8 @@ pub enum RxDataEvent {
         packet: u8,
         /// The verdict.
         verdict: Option<SignalVerdict>,
+        /// SIGNAL's check, what the verdict's patience was taken from (`None`: failed).
+        check: Option<SignalCheck>,
     },
     /// `rx_start`: SIGNAL decoded.
     Start {
@@ -277,6 +279,7 @@ impl RxDataFixed {
             out.push(RxDataEvent::Verdict {
                 packet,
                 verdict: None,
+                check: None,
             });
             out.push(RxDataEvent::End(RxDataEnd::Signal(e)));
             Phase::Idle
@@ -307,6 +310,7 @@ impl RxDataFixed {
         out.push(RxDataEvent::Verdict {
             packet,
             verdict: Some(SignalVerdict::of(signal, check, &self.pace)),
+            check: Some(check),
         });
         let symbols = data_symbols(signal.rate, signal.length);
         out.push(RxDataEvent::Start {

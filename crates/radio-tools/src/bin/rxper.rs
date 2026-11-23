@@ -34,16 +34,14 @@ use radio_phy::channel::{
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
+use radio_phy::rx_data_fixed::{RxDataEnd, RxDataEvent, RxDataFixed};
 use radio_phy::rx_front::{acquire, correct, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
     acquire_fixed, correct_fixed, handoff_fixed, ltf_dc_offset_fixed, remove_dc_fixed, to_adc,
-    FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxHandoffFixed, SignalVerdict,
-    ADC_FULL_SCALE, IQ, Y_BITS,
+    FixedRxConfig, HandoffConfig, RxHandoffFixed, SignalVerdict, ADC_FULL_SCALE, IQ, Y_BITS,
 };
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{
-    clock_ratio, decode_ppdu_fixed, decode_signal_checked_fixed, FixedOfdmConfig, FixedTracking,
-};
+use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
 
@@ -849,11 +847,11 @@ struct Streamed {
     stopped: bool,
 }
 
-/// One frame through the streaming front ([`RxHandoffFixed`]) and the integer decoder as
-/// its reader: the decoder takes every beat at once (so no stream is lost to it), tells the
-/// front SIGNAL's verdict [`VERDICT_LATENCY`] periods after the beat that completes SIGNAL's
-/// window, with the tag of the stream it read, and decodes the stream when its end mark
-/// comes. The reader sees the beats alone: not the acquisition, not where the frame is.
+/// One frame through the streaming front ([`RxHandoffFixed`]) and the streaming data path
+/// ([`RxDataFixed`]) as its reader: it takes every beat at once (so no stream is lost to
+/// it), tells the front SIGNAL's verdict [`VERDICT_LATENCY`] periods after the beat that
+/// completes SIGNAL's window, with the tag of the stream it read, and hands on its octets.
+/// The reader sees the beats alone: not the acquisition, not where the frame is.
 fn streamed(scene: Scene, seed: u64, number: u64) -> Streamed {
     let rx = RxConfig::new(FS);
     let front = FixedRxConfig::default();
@@ -880,36 +878,32 @@ fn streamed(scene: Scene, seed: u64, number: u64) -> Streamed {
 
     let pace = HandoffConfig::default();
     let mut hand = RxHandoffFixed::new(rx, front, pace);
-    let mut z: Vec<IQ> = Vec::new();
-    let (mut word, mut tag) = (0i64, 0u8);
+    // The reader: the streaming data path (ADR 0010, 6.1b), which `g2_rx_data_stream` holds
+    // to `decode_ppdu_fixed` stream for stream.
+    let Some(mut data) = RxDataFixed::new(ofdm, fo, pace, clock_ratio(FS, CARRIER_HZ)) else {
+        return out;
+    };
+    let mut octets: Vec<u8> = Vec::new();
     // The verdict that is due: its period, the stream's tag and what SIGNAL said.
     let mut due: Option<(usize, u8, Option<SignalVerdict>)> = None;
     for (n, &s) in adc.iter().enumerate() {
         let step = hand.push(s, usize::MAX);
         out.declared += usize::from(step.acquired.is_some());
         for beat in step.beats {
-            match beat {
-                HandoffBeat::Sample { z: v, first } => {
-                    if let Some(f) = first {
-                        z.clear();
-                        (word, tag) = (f.cfo_phase, f.packet);
-                    }
-                    z.push(v);
-                    if z.len() == SIGNAL_END {
-                        let verdict = decode_signal_checked_fixed(&z, 0, &ofdm, &fo, start(word))
-                            .ok()
-                            .map(|(s, check)| SignalVerdict::of(s, check, &pace));
-                        due = Some((n + VERDICT_LATENCY, tag, verdict));
-                    }
-                }
-                HandoffBeat::End(end) => {
-                    match end {
-                        HandoffEnd::Packet => out.stream |= decode(&z, 0, word),
-                        HandoffEnd::Stopped => out.stopped = true,
+            for e in data.push(beat) {
+                match e {
+                    RxDataEvent::Verdict {
+                        packet, verdict, ..
+                    } => due = Some((n + VERDICT_LATENCY, packet, verdict)),
+                    RxDataEvent::Start { .. } => octets.clear(),
+                    RxDataEvent::Octet { octet, .. } => octets.push(octet),
+                    RxDataEvent::End(end) => match end {
+                        RxDataEnd::Decoded => out.stream |= octets == psdu,
+                        RxDataEnd::Signal(_) => out.stopped = true,
                         // The reader always has room: no stream is lost to it.
-                        HandoffEnd::Acquisition | HandoffEnd::Overrun => out.aborted = true,
-                    }
-                    z.clear();
+                        RxDataEnd::Aborted(_) => out.aborted = true,
+                        RxDataEnd::Seed | RxDataEnd::Truncated => {}
+                    },
                 }
             }
         }
@@ -928,8 +922,8 @@ fn streams(frames: usize) {
          # the points, frames and receiver of `fixedw` (its column `word start` is `whole` here): the frame at {ADC_LEVEL_DBFS} dBFS at the 12-bit ADC, clock offset uniform in ±40 ppm.\n\
          # whole: acquire_fixed, handoff_fixed of the buffer rotated from its first sample, decode_ppdu_fixed;\n\
          # slice: the same with the rotation started at T1's window, the replay's phase;\n\
-         # stream: every sample through RxHandoffFixed (8 beats a period, replay 20 periods after the declaration), the decoder as its reader: it takes every beat at once, gives SIGNAL's verdict\n\
-         #   (decode_signal_checked_fixed on the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods after the beat that completes them and decodes when the end mark comes; it sees the beats alone.\n\
+         # stream: every sample through RxHandoffFixed (8 beats a period, replay 20 periods after the declaration), the streaming data path RxDataFixed (ADR 0010, 6.1b; window 96) as its reader:\n\
+         #   it takes every beat at once, gives SIGNAL's verdict (from the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods after the beat that completes them, and its octets; it sees the beats alone.\n\
          # w/s: frames lost by whole alone / by slice alone. s/s: frames lost by the stream alone / by the slice alone. again: frames in which the front declared more than once.\n\
          # aborted, stopped: frames with a stream ended by a new declaration, by a failed SIGNAL. (The reader always has room: no stream can be lost to it here.)\n\
          # columns: whole | slice | stream | w/s | s/s | again | aborted | stopped"

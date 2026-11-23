@@ -19,7 +19,7 @@ use radio_phy::rx_front_fixed::{
     acquire_fixed, handoff_fixed, to_adc, FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd,
     HandoffStart, RxHandoffFixed, SignalVerdict, ADC_FULL_SCALE, IQ,
 };
-use radio_phy::rx_ofdm::{RxOfdmConfig, RxOfdmError};
+use radio_phy::rx_ofdm::{RxOfdmConfig, RxOfdmError, SignalCheck};
 use radio_phy::rx_ofdm_fixed::{
     clock_ratio, decode_ppdu_fixed, decode_signal_checked_fixed, FixedOfdmConfig, FixedTracking,
 };
@@ -128,6 +128,7 @@ fn start(word: i64) -> FixedTracking {
 struct Got {
     verdict_at: Option<usize>,
     verdict: Option<Option<SignalVerdict>>,
+    check: Option<Option<SignalCheck>>,
     start: Option<radio_phy::rx_ofdm::Signal>,
     frame_end: Option<usize>,
     octets: Vec<u8>,
@@ -140,9 +141,15 @@ impl Got {
     fn take(&mut self, ev: &[RxDataEvent], beat: usize) {
         for e in ev {
             match *e {
-                RxDataEvent::Verdict { verdict, .. } => {
+                RxDataEvent::Verdict { verdict, check, .. } => {
+                    assert_eq!(
+                        check.is_some(),
+                        verdict.is_some(),
+                        "a check with every verdict"
+                    );
                     assert!(self.verdict.is_none(), "two verdicts");
                     self.verdict = Some(verdict);
+                    self.check = Some(check);
                     self.verdict_at = Some(beat);
                 }
                 RxDataEvent::Start { signal, frame_end } => {
@@ -194,10 +201,10 @@ fn check(
 ) {
     let (cfg, fo, pace) = (ofdm(), FixedOfdmConfig::default(), pace());
     if z.len() >= SIGNAL_END {
-        let want = decode_signal_checked_fixed(&z[..SIGNAL_END], 0, &cfg, &fo, start(word))
-            .ok()
-            .map(|(s, c)| SignalVerdict::of(s, c, &pace));
+        let signal = decode_signal_checked_fixed(&z[..SIGNAL_END], 0, &cfg, &fo, start(word)).ok();
+        let want = signal.map(|(s, c)| SignalVerdict::of(s, c, &pace));
         assert_eq!(got.verdict, Some(want), "verdict");
+        assert_eq!(got.check, Some(signal.map(|(_, c)| c)), "SIGNAL's check");
         assert_eq!(got.verdict_at, Some(SIGNAL_END - 1), "verdict's beat");
     }
     match mark {
@@ -308,7 +315,10 @@ fn through_front(adc: &[(i16, i16)], psdus: &[Vec<u8>], tally: &mut Tally) {
             tally.moves += usize::from(data.shift() != before && data.busy());
             got.take(&ev, z.len().saturating_sub(1));
             for e in &ev {
-                if let RxDataEvent::Verdict { packet, verdict } = *e {
+                if let RxDataEvent::Verdict {
+                    packet, verdict, ..
+                } = *e
+                {
                     due = Some((n + VERDICT_LATENCY, packet, verdict));
                 }
             }

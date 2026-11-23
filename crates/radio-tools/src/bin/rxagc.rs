@@ -33,16 +33,14 @@ use radio_phy::channel::{
 };
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, Rate};
+use radio_phy::rx_data_fixed::{RxDataEnd, RxDataEvent, RxDataFixed};
 use radio_phy::rx_front::{acquire, correct, dc_block, ltf_dc_offset, RxConfig};
 use radio_phy::rx_front_fixed::{
     acquire_fixed, correct_fixed, dc_block_fixed, ltf_dc_offset_fixed, remove_dc_fixed, to_adc,
-    FixedRxConfig, HandoffBeat, HandoffConfig, HandoffEnd, RxHandoffFixed, SignalVerdict,
-    ADC_FULL_SCALE, IQ,
+    FixedRxConfig, HandoffBeat, HandoffConfig, RxHandoffFixed, SignalVerdict, ADC_FULL_SCALE, IQ,
 };
 use radio_phy::rx_ofdm::{decode_ppdu_from, RxOfdmConfig, Tracking};
-use radio_phy::rx_ofdm_fixed::{
-    clock_ratio, decode_ppdu_fixed, decode_signal_checked_fixed, FixedOfdmConfig, FixedTracking,
-};
+use radio_phy::rx_ofdm_fixed::{clock_ratio, decode_ppdu_fixed, FixedOfdmConfig, FixedTracking};
 
 type C = (f64, f64);
 
@@ -595,10 +593,10 @@ const SIGNAL_END: usize = 128 + 80;
 const VERDICT_LATENCY: usize = 50;
 
 /// One frame through the closed loop of one keeper, a sample at a time: the gain control
-/// (with its timer), the ADC, the streaming front ([`RxHandoffFixed`]) and the integer
-/// decoder as its reader, which sees the beats alone, gives SIGNAL's verdict
-/// [`VERDICT_LATENCY`] periods after the beat that completes SIGNAL's window and decodes a
-/// stream when its end mark comes. The front's hold after sample n − 1 − `delay` is the
+/// (with its timer), the ADC, the streaming front ([`RxHandoffFixed`]) and the streaming
+/// data path ([`RxDataFixed`]) as its reader, which sees the beats alone, gives SIGNAL's
+/// verdict [`VERDICT_LATENCY`] periods after the beat that completes SIGNAL's window and
+/// hands on its octets. The front's hold after sample n − 1 − `delay` is the
 /// control's hold of sample n ([`Hold::Front`]). Every stretch of constant gain has its own
 /// offset, and the carrier phase turns at each change by an angle uniform in ±[`JUMP_DEG`]
 /// drawn from `jumps` and the change's own sample. All integer from the ADC on.
@@ -610,10 +608,6 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
     };
     let fo = FixedOfdmConfig::default();
     let ofdm = RxOfdmConfig::default();
-    let start = |word: i64| match clock_ratio(FS, CARRIER_HZ) {
-        Some(ratio) => FixedTracking::from_cfo_word(word, ratio, &fo),
-        None => FixedTracking::unknown(&fo),
-    };
     // The tool's own hold: it knows where the packet is.
     let from_lock = (k.hold == Hold::FromLock)
         .then(|| {
@@ -649,8 +643,13 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
     // The front's hold after the sample before.
     let mut held_on = false;
     let (mut gain, mut phase) = (f64::NAN, 0.0);
-    let mut z: Vec<IQ> = Vec::new();
-    let (mut word, mut tag) = (0i64, 0u8);
+    // The reader: the streaming data path (ADR 0010, 6.1b), held to `decode_ppdu_fixed`
+    // stream for stream by `g2_rx_data_stream`.
+    let Some(mut data) = RxDataFixed::new(ofdm, fo, pace, clock_ratio(FS, CARRIER_HZ)) else {
+        return Kept::default();
+    };
+    let mut octets: Vec<u8> = Vec::new();
+    let mut tag = 0u8;
     // The verdict that is due: its period, the stream's tag and what SIGNAL said.
     let mut due: Option<(usize, u8, Option<SignalVerdict>, bool)> = None;
     let mut out = Kept::default();
@@ -691,17 +690,24 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
             (given_up, robust, unopened) = (false, keep, true);
         }
         for beat in got.beats {
-            match beat {
-                HandoffBeat::Sample { z: v, first } => {
-                    if let Some(f) = first {
-                        z.clear();
-                        (word, tag) = (f.cfo_phase, f.packet);
-                        unopened = false;
-                    }
-                    z.push(v);
-                    if z.len() == SIGNAL_END {
-                        let signal =
-                            decode_signal_checked_fixed(&z, 0, &ofdm, &fo, start(word)).ok();
+            if let HandoffBeat::Sample { first: Some(f), .. } = beat {
+                tag = f.packet;
+                unopened = false;
+            }
+            let events = data.push(beat);
+            // SIGNAL's verdict, and the field it was read from (`Start`, in the same beat).
+            let field = events.iter().find_map(|e| match e {
+                RxDataEvent::Start { signal, .. } => Some(*signal),
+                _ => None,
+            });
+            for e in events {
+                match e {
+                    RxDataEvent::Verdict {
+                        packet,
+                        verdict,
+                        check,
+                    } => {
+                        let signal = field.zip(check);
                         if let Some((s, check)) = signal {
                             let own =
                                 s.rate == st.rate && (s.length == st.psdu.len() || s.length == 100);
@@ -713,26 +719,20 @@ fn keep(st: &Stream, agc: &FastAttackAgc, k: &Keeper, jumps: u64) -> Kept {
                                 && k.trial.is_none_or(|t| check.agree >= t.trust)
                         });
                         // The model's patience only where the column has it.
-                        let verdict = signal.map(|(s, check)| {
-                            let v = SignalVerdict::of(s, check, &pace);
-                            SignalVerdict {
-                                patient: v.patient && k.by_rate && k.trial.is_none(),
-                                ..v
-                            }
+                        let verdict = verdict.map(|v| SignalVerdict {
+                            patient: v.patient && k.by_rate && k.trial.is_none(),
+                            ..v
                         });
-                        due = Some((n + VERDICT_LATENCY, tag, verdict, slow));
+                        due = Some((n + VERDICT_LATENCY, packet, verdict, slow));
                     }
-                }
-                HandoffBeat::End(end) => {
-                    match end {
-                        HandoffEnd::Packet => {
-                            out.ok |= decode_ppdu_fixed(&z, 0, &ofdm, &fo, start(word))
-                                .is_ok_and(|d| d.psdu == st.psdu);
-                        }
-                        HandoffEnd::Stopped => out.stopped += 1,
-                        HandoffEnd::Acquisition | HandoffEnd::Overrun => out.aborted += 1,
-                    }
-                    z.clear();
+                    RxDataEvent::Start { .. } => octets.clear(),
+                    RxDataEvent::Octet { octet, .. } => octets.push(octet),
+                    RxDataEvent::End(end) => match end {
+                        RxDataEnd::Decoded => out.ok |= octets == st.psdu,
+                        RxDataEnd::Signal(_) => out.stopped += 1,
+                        RxDataEnd::Aborted(_) => out.aborted += 1,
+                        RxDataEnd::Seed | RxDataEnd::Truncated => {}
+                    },
                 }
             }
         }
@@ -951,10 +951,10 @@ fn hold_loop(frames: usize, trials: bool) {
          # row says; clock offset uniform in ±40 ppm, carrier 5.8 GHz. Gain control: the AD9361's reset values with 16\n\
          # samples of power and the overload exit on (as every command), stepped with the receiver (FastAttackAgc::start).\n\
          # Receiver, all in integers, in every column: each ADC sample through the streaming front (RxHandoffFixed: 8 beats\n\
-         # a period, the replay 20 periods after the declaration), the decoder as its reader: it sees the beats alone, gives\n\
-         # SIGNAL's verdict (decode_signal_checked_fixed on the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods\n\
-         # after the beat that completes them and decodes a stream (decode_ppdu_fixed, the tracker started from the CFO\n\
-         # word) when its end mark comes. The front searches all through; a frame is received if any stream decodes to it.\n\
+         # a period, the replay 20 periods after the declaration), the streaming data path RxDataFixed as its reader (ADR\n\
+         # 0010, 6.1b; window 96, the tracker started from the CFO word): it sees the beats alone, gives SIGNAL's verdict\n\
+         # (from the stream's first {SIGNAL_END} samples, with the stream's tag) {VERDICT_LATENCY} periods after the beat that completes them,\n\
+         # and its octets. The front searches all through; a frame is received if any stream decodes to it.\n\
          # Phase jump per gain change uniform in ±{JUMP_DEG}°.\n\
          # Who keeps the gain still:\n\
          #   from the lock    = held from the control's first lock inside the packet to the stream's end\n\
