@@ -190,3 +190,16 @@ more bits per path metric (64 registers of 13 bits, add-compare-select 13 bits w
 
 Open question 2 (the loss at BER 1e-5) is superseded by R0-09's sweep, which measures the
 whole receiver at 10 % PER of 1000-octet frames.
+
+## 2026-11-23 · decision · the traceback window is 96 (the founder), after the receiver's frames lost
+
+The window of 64 chosen above (0.024 dB at a bit error rate of 10⁻⁴, BPSK in white noise)
+was put into the receiver model on 2026-11-23 (ADR 0010, decision 6.1a) and measured as
+frames lost for the first time: 11 to 25 % more frames of 1000 octets lost than with the
+whole block at the rates coded at 3/4, in white noise and through TGn D and E
+(`rx_ofdm.md` of this date, `reports/rx_ofdm_fixedw.txt`). With 96 it is 1 to 3 %, with
+128 at most 3 frames of 2000. The founder chose 96. `TRACEBACK_DEPTH` = 96.
+
+The G2 table above stands as what it measured; its budget (a bit error rate) was the wrong
+yardstick for a frame of 8000 bits. Not redone here: the bit error sweep at 96 (the table
+has "window 96: 0.000" at every rate).
