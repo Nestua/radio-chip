@@ -4493,3 +4493,79 @@ the bench drives the correlator's input port directly (full-scale values the cha
 not produce, energies up to the bound), with its reference from the model's search
 arithmetic, and the mutant "energy keeps 32 bits" must fail on it. Order: after the
 Viterbi decoder's RTL (R0-10, `viterbi.md`), before the data path's other blocks.
+
+## 2026-11-23 · G3 · R0-08d: the bench of `rx_search` alone (`search_alone`)
+
+The founder's decision above, carried out: `rx_search` is the top module, its correlator's
+port driven with values the chain cannot give, against the model's own search.
+
+**Reference.** The search's arithmetic and control (step 1's event, step 3's energy, window,
+maximum and acceptance) moved out of `RxFrontFixed` into one private type, `LtfSearch`,
+which the front now runs; `SearchAloneFixed` runs the same code at the correlator's output,
+with step 4 (the decision in flight, `decision_latency` samples, an acquisition closing the
+search) and the decision's result as an input. Evidence that nothing moved: `make -C hw
+vectors` regenerates every committed file without a diff after the change, and
+`crates/radio-phy/tests/rx_search_alone.rs` feeds `SearchAloneFixed` the events and
+correlator outputs of `RxFrontFixed::push_traced` (frames, failed candidates, a tone; w = 12,
+16, 8, 1, 4; L = 64, 20, 79, including L > 63 + w, where an acceptance is held back by a
+decision in flight) and requires every energy, acceptance, acquisition and search state, sample
+for sample. That test was mutated four ways (no close on an acquisition; acceptance with a
+decision in flight; the result a sample late; the correlator's window a sample off): all four
+fail (the second only after the segment with L > 63 + w was added: below that it is
+equivalent, as the RTL's header says).
+
+**G0 of the bench.** At W = 16 both components of every correlator output at −2^19 give
+e = 16 · 2 · 2^38 = 2^43, the 44th bit (the test `full_scale_correlator_outputs_reach_the_
+energys_top_bit`). Vectors `hw/vectors/search_alone.txt` (`rvec search_alone`), per (W, L):
+every output at the negative rail (the bound, all energies equal: the first maximum kept, a
+search acquired, then one whose decision fails and that closes by its deadline); the rails'
+combinations in turn (energies near the bound that differ in their low bits only); two
+heavy-tailed segments (each component's magnitude below 2^b, b uniform in 0 … 19, one in
+sixteen at a rail) under random events and decisions, chosen by their seed for acceptances
+where the energies' low 32 bits would choose another maximum; a peak late in the window, so
+the search closes by its deadline with the decision in flight and an event on the
+acquisition's sample opens a search it closes. `rvec` refuses to write a (W, L) without each
+of: the bound for that W, energies and accepted maxima above 32 bits, a maximum the low 32
+bits would not choose (9 to 18 per W), a tie with the maximum, an acquisition, a failed
+decision, a deadline close, an event in an open search, a search opened at an acquisition.
+
+**The testbench** (`hw/tb/tb_search_alone.cpp`): every energy in its cycle (sample edge
+F + PATH_DELAY + 1), every sample's strobe with `searching` and the acceptance's six fields
+(F + PATH_DELAY + 2), the ring read back after each acceptance as the decision reads it
+(W + 1 words, oldest first). `acquired` in turn in the cycle of `acc_valid` (the earliest)
+and in the cycle before the search takes sample n + L (the latest legal one: a cycle later
+is the RTL's own `$error`). Before each segment a one-clock reset at one of four phases
+after its first acceptance (the energy registered, the strobe, the ring being read, a
+decision in flight with `acquired` remembered), the whole segment run again after it; junk
+samples with their correlator outputs in flight at each end reset, and nothing may come out
+after it.
+
+**Result** (commit 40a5183, `make -C hw search_alone`, Verilator 5.054): five builds
+W.L.PATH_DELAY = 16.64.19, 12.64.19, 8.20.7, 4.67.1 (L = 63 + W, the largest the RTL takes),
+1.64.19, each at R = 8 and 13: **0 mismatches in all ten runs**; per run 5800 samples, 5090
+to 5165 energies (2751 to 4271 above 32 bits), 14 to 23 acceptances, 5 to 10 acquisitions,
+5 resets in flight.
+
+**The gate bites** (`hw/rtl/rx_search.sv` mutated, `make -C hw search_alone`, then the chain's
+gate `make -C hw search` on the same mutant):
+
+| Mutant | `search_alone` | `search` (chain) |
+|---|---|---|
+| energy keeps 32 bits (the founder's named mutant) | **fails** (energy 142 of `full_scale`) | passes |
+| energy keeps 43 bits | **fails** (the same) | passes |
+| squares at 32 bits | **fails** (the same) | passes |
+| squares lose their carry (39 bits) | **fails** (the same) | passes |
+| comparison at 32 bits | **fails** (acceptance at 258 of `rails`) | passes |
+| maximum kept at 32 bits | **fails** (acceptance at 248 of `full_scale`) | passes |
+| ring written at 32 bits | **fails** (ring word 27 of `full_scale`) | passes |
+| the square of a zero-extended input | **fails** (energy 142 of `rails`) | fails (the RTL's `$error`: `acquired` without a decision) |
+
+Seven of eight pass the chain's gate: the gap recorded at part d step 2 was real, and this
+bench closes it. (Mutation script in the session's scratchpad, not in the repository.)
+
+**Not covered**
+- L above 63 + W: the RTL refuses it at elaboration, and the model's held-back acceptance is
+  covered by the model's test only.
+- Resets longer than a clock; clock patterns that remove clocks; R below 8.
+- The decision engine (`rx_decide`) on energies above 32 bits: it reads `acc_emax` and the
+  ring at full width, but its own gate (`decide`) is on the chain's values.
