@@ -1,10 +1,25 @@
 # ADR 0010 — Receiver data path, top level: from the hand-off's stream to the PSDU
 
-Status: **proposed** · 2026-11-23 · PHY architecture (risk point). Follows ADR 0008 (the
-hand-off's stream, the latency budget of its decision 3, the verdict of its decision 2).
-An independent review of the first draft (fresh agent, 2026-11-23) changed decisions 2, 3
-and 5, the latency table and the area table; what it found is at the end. Not yet put to
-the founder.
+Status: **accepted** · proposed and accepted by the founder 2026-11-23 · PHY architecture
+(risk point). Follows ADR 0008 (the hand-off's stream, the latency budget of its decision
+3, the verdict of its decision 2). An independent review of the first draft (fresh agent,
+2026-11-23) changed decisions 2, 3 and 5, the latency table and the area table; what it
+found is at the end.
+
+## Decided (the founder, 2026-11-23, each item asked on its own; the recommendation taken in each)
+
+- **Decisions 2 and 3:** one symbol after another (the next symbol's window only when
+  this one's tracker step has ended), the model as it is; the pace that follows, 2.3 to 3
+  times real time.
+- **Decision 4:** register exchange, and the Viterbi decoder through the open flow before
+  the blocks around it.
+- **Decision 5:** octets and a status to the MAC; the frame check sequence is the MAC's.
+
+Decisions 1 (the blocks) and 6 (the order of work) were not asked on their own: they are
+the proposal's, and the first is partly left to the blocks' own G0 (the FFT's
+architecture, the metric's width).
+
+The text below is the proposal as it was put to the founder.
 
 Scope: the 20 MHz legacy formats (802.11a/g: BCC, eight rates), one chain. LDPC, HT and
 later formats, and more than one chain, are named under "Open".
