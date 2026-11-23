@@ -1518,3 +1518,107 @@ the 0.2 dB budget, and larger than the +0.08 of the G2 grid (`rxper fixed`, no g
 about the spread of one seed a point at 2000 frames (±0.05). The 'stream' column moves with
 the integer ones (TGn D 36 Mb/s −0.83 → −0.81; its offsets against 'float known' are the
 loop's own hold and front, as before).
+
+## 2026-11-23 · G0 + gate · ADR 0010 step 6.1c: the data path's schedule in clocks (`RxDataSchedule`)
+
+**Block.** `radio_phy::rx_data::RxDataSchedule`: `RxDataFixed` on a schedule in clocks. It
+is a reader of the hand-off (`rx_handoff::HandoffReader`), so `run_handoff` runs the front's
+stream and this data path together, the verdict going back in the cycle the schedule gives
+it. The model decides what comes out (every beat taken is pushed into `RxDataFixed`, and its
+events are given back in its order); the schedule decides when: the reader's ready, each
+window's transform, each job on the shared units, the trellis steps, and the cycle of every
+event. The module's text is the G0 in full; in short:
+
+**G0: the structure** (the decision here):
+- *The reader*: T1, T2, SIGNAL and the first data symbol at places known at the first beat
+  (SIGNAL's fit is identically zero, ADR 0010 decision 3). Data symbol i + 1's window waits
+  for symbol i's shift (cycle Sᵢ + 1), but the samples before the earliest place it can have
+  (the old place less one: a shift moves a sample a symbol at most) are taken and dropped
+  whenever they come. Two window stores, each held from its first sample to its transform's
+  start + 64. After the last window, or once the model has ended the frame, the tail is
+  taken and dropped; after a mark nothing is taken until the packet's last event is out
+  (Context 3's rule 5).
+- *One transform at a time*; the channel from T2's bins; per symbol the products unit (four
+  pilots, the two pair products as soon as the pilots are registered, the 48 data products
+  around them); the CORDIC, iterative, in a fixed order (SIGNAL: the common phase first, the
+  pair angles after, as they feed only the fit's sums; a data symbol: the pair angles, then
+  the phase); the divider, serial, in a fixed order (BPSK's scale, the two coefficients and
+  the variance from the channel; per data symbol its fit; the data's scale after the first
+  fit, asked at the verdict); the rotator (the pilots by θ, then the soft pass); a soft buffer
+  of two symbols; the decoder a step a clock, the bits out `depth` steps late and the window's
+  last bits from state 0 a bit a clock; the products' store free once the soft pass has read
+  it.
+- *Quotient widths*: the scale bit-length(A) + 1 (A·2ⁿ/Σg lies in (A, 2A]: 18 bits for BPSK,
+  20 for 64-QAM at 8 / 3), the coefficients K − 2 = 14, the variance V + 2 = 12 (it is compared
+  with 3 nominal ones), the fit P + R − 4 = 28 (the model's saturation of δ).
+
+**G0: the allowances** (`DataTiming::default()`; RTL that does not exist yet, each replaced
+when its block has RTL): FFT 96 a transform (ADR 0010's figure; `fft64`'s G0 settles it),
+its window read in 64; channel 110 (two passes over 52 bins); products 3; CORDIC 18 an angle;
+a division its quotient bits + 2; the fit asked 5 after the inner angle, θ 2 after the
+quotient; rotator 4; soft pass 9 from a subcarrier's issue to its values written, six scale
+products (one subcarrier a clock at every modulation); the best state's tree 3; SIGNAL's
+checks 10 after its 24th step; an octet 1 after its last bit.
+
+**The table of ADR 0010's decision 3, made exact** (24 octets at 54 Mb/s, one data symbol,
+beats offered every cycle; ADR 0010 counts from the declaration's tick t, the first beat
+being t + 161): T1, T2, SIGNAL, data transforms done at 160, 256, 352, 448 after the first
+beat (ADR: 321, 417, 513, 609 after t — the same); the channel 366; SIGNAL's φ 398, its soft
+values 455, **the verdict 489 (650 after t; ADR ≈ 650)**; the data symbol's θ 531, φ 557, soft
+values 614, its 214 steps 615 … 828; **the last octet 922 (1083 after t; ADR ≈ 1070)**: the
+flush puts octets 12 to 23 a bit a clock behind the anchor's step. Worked by hand in the
+module's text and held to the cycle by the gate.
+
+**Evidence** (commit bf717ee; `cargo test --release -p radio-phy --test
+g2_rx_data_schedule`, 7 tests green; clippy clean):
+- *The table by hand*: every window (first, last, transform, bins), every division (asked,
+  start, quotient), SIGNAL's and the data symbol's products, angles, θ, φ, scale, soft pass
+  and steps, the verdict, the start and all 24 octets at the cycles worked by hand.
+- *The pace*: a frame of 1500 octets at each of the eight rates, beats offered every cycle:
+  **245 clocks from one shift to the next at every rate** (the window 1 + 64, the transform
+  1 + 96, the pilots 6, the pair products 4, two angles 36, the fit 5 + 30 + 2): 2.6 times real
+  time (ADR 0010: 215 to 280 clocks, 2.3 to 3 times). The decoder's 216 steps a symbol at
+  54 Mb/s do not limit it; the tracker's loop does.
+- *With the front* (`run_handoff` with the schedule as its reader, the verdict back in its
+  cycle): the eight rates at 1, 24 and 300 octets, ±40 ppm, 30 dB — every PSDU right, the
+  events the model's on the beats taken, every strobe the hand-off saw a verdict event of the
+  same cycle and tag, no overrun. **The verdict 7.20 to 7.35 µs after SIGNAL's end at the
+  antenna (ADR 0010: 6.9 to 7.5); the last octet 6.06 µs after the frame's end for 24 octets
+  at 54 Mb/s (ADR: 5.6 to 6.2), 1.9 to 4.5 µs for a frame of one octet, 2.1 to 2.8 µs for 300
+  octets** (caught up with: one symbol's work behind the antenna). So ADR 0010's SIFS budget
+  stands: about 9 µs of the 16 left after the MAC's decision.
+- *Rule 5*: two frames of 1500 and 24 octets at 54 Mb/s and then one at every rate, each a
+  SIFS after the last: all decoded; the reader's closest approach to the history's end is 215
+  samples to spare of 512 — the same as for a frame alone: it is the acquisition's own lag
+  at the first beat, and the wait for the last frame's end adds nothing. A stream cut by an
+  abort mark just after a data window: the end comes after that window's octets (more than
+  100 clocks after the mark), and the next stream's first beat after the end. A frame 10 dB
+  stronger inside another's data: the first aborted, the second decoded.
+- *The stores*: one window store delays T2's and SIGNAL's first samples to the transform's
+  read; a soft buffer of one symbol makes each soft pass wait for the last symbol's steps, and
+  then the products' store makes the next symbol's products wait (more than 10 times in a
+  frame of 600 octets at 54 Mb/s).
+- *Mutants* (the gate was written beside the code, so it was shown to bite): a store too many;
+  the strobe a cycle late; no wait after a mark; no guard sample taken early; one fewer taken
+  early; the transform in its window's last cycle; the pair products a slot early; SIGNAL's
+  phase after its pair angles; the data's scale asked at 0; no soft-buffer slot; the products'
+  store free when the soft pass starts; the flush without the tree's latency — **all 12
+  fail**. Two waits of the first version were dropped because no latency makes them bind,
+  which their mutants showed (no cycle changed): the soft pass reading a data product before
+  it is registered (D₀ > φ ≥ P + 3 + product + 4 + rotator, the product of subcarrier j
+  registered by P + 6 + j + product), and a data symbol's fit before the previous symbol's
+  sums (its angles follow that symbol's on the CORDIC). The argument is in the module's text.
+
+**Not covered**
+- The allowances themselves: no block behind the hand-off has RTL yet. Each block's RTL is
+  held to its line of this schedule when it comes (ADR 0010, decision 6.2: the top level
+  "a cycle at a time against the schedule model").
+- The FFT's bin stores (T1's bins kept for the channel, the symbols' bins until the products
+  have read them) are not modelled: `fft64`'s G0 with its architecture.
+- The hold's and the patience's interplay with the verdict's exact cycle beyond these scenes
+  (`g2_rx_handoff_schedule.rs` gates the hand-off for any reader).
+- A first beat with no mark before it; `traceback = 0` (the whole-block decoder has no
+  schedule: it is not the hardware's).
+
+**Next.** RTL in ADR 0010's order: the Viterbi decoder's gated clock and the decoder's G3,
+then `fft64` (its G0 with the architecture first).
