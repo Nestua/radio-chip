@@ -275,6 +275,15 @@ pub fn dc_offset_serial(field: &[(i16, i16)], cfo_phase: i64, fx: &FixedRxConfig
     ))
 }
 
+/// The offset of [`dc_offset_serial`] from the two sums it starts with: Σ₁ of the first long
+/// symbol's 64 samples and Σ₂ of the second's (what `hw/rtl/dc_estimate.sv` is handed).
+/// `None` for an invalid configuration. A component of a sum beyond 64 samples of the ADC's
+/// range is taken as it is.
+pub fn dc_offset_of_sums(first: IQ, second: IQ, cfo_phase: i64, fx: &FixedRxConfig) -> Option<IQ> {
+    fx.is_valid()
+        .then(|| offset_of_sums(first, second, cfo_phase, fx, &nco_table(fx)))
+}
+
 /// The offset from the sums Σ₁ and Σ₂ of the first and the second long symbol's samples.
 /// With the default rotator and 12-bit samples: the sums 18 bits a component, S 30, the
 /// numerator 42, the divisor 64·|d|² 28.
