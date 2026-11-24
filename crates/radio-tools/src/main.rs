@@ -8,6 +8,8 @@
 //! harnesses (`tools/ref/ofdm_rx_openofdm.py`, `tools/ref/ppdu_decode_openofdm.py`) and are
 //! written to the ignored `target/ext/`.
 
+mod rx_channel_vec;
+
 use std::io::{self, Write};
 use std::process::ExitCode;
 
@@ -4188,9 +4190,11 @@ fn main() -> ExitCode {
         "viterbi" => viterbi_vectors(&mut out),
         "fft64" => fft64_vectors(&mut out),
         "fft64-rom" => fft64_rom(&mut out),
+        "rx_channel" => rx_channel_vec::vectors(&mut out),
+        "rx-channel-pkg" => rx_channel_vec::package(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, rx-front-rom, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, fft64, rx_channel, rx-front-rom, fft64-rom, rx-channel-pkg, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

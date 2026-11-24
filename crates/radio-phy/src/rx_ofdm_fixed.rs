@@ -248,8 +248,9 @@ fn fft_with(x: &[IQ], fx: &FixedOfdmConfig, rom: &[IQ; FFT_SIZE / 2]) -> Option<
 /// The channel as the integer path keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedChannel {
-    /// Hs(k) = L(k)·(T1(k) + T2(k)) per FFT bin: twice the channel, W + 1 bits; 0 off the 52
-    /// used subcarriers.
+    /// Hs(k) = L(k)·(T1(k) + T2(k)) per FFT bin: twice the channel; 0 off the 52 used
+    /// subcarriers. W + 2 bits: W + 1 hold every sum but +2^W, which L(k) = −1 makes of two
+    /// bins at −2^(W−1) (`docs/gates/rx_channel.md`, G0).
     pub hs: [IQ; FFT_SIZE],
     /// The per-packet right shift of u and g.
     pub shift: u32,
@@ -302,6 +303,20 @@ pub fn estimate_channel_fixed(ltf: &[IQ], fx: &FixedOfdmConfig) -> Option<FixedC
 pub(crate) fn channel_with(ltf: &[IQ], fx: &FixedOfdmConfig, t: &Tables) -> Option<FixedChannel> {
     let t1 = window_fft(ltf.get(..FFT_SIZE)?, fx, t)?;
     let t2 = window_fft(ltf.get(FFT_SIZE..2 * FFT_SIZE)?, fx, t)?;
+    channel_from_bins(&t1, &t2, fx)
+}
+
+/// The channel from the two long training symbols' bins (`fft64_fixed`'s output, bin order,
+/// `fft_bits` wide): the part of [`estimate_channel_fixed`] after the transforms, which the
+/// channel block (`hw/rtl/rx_channel.sv`, `docs/gates/rx_channel.md`) computes. Bins wider
+/// than `fft_bits` are taken as they are (the transform never makes them). `None` for
+/// unusable widths.
+pub fn channel_from_bins(
+    t1: &[IQ; FFT_SIZE],
+    t2: &[IQ; FFT_SIZE],
+    fx: &FixedOfdmConfig,
+) -> Option<FixedChannel> {
+    fx.is_valid().then_some(())?;
     let mut hs = [(0i64, 0i64); FFT_SIZE];
     let mut full = [0i128; FFT_SIZE];
     // IEEE 802.11-2020 §17.3.3: L(k) = ±1 on the 52 used subcarriers.
@@ -377,6 +392,25 @@ pub fn scale_constant(modulation: Modulation, cfg: &RxOfdmConfig, fx: &FixedOfdm
     }
 }
 
+/// The packet's soft scale for `modulation`: (q, n) with n the bit length of Σg and
+/// q = ⌊A·2ⁿ/Σg⌋ (A = [`scale_constant`]), a soft value being |m|·q / 2^(n + F). One division
+/// per packet and modulation in hardware (the channel block's quotients). q = 0 for Σg ≤ 0.
+pub fn soft_scale(
+    gain_sum: i64,
+    modulation: Modulation,
+    cfg: &RxOfdmConfig,
+    fx: &FixedOfdmConfig,
+) -> (i128, u32) {
+    let a = i128::from(scale_constant(modulation, cfg, fx));
+    let n = bit_len(i128::from(gain_sum));
+    let q = if gain_sum > 0 {
+        (a << n) / i128::from(gain_sum)
+    } else {
+        0
+    };
+    (q, n)
+}
+
 /// round(κ_c·g): the demapper's threshold at grid value `c` on a subcarrier of gain `g`.
 fn threshold(g: i64, c: u32, modulation: Modulation, fx: &FixedOfdmConfig) -> i64 {
     let k = i128::from(threshold_constant(c, modulation, fx));
@@ -413,7 +447,8 @@ pub struct TrackerConstants {
     /// Coefficient of the inner pair's angle (pilots at ±7), K fractional bits: N_i/(14·D).
     pub inner: i64,
     /// The measurement's variance against a flat channel of the same mean gain, V fractional
-    /// bits: 5·Σg·a·b/(52·D). 0: neither pair has both its pilots (or the variance is below
+    /// bits: 5·Σg·a·b/(52·D), saturated to [`variance_max`] (V + 2 bits; only values up to 3
+    /// nominal ones are used). 0: neither pair has both its pilots (or the variance is below
     /// 2^−V).
     pub variance: i64,
 }
@@ -466,11 +501,20 @@ fn constants_of(ch: &FixedChannel, fx: &FixedOfdmConfig) -> Option<TrackerConsta
         .checked_mul(a)?
         .checked_mul(b)?;
     let variance = ((spread >> s).checked_mul(5)? << fx.var_frac) / (52 * dn);
+    // Saturated to the register's V + 2 bits: every value it changes is above the
+    // MAX_VARIANCE nominal ones, which are not used either way.
+    let variance = variance.min(variance_max(fx));
     Some(TrackerConstants {
         outer: coefficient(3 * (no >> s))?,
         inner: coefficient(ni >> s)?,
         variance: i64::try_from(variance).ok()?,
     })
+}
+
+/// The largest variance [`tracker_constants`] reports: 2^(V + 2) − 1, the register's V + 2
+/// bits (the channel block, `docs/gates/rx_channel.md`), above `MAX_VARIANCE`·2^V.
+pub fn variance_max(fx: &FixedOfdmConfig) -> i128 {
+    (1i128 << (fx.var_frac + 2)) - 1
 }
 
 /// A measurement whose variance is more than this many times the nominal one is not used
@@ -809,15 +853,8 @@ pub(crate) fn symbol_with(
         phi = cordic_with(sum.0, sum.1, &fx.front, &t.cordic) << (p_bits - fx.front.angle_bits);
     }
     let n_bpsc = modulation.bits_per_subcarrier();
-    // Per packet and modulation in hardware: A·2ⁿ/Σg, n the bit length of Σg.
     let limit = i128::from(cfg.soft_max.max(0));
-    let a = i128::from(scale_constant(modulation, cfg, fx));
-    let n = bit_len(i128::from(ch.gain_sum));
-    let q = if ch.gain_sum > 0 {
-        (a << n) / i128::from(ch.gain_sum)
-    } else {
-        0
-    };
+    let (q, n) = soft_scale(ch.gain_sum, modulation, cfg, fx);
     let down = n + fx.scale_frac;
     let soft = |m: i64| -> i32 {
         let mag = i128::from(m).abs() * q;
