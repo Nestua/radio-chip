@@ -173,7 +173,7 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
             (Division::Inner, 366, 402, 418),
             (Division::Variance, 366, 418, 432),
             (Division::Fit(1), 499, 499, 529),
-            (Division::Scale(Modulation::Qam64), 489, 529, 551),
+            (Division::Scale(Modulation::Qam64), 509, 529, 551),
         ]
     );
     let sig = s.symbols()[0];
@@ -194,12 +194,12 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
     let (a, b) = data.steps.unwrap();
     assert_eq!((rel(a), rel(b)), (615, 828));
 
-    // The events: the verdict and the start at 489, the octets, the end with the last.
+    // The events: the verdict and the start at 509, the octets, the end with the last.
     let ev = s.events();
     assert!(matches!(ev[0].1, RxDataEvent::Verdict { .. }));
-    assert_eq!(rel(ev[0].0), 489);
+    assert_eq!(rel(ev[0].0), 509);
     assert!(matches!(ev[1].1, RxDataEvent::Start { .. }));
-    assert_eq!(rel(ev[1].0), 489);
+    assert_eq!(rel(ev[1].0), 509);
     let octets: Vec<(usize, u8)> = ev
         .iter()
         .filter_map(|e| match e.1 {

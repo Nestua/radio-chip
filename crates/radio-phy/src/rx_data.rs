@@ -97,7 +97,7 @@
 //! | the channel | 366 |
 //! | divider: BPSK's scale, two coefficients, the variance | 366 → 386 → 402 → 418 → 432 |
 //! | SIGNAL: products from; φ; its soft pass; values written | 366; 398; 399 … 446; 455 |
-//! | SIGNAL's 24 steps; **the verdict** | 456 … 479; **489** |
+//! | SIGNAL's 24 steps; **the verdict** | 456 … 479; **509** |
 //! | data: products from; pair angles | 448; 458 → 476, 476 → 494 |
 //! | its fit; θ; the data's scale | 499 → 529; 531; 529 → 551 |
 //! | φ; the soft pass; values written | 557; 558 … 605; 614 |
@@ -187,7 +187,7 @@ impl Default for DataTiming {
             soft_products: 6,
             soft_symbols: 2,
             viterbi_out: 3,
-            signal_check: 10,
+            signal_check: 30,
             octet: 1,
         }
     }
