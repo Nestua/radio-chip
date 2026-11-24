@@ -82,7 +82,7 @@ counts here are cycle to cycle, as the old allowances were):
 | (steps from L + 1) | 1 | 2 + 1 after the last soft value | `rx_deint.md` |
 | `viterbi_out` | 3 | 4 + 1; the flush from the edge after the last regular bit | `viterbi.md` |
 | `signal_check` | 30 | 29 + 1 | `rx_signal.md` |
-| `octet` | 1 | 1 (an allowance until PR B) | — |
+| `octet` | 1 | 1 (PR B: `rx_octets.sv`, the octet on the edge that takes its last bit) | `rx_octets.md` |
 
 ### Changes to the models
 
@@ -181,8 +181,9 @@ found no wrong latency rule. Taken:
 
 ### Open, for PR B and PR C
 
-- The octet's latency (`DataTiming::octet`, an allowance) and the seed and SERVICE with the
-  first octet: PR B.
+- ~~The octet's latency and the seed and SERVICE with the first octet: PR B.~~ Done
+  2026-11-24 (`docs/gates/rx_octets.md`): 1 edge, as the allowance; no schedule value
+  changed.
 - The age on `rx_end`: `rx_handoff`'s free-running count and the stream's first sample's
   count, the model's side (the schedule knows only clocks: the count comes from
   `run_handoff`), PR C.

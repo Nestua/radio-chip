@@ -10,6 +10,7 @@
 
 mod rx_channel_vec;
 mod rx_deint_vec;
+mod rx_octets_vec;
 mod rx_signal_vec;
 mod rx_symbol_vec;
 mod rx_track_vec;
@@ -4201,10 +4202,11 @@ fn main() -> ExitCode {
         "rx_track" => rx_track_vec::vectors(&mut out),
         "rx_deint" => rx_deint_vec::vectors(&mut out),
         "rx_signal" => rx_signal_vec::vectors(&mut out),
+        "rx_octets" => rx_octets_vec::vectors(&mut out),
         "rx-track-pkg" => rx_track_vec::package(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, fft64, rx_channel, rx_symbol, rx_track, rx_deint, rx_signal, rx-front-rom, fft64-rom, rx-channel-pkg, rx-symbol-pkg, rx-track-pkg, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, fft64, rx_channel, rx_symbol, rx_track, rx_deint, rx_signal, rx_octets, rx-front-rom, fft64-rom, rx-channel-pkg, rx-symbol-pkg, rx-track-pkg, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }

@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide decide_t1 front dc_estimate handoff fft64 rx_channel rx_symbol rx_track rx_deint rx_signal
+VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide decide_t1 front dc_estimate handoff fft64 rx_channel rx_symbol rx_track rx_deint rx_signal rx_octets
 # `cordic_arb` and `cordic_iter` replay the CORDIC's vectors; `handoff_forced` holds the hand-off to itself.
 BLOCKS    := ram cordic_arb cordic_iter handoff_forced $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
@@ -36,6 +36,7 @@ TOP_rx_symbol := symbol_chain
 TOP_rx_track := track_chain
 TOP_rx_deint := rx_deint
 TOP_rx_signal := signal_chain
+TOP_rx_octets := rx_octets
 TOP_round_sat := round_sat_bank
 TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
@@ -64,6 +65,7 @@ SRC_rx_track  := $(GEN_RTL) $(GEN_CHAN) $(GEN_SYM) $(GEN_TRK) rtl/cordic_iter.sv
                  rtl/div_serial.sv rtl/div_share.sv rtl/rx_track.sv tb/track_chain.sv
 SRC_rx_deint  := $(GEN_SYM) rtl/lib/ram_1w1r.sv rtl/rx_deint.sv
 SRC_rx_signal := rtl/viterbi.sv rtl/conv_encoder.sv rtl/rx_signal.sv tb/signal_chain.sv
+SRC_rx_octets := rtl/rx_octets.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
 SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
 SRC_cordic    := $(GEN_RTL) rtl/cordic.sv
@@ -194,6 +196,12 @@ rx_signal: vectors/rx_signal.txt
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/rx_signal --top-module signal_chain \
 		$(SRC_rx_signal) tb/tb_rx_signal.cpp -o sim_rx_signal
 	./obj_dir/rx_signal/sim_rx_signal vectors/rx_signal.txt +verilator+rand+reset+2
+
+rx_octets: vectors/rx_octets.txt
+	rm -rf obj_dir/rx_octets && mkdir -p obj_dir/rx_octets
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/rx_octets --top-module rx_octets \
+		$(SRC_rx_octets) tb/tb_rx_octets.cpp -o sim_rx_octets
+	./obj_dir/rx_octets/sim_rx_octets vectors/rx_octets.txt +verilator+rand+reset+2
 
 # The data path's CORDIC, one micro-rotation a clock: the CORDIC's vectors, one at a time,
 # back to back and with gaps, drops and resets in flight.

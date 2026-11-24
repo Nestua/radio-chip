@@ -24,6 +24,8 @@ use radio_phy::ofdm::{
     data_subcarriers, pilot_polarity, IfftConfig, PILOT_BASE, PILOT_SUBCARRIERS,
 };
 use radio_phy::ppdu::{build_ppdu, data_bits, signal_bits, Rate};
+use radio_phy::rx_data_fixed::{RxDataEnd, RxDataEvent};
+use radio_phy::rx_octets::RxOctets;
 use radio_phy::rx_ofdm::{decode_ppdu, RxOfdmConfig};
 use radio_phy::scrambler::Scrambler;
 use std::collections::BTreeMap;
@@ -198,6 +200,45 @@ fn data_bits_and_scrambler() {
         "I-20",
         &iq_text(-32, &freq(&inter, Modulation::Qam16, Some(1))),
     );
+}
+
+/// The receiver's descrambler and octets (`radio_phy::rx_octets`, `docs/gates/rx_octets.md`)
+/// run backwards through the same tables: Table I-15's bits in, the seed of Table I-14 and
+/// the clear bits of Table I-13 out (SERVICE with the first octet, the PSDU LSB first; the
+/// tail and pad, which the receiver does not read, are I-13's zeros).
+#[test]
+fn descrambler_and_octets() {
+    let a = load();
+    let scrambled = data_bits(&a.psdu, Rate::R36, seed(&a)).unwrap();
+    check(&a, "I-15", &bits_text(&scrambled));
+
+    let mut rx = RxOctets::new(a.psdu.len());
+    let mut events = Vec::new();
+    let taken = scrambled
+        .iter()
+        .take_while(|&&b| rx.bit(b, &mut events))
+        .count();
+    assert_eq!(
+        taken + 1,
+        16 + 8 * a.psdu.len(),
+        "the end on the last octet's last bit"
+    );
+    assert_eq!(events.last(), Some(&RxDataEvent::End(RxDataEnd::Decoded)));
+
+    let mut clear = Vec::new();
+    for e in &events[..events.len() - 1] {
+        let RxDataEvent::Octet { octet, first } = *e else {
+            panic!("not an octet: {e:?}");
+        };
+        if let Some(f) = first {
+            assert_eq!(f.seed, seed(&a), "I-14's seed");
+            clear.extend((0..16).map(|i| ((f.service >> i) & 1) as u8));
+        }
+        clear.extend((0..8).map(|i| (octet >> i) & 1));
+    }
+    assert_eq!(clear.len(), 16 + 800);
+    clear.resize(864, 0);
+    check(&a, "I-13", &bits_text(&clear));
 }
 
 /// The annex windows each field (W = ½ at both ends) and overlaps the extra sample with the

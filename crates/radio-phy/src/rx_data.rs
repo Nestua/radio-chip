@@ -84,9 +84,10 @@
 //!   registered on e(t) + 4 for 95 ≤ t < steps − 1; at the last step the min(96, steps) bits not
 //!   yet out from e(last) + 4, one an edge.
 //! - **`rx_signal`**: the verdict registered on V = e(SIGNAL's 24th step) + 29.
-//! - **The octets** (the descrambler, next PR; an allowance, [`DataTiming::octet`]): an octet
-//!   registered `octet` edges after its last bit; the frame's end with its last octet, and a
-//!   seed of zero ends where the last octet would have been.
+//! - **The octets** (`hw/rtl/rx_octets.sv`, [`DataTiming::octet`] = 1): an octet registered on
+//!   the edge that takes its last bit, one edge after the decoder registered that bit; the
+//!   frame's end with its last octet, and a seed of zero ends where the last octet would have
+//!   been.
 //!
 //! An end by a mark (an abort, or the stream ending early) comes in the cycle after the mark,
 //! or when the windows already complete have been decoded, if that is later: the bit of their
@@ -192,10 +193,11 @@ const DEPTH: usize = 96;
 /// `rx_signal` behind `viterbi.sv`: the verdict after SIGNAL's last step's take.
 const VERDICT: usize = 29;
 
-/// What is still an allowance: blocks not yet built.
+/// The latencies kept as parameters (every other rule is fixed by the RTL as built).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataTiming {
-    /// From an octet's last bit registered to the octet registered (the descrambler).
+    /// From an octet's last bit registered to the octet registered: `rx_octets.sv`'s 1
+    /// (`docs/gates/rx_octets.md`).
     pub octet: usize,
 }
 

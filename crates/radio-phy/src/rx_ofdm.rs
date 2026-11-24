@@ -712,14 +712,14 @@ fn decode_tracked(
     descramble(&bits, signal, log)
 }
 
-/// The PSDU from the decoded DATA field: scrambler seed, descrambling, octets.
 /// The scrambler seed whose first seven outputs are `head` (the received first seven SERVICE
 /// bits, IEEE 802.11-2020 §17.3.5.5); `None` when they are all zero, which no seed gives.
-pub(crate) fn scrambler_seed_of(head: &[u8]) -> Option<u8> {
+pub fn scrambler_seed_of(head: &[u8]) -> Option<u8> {
     (1u8..128)
         .find(|&s| Scrambler::new(s).is_ok_and(|mut sc| sc.scramble(head).iter().all(|b| *b == 0)))
 }
 
+/// The PSDU from the decoded DATA field: scrambler seed, descrambling, octets.
 pub(crate) fn descramble(
     bits: &[u8],
     signal: Signal,

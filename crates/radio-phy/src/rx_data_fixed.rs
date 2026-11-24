@@ -33,14 +33,14 @@ use crate::convolutional::CodeRate;
 use crate::modulation::Modulation;
 use crate::ppdu::data_symbols;
 use crate::rx_front_fixed::{HandoffBeat, HandoffConfig, HandoffEnd, SignalVerdict, IQ};
+use crate::rx_octets::RxOctets;
 use crate::rx_ofdm::{
-    scrambler_seed_of, signal_checked, symbol_start, RxOfdmConfig, RxOfdmError, Signal, SignalCheck,
+    signal_checked, symbol_start, RxOfdmConfig, RxOfdmError, Signal, SignalCheck,
 };
 use crate::rx_ofdm_fixed::{
     channel_with, symbol_with, tables, tracker_constants, FixedChannel, FixedOfdmConfig,
     FixedTracking, Tables,
 };
-use crate::scrambler::Scrambler;
 use crate::viterbi::WindowedViterbi;
 
 /// Samples of an FFT window.
@@ -113,15 +113,8 @@ struct Frame {
     /// The next data symbol (1-based: 0 is SIGNAL).
     next: usize,
     viterbi: WindowedViterbi,
-    /// Decoded bits so far, and the scrambler once the seed is known.
-    bits: usize,
-    head: Vec<u8>,
-    scrambler: Option<(u8, Scrambler)>,
-    service: u16,
-    octet: u8,
-    octets: usize,
-    /// The seed was zero: the frame is read on to its end with no octet handed on.
-    zero_seed: bool,
+    /// The descrambler and the octets.
+    octets: RxOctets,
 }
 
 #[derive(Debug, Clone)]
@@ -345,13 +338,7 @@ impl RxDataFixed {
             symbols,
             next: 1,
             viterbi: WindowedViterbi::new(code, depth, anchor),
-            bits: 0,
-            head: Vec::with_capacity(7),
-            scrambler: None,
-            service: 0,
-            octet: 0,
-            octets: 0,
-            zero_seed: false,
+            octets: RxOctets::new(signal.length),
         }))
     }
 
@@ -376,138 +363,10 @@ impl RxDataFixed {
             return false;
         };
         for b in bits {
-            if !Self::bit(f, b, out) {
+            if !f.octets.bit(b, out) {
                 return false;
             }
         }
         true
-    }
-
-    /// One decoded bit: the seed, SERVICE, then the PSDU's octets; whether the frame goes on.
-    fn bit(f: &mut Frame, b: u8, out: &mut Vec<RxDataEvent>) -> bool {
-        let k = f.bits;
-        f.bits += 1;
-        if f.zero_seed {
-            // No octet; the end comes where the last octet would have.
-            if k >= 16 && (k - 16) % 8 == 7 {
-                f.octets += 1;
-                if f.octets == f.signal.length {
-                    out.push(RxDataEvent::End(RxDataEnd::Seed));
-                    return false;
-                }
-            }
-            return true;
-        }
-        if f.scrambler.is_none() {
-            f.head.push(b);
-            if f.head.len() < 7 {
-                return true;
-            }
-            let Some((seed, sc)) =
-                scrambler_seed_of(&f.head).and_then(|s| Scrambler::new(s).ok().map(|sc| (s, sc)))
-            else {
-                // Read on to the frame's end (`docs/gates/rx_data.md`, G0): the reader of the
-                // RTL learns no earlier that the frame is over.
-                f.zero_seed = true;
-                return true;
-            };
-            let mut sc = sc;
-            for (j, &h) in f.head.iter().enumerate() {
-                let c = sc.scramble(&[h]).first().copied().unwrap_or(0);
-                f.service |= u16::from(c) << j;
-            }
-            f.scrambler = Some((seed, sc));
-            return true;
-        }
-        let Some((seed, sc)) = f.scrambler.as_mut() else {
-            return false;
-        };
-        let c = sc.scramble(&[b]).first().copied().unwrap_or(0);
-        if k < 16 {
-            f.service |= u16::from(c) << k;
-            return true;
-        }
-        let at = (k - 16) % 8;
-        f.octet |= c << at;
-        if at < 7 {
-            return true;
-        }
-        out.push(RxDataEvent::Octet {
-            octet: f.octet,
-            first: (f.octets == 0).then_some(FirstOctet {
-                seed: *seed,
-                service: f.service,
-            }),
-        });
-        f.octet = 0;
-        f.octets += 1;
-        if f.octets == f.signal.length {
-            out.push(RxDataEvent::End(RxDataEnd::Decoded));
-            return false;
-        }
-        true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ppdu::Rate;
-
-    fn frame(length: usize) -> Frame {
-        Frame {
-            ch: FixedChannel {
-                hs: [(0, 0); FFT_SIZE],
-                shift: 0,
-                gain: [0; FFT_SIZE],
-                gain_sum: 0,
-            },
-            signal: Signal {
-                rate: Rate::R6,
-                length,
-            },
-            symbols: 1,
-            next: 1,
-            viterbi: WindowedViterbi::new(CodeRate::R1_2, 96, 16 + 8 * length + 6),
-            bits: 0,
-            head: Vec::new(),
-            scrambler: None,
-            service: 0,
-            octet: 0,
-            octets: 0,
-            zero_seed: false,
-        }
-    }
-
-    /// Feeds `bits` until the frame ends; the bit index and the events of the end.
-    fn run(f: &mut Frame, bits: &[u8]) -> (usize, Vec<RxDataEvent>) {
-        let mut all = Vec::new();
-        for (k, &b) in bits.iter().enumerate() {
-            let mut out = Vec::new();
-            let more = RxDataFixed::bit(f, b, &mut out);
-            all.extend(out);
-            if !more {
-                return (k, all);
-            }
-        }
-        (usize::MAX, all)
-    }
-
-    #[test]
-    fn a_zero_seed_ends_where_the_last_octet_would_have_been() {
-        for length in [1usize, 2, 24, 100] {
-            let n = 16 + 8 * length + 6;
-            // A seed found (the first seven bits not all zero): Decoded with the last octet.
-            let mut bits = vec![1u8; n];
-            let (at, ev) = run(&mut frame(length), &bits);
-            assert_eq!(at, 16 + 8 * length - 1, "{length}");
-            assert_eq!(ev.last(), Some(&RxDataEvent::End(RxDataEnd::Decoded)));
-            assert_eq!(ev.len(), length + 1);
-            // The first seven all zero: no octet, Seed on the same bit.
-            bits[..7].fill(0);
-            let (at, ev) = run(&mut frame(length), &bits);
-            assert_eq!(at, 16 + 8 * length - 1, "{length}");
-            assert_eq!(ev, [RxDataEvent::End(RxDataEnd::Seed)], "{length}");
-        }
     }
 }
