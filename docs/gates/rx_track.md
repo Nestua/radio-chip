@@ -144,7 +144,7 @@ requires the same θ, δ and shift after every symbol.
 - **`the_fit_never_saturates`**: the bound above, for every n.
 - **`widths_are_the_defaults`**.
 
-Commit: the branch `r0-09-track` (the PR's head). Command:
+Commit: 22f7d8b. Command:
 `cargo test --release -p radio-phy --test g0_rx_track`. Result: 5 passed.
 
 **Mutants of the model** (`crates/radio-phy/src/rx_ofdm_fixed.rs`): 16 of 16 fail the G0 tests:
@@ -193,7 +193,7 @@ The bench is the tracker's surroundings:
   abort, and half of the aborted packets are replayed. The bench refuses to pass if any of
   these paths is never taken.
 
-Result (the branch `r0-09-track`):
+Result (commit 22f7d8b):
 
 > rx_track G3: 157 packets x 2 passes, 281 completed, 20321 symbols, 20404 thetas (18549 fitted,
 > 1515 unmeasured; 612 moves early, 490 late), 63 SIGNAL steps unmeasured, 208 first data pilots
