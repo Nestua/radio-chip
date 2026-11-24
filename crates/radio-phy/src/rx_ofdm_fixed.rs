@@ -1006,15 +1006,22 @@ pub(crate) fn symbol_with(
     if cfg.pilot_tracking && cfg.timing_tracking {
         tracking.move_window(fx);
     }
-    let coded = (0..on_air.len())
+    Some((deinterleave_soft(&on_air, modulation), phi))
+}
+
+/// One symbol's soft values from on-air order (N_BPSC a data subcarrier, as
+/// [`symbol_from_bins`] gives them) to coded order: coded value k is on-air value
+/// `interleaved_index(k)` (IEEE 802.11-2020 §17.3.5.7). The deinterleaver of the data path
+/// (`hw/rtl/rx_deint.sv`, `docs/gates/rx_deint.md`); a position past a short input reads 0.
+pub fn deinterleave_soft(on_air: &[i32], modulation: Modulation) -> Vec<i32> {
+    (0..on_air.len())
         .map(|k| {
             on_air
                 .get(interleaved_index(k, modulation))
                 .copied()
                 .unwrap_or(0)
         })
-        .collect();
-    Some((coded, phi))
+        .collect()
 }
 
 /// The symbol's window as the tracker has moved it.
