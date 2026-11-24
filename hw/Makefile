@@ -16,7 +16,7 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide decide_t1 front dc_estimate handoff fft64 rx_channel rx_symbol
+VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide decide_t1 front dc_estimate handoff fft64 rx_channel rx_symbol rx_track
 # `cordic_arb` and `cordic_iter` replay the CORDIC's vectors; `handoff_forced` holds the hand-off to itself.
 BLOCKS    := ram cordic_arb cordic_iter handoff_forced $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
@@ -24,6 +24,7 @@ GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
 GEN_FFT   := rtl/gen/fft64_rom_pkg.sv
 GEN_CHAN  := rtl/gen/rx_channel_pkg.sv
 GEN_SYM   := rtl/gen/rx_symbol_pkg.sv
+GEN_TRK   := rtl/gen/rx_track_pkg.sv
 # Sources and top module per block, packages first.
 TOP_ram       := ram_bank
 TOP_scrambler := scrambler
@@ -32,6 +33,7 @@ TOP_viterbi   := viterbi
 TOP_fft64     := fft64
 TOP_rx_channel := channel_chain
 TOP_rx_symbol := symbol_chain
+TOP_rx_track := track_chain
 TOP_round_sat := round_sat_bank
 TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
@@ -56,6 +58,8 @@ SRC_fft64     := $(GEN_FFT) rtl/fft64.sv
 SRC_rx_channel := $(GEN_CHAN) rtl/lib/ram_1w1r.sv rtl/div_serial.sv rtl/rx_channel.sv tb/channel_chain.sv
 SRC_rx_symbol := $(GEN_RTL) $(GEN_CHAN) $(GEN_SYM) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/cordic_iter.sv \
                  rtl/rx_symbol.sv tb/symbol_chain.sv
+SRC_rx_track  := $(GEN_RTL) $(GEN_CHAN) $(GEN_SYM) $(GEN_TRK) rtl/cordic_iter.sv rtl/cordic_share.sv \
+                 rtl/div_serial.sv rtl/div_share.sv rtl/rx_track.sv tb/track_chain.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
 SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
 SRC_cordic    := $(GEN_RTL) rtl/cordic.sv
@@ -93,6 +97,7 @@ vectors:
 	cd .. && $(RVEC) fft64-rom > hw/$(GEN_FFT)
 	cd .. && $(RVEC) rx-channel-pkg > hw/$(GEN_CHAN)
 	cd .. && $(RVEC) rx-symbol-pkg > hw/$(GEN_SYM)
+	cd .. && $(RVEC) rx-track-pkg > hw/$(GEN_TRK)
 
 ram:
 	rm -rf obj_dir/ram && mkdir -p obj_dir/ram
@@ -161,6 +166,14 @@ cordic: vectors/cordic.txt
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/cordic --top-module cordic \
 		$(SRC_cordic) tb/tb_cordic.cpp -o sim_cordic
 	./obj_dir/cordic/sim_cordic vectors/cordic.txt
+
+# The tracker with the shared CORDIC and divider: every θ and window move against
+# FixedTracking::{step, move_window}, their edges, the other requesters' answers, drops.
+rx_track: vectors/rx_track.txt
+	rm -rf obj_dir/rx_track && mkdir -p obj_dir/rx_track
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/rx_track --top-module track_chain \
+		$(SRC_rx_track) tb/tb_rx_track.cpp -o sim_rx_track
+	./obj_dir/rx_track/sim_rx_track vectors/rx_track.txt +verilator+rand+reset+2
 
 # The data path's CORDIC, one micro-rotation a clock: the CORDIC's vectors, one at a time,
 # back to back and with gaps, drops and resets in flight.

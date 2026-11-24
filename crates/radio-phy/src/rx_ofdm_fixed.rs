@@ -724,6 +724,37 @@ impl FixedTracking {
             self.delta = sat((num << fx.rate_frac) / det, p + fx.rate_frac - 4);
         }
     }
+
+    /// The window's move after a symbol (the float receiver's): a sample earlier when the
+    /// slope left in it, `theta`, is above half a sample (2^(P−7)), a sample later below minus
+    /// half a sample.
+    pub fn move_window(&mut self, fx: &FixedOfdmConfig) {
+        let half = 1i64 << (fx.front.nco_phase_bits.clamp(8, 40) - 7);
+        if self.theta > half {
+            self.shift = self.shift.saturating_sub(1);
+        } else if self.theta < -half {
+            self.shift = self.shift.saturating_add(1);
+        }
+    }
+
+    /// One symbol's tracker step from its pilots `p` at −21, −7, 7, 21 (U + 1 bits, the
+    /// transmitted signs removed, [`symbol_pilots`]) and the packet's constants `c`, symbol
+    /// `i` (0 for SIGNAL, k + 1 for DATA symbol k): the two pair angles, the measurement, the
+    /// fit (when `c` is usable) and the slope θ to remove (`self.theta`, returned), as
+    /// [`symbol_soft_fixed`] does before its soft pass; the window's move is
+    /// [`Self::move_window`], after. What the tracker block computes (`hw/rtl/rx_track.sv`,
+    /// `docs/gates/rx_track.md`). `None` for unusable widths.
+    pub fn step(
+        &mut self,
+        p: &[IQ; 4],
+        c: &TrackerConstants,
+        i: usize,
+        fx: &FixedOfdmConfig,
+    ) -> Option<i64> {
+        let t = tables(fx)?;
+        track_fixed(p, c, i, self, fx, &t);
+        Some(self.theta)
+    }
 }
 
 /// `v` wrapped to a `bits`-wide two's-complement word.
@@ -739,7 +770,7 @@ fn wrap(v: i128, bits: u32) -> i64 {
 /// before it measures. Leaves the slope to remove in `tracking.theta`.
 fn track_fixed(
     p: &[IQ; 4],
-    ch: &FixedChannel,
+    c: &TrackerConstants,
     i: usize,
     tracking: &mut FixedTracking,
     fx: &FixedOfdmConfig,
@@ -748,7 +779,6 @@ fn track_fixed(
     let p_bits = fx.front.nco_phase_bits;
     let moved = i128::from(tracking.shift) << (p_bits - 6);
     let predicted = i128::from(tracking.drift_at(i, fx)) + moved;
-    let c = tracker_constants(ch, fx);
     let angle = |hi: IQ, lo: IQ, span: i128| -> i128 {
         // hi·conj(lo), cut to the CORDIC's 64-bit inputs (it normalises further itself).
         let (ar, ai) = (i128::from(hi.0), i128::from(hi.1));
@@ -768,7 +798,7 @@ fn track_fixed(
     // coefficients no estimate produces.
     let err = sat(err, p_bits);
     if c.usable(fx) {
-        tracking.learn(err, i, tracking.lambda(&c, fx), fx);
+        tracking.learn(err, i, tracking.lambda(c, fx), fx);
     } else {
         tracking.measured = err;
     }
@@ -955,12 +985,18 @@ pub(crate) fn symbol_with(
         return None;
     }
     let z = window_fft(window, fx, t)?;
-    let p_bits = fx.front.nco_phase_bits;
     let (mut theta, mut phi) = (0i64, 0i64);
     if cfg.pilot_tracking {
         let p = pilots_of(&z, ch, polarity_index, fx);
         if cfg.timing_tracking {
-            track_fixed(&p, ch, polarity_index, tracking, fx, t);
+            track_fixed(
+                &p,
+                &tracker_constants(ch, fx),
+                polarity_index,
+                tracking,
+                fx,
+                t,
+            );
             theta = tracking.theta;
         }
         phi = common_phase(&p, theta, fx, t);
@@ -968,13 +1004,7 @@ pub(crate) fn symbol_with(
     let on_air = soft_pass(&z, ch, modulation, phi, theta, cfg, fx, t);
     // The window follows the slope left in it, as the float receiver's.
     if cfg.pilot_tracking && cfg.timing_tracking {
-        // Half a sample of slope: 2^(P−7).
-        let half = 1i64 << (p_bits - 7);
-        if tracking.theta > half {
-            tracking.shift = tracking.shift.saturating_sub(1);
-        } else if tracking.theta < -half {
-            tracking.shift = tracking.shift.saturating_add(1);
-        }
+        tracking.move_window(fx);
     }
     let coded = (0..on_air.len())
         .map(|k| {

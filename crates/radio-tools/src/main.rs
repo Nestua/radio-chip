@@ -10,6 +10,7 @@
 
 mod rx_channel_vec;
 mod rx_symbol_vec;
+mod rx_track_vec;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -4195,9 +4196,11 @@ fn main() -> ExitCode {
         "rx-channel-pkg" => rx_channel_vec::package(&mut out),
         "rx_symbol" => rx_symbol_vec::vectors(&mut out),
         "rx-symbol-pkg" => rx_symbol_vec::package(&mut out),
+        "rx_track" => rx_track_vec::vectors(&mut out),
+        "rx-track-pkg" => rx_track_vec::package(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, fft64, rx_channel, rx_symbol, rx-front-rom, fft64-rom, rx-channel-pkg, rx-symbol-pkg, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, fft64, rx_channel, rx_symbol, rx_track, rx-front-rom, fft64-rom, rx-channel-pkg, rx-symbol-pkg, rx-track-pkg, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
@@ -4279,6 +4282,7 @@ mod tests {
         gen("fft64-rom", &|b| fft64_rom(b));
         gen("rx-channel-pkg", &|b| rx_channel_vec::package(b));
         gen("rx-symbol-pkg", &|b| rx_symbol_vec::package(b));
+        gen("rx-track-pkg", &|b| rx_track_vec::package(b));
         all.sort();
         for w in all.windows(2) {
             if w[0].0 == w[1].0 {
