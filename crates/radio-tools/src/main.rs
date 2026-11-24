@@ -4140,7 +4140,7 @@ fn fft64_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   // Widths of FixedOfdmConfig::default().\n\
          \x20   localparam int IN_BITS  = {};\n\
          \x20   localparam int IN_SHIFT = {};\n\
-         \x20   localparam int W_BITS   = {};\n\
+         \x20   localparam int FFT_W_BITS = {};\n\
          \x20   localparam int T_BITS   = {};\n\
          \x20   // Bit s set: stage s (0 first) halves its outputs.\n\
          \x20   localparam logic [5:0] HALVE = 6'b{:06b};",

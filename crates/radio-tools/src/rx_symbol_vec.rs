@@ -11,8 +11,8 @@ use radio_phy::ppdu::long_training_sequence;
 use radio_phy::rx_front_fixed::IQ;
 use radio_phy::rx_ofdm::RxOfdmConfig;
 use radio_phy::rx_ofdm_fixed::{
-    channel_from_bins, soft_scale, symbol_from_bins, symbol_pilots, threshold_constant,
-    FixedChannel, FixedOfdmConfig,
+    channel_from_bins, scale_constant, soft_scale, symbol_from_bins, symbol_pilots,
+    threshold_constant, FixedChannel, FixedOfdmConfig,
 };
 
 const N: usize = 64;
@@ -22,6 +22,11 @@ const MODS: [Modulation; 4] = [
     Modulation::Qam16,
     Modulation::Qam64,
 ];
+
+/// Bits of a non-negative value.
+fn bits(v: i64) -> u32 {
+    64 - (v.max(0) as u64).leading_zeros()
+}
 
 fn rand_in(rng: &mut Rng, bits: u32) -> i64 {
     (rng.next_u64() % (1u64 << bits)) as i64 - (1i64 << (bits - 1))
@@ -344,8 +349,8 @@ pub fn package(out: &mut impl Write) -> io::Result<()> {
          \x20   localparam int KAPPA_FRAC = {};\n\
          \x20   localparam int S_FRAC     = {};  // the soft scale's fractional bits F\n\
          \x20   localparam int SOFT_MAX   = {};  // soft values clip at ±SOFT_MAX\n\
-         \x20   localparam int SOFT_BITS  = 8;\n\
-         \x20   localparam int SQ_BITS    = 20;  // the soft scale q < 2·A (64-QAM's A has 19 bits)\n\
+         \x20   localparam int SOFT_BITS  = {};  // ±SOFT_MAX, signed\n\
+         \x20   localparam int SQ_BITS    = {};  // the soft scale q ≤ 2·A (the largest A's, + 1 bit)\n\
          \x20   // The 48 data subcarriers from -26 to 26 (IEEE 802.11-2020 §17.3.5.10): bin, number.\n\
          \x20   localparam int DATA_BIN [48] = '{{{}}};\n\
          \x20   localparam int DATA_C   [48] = '{{{}}};\n\
@@ -365,6 +370,11 @@ pub fn package(out: &mut impl Write) -> io::Result<()> {
         fx.kappa_bits,
         fx.scale_frac,
         cfg.soft_max,
+        bits(i64::from(cfg.soft_max)) + 1,
+        MODS.iter()
+            .map(|&m| bits(2 * scale_constant(m, &cfg, &fx)))
+            .max()
+            .unwrap_or(1),
         bins.join(", "),
         nums.join(", "),
         pilots.join(", "),

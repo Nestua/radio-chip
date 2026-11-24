@@ -29,10 +29,12 @@
 // k is symbol k + 1. chan_valid once a packet with the shift and n = bit length of Σg; the
 // channel block's stores answer hs_*/g_* a clock after the read (rx_channel's ports).
 // scale_valid with a modulation's q (any order, any time from chan_valid on); mod_valid with the
-// data's modulation; theta_valid with the next symbol's θ (in symbol order; one may wait,
-// a second while one waits stops simulation).
+// data's modulation; theta_valid with the next symbol's θ, in symbol order: SIGNAL's at any
+// time, a data symbol's only after its pil_valid (one may wait; a second while one waits, or a
+// θ ahead of its pilots, stops simulation). chan_shift ≤ 19 and 1 ≤ chan_n ≤ 21 (asserted).
 // The CORDIC: cr_valid with the pilots' sum held until cr_take; the angle comes back with
-// ca_valid (the shared iterative CORDIC, hw/rtl/cordic_iter.sv; the top level arbitrates).
+// ca_valid (the shared iterative CORDIC, hw/rtl/cordic_iter.sv). ca_valid carries no tag: the
+// top level's arbiter routes to this block only the answer to its own request.
 // Out: no ready. drop (and rst_n): back to a packet's start, both slots empty; the stores'
 // contents left. The top level drops at every packet's end.
 //
@@ -606,6 +608,17 @@ module rx_symbol
     assign unused = ^{theta[P], r_ph[P-L-1:0]};
 
 `ifndef SYNTHESIS
+    // θs and pilots of the packet so far, for the order check.
+    int th_seen, pil_seen_n;
+    always_ff @(posedge clk) begin
+        if (!rst_n || drop) begin
+            th_seen    <= 0;
+            pil_seen_n <= 0;
+        end else begin
+            if (theta_valid) th_seen <= th_seen + 1;
+            if (pil_valid)   pil_seen_n <= pil_seen_n + 1;
+        end
+    end
     always_ff @(posedge clk) begin
         if (rst_n && !drop) begin
             if (bin_valid && L_USED[bin_idx] && !bins_ok) begin
@@ -614,6 +627,14 @@ module rx_symbol
             end
             if (theta_valid && th_full && !th_take) begin
                 $error("rx_symbol: theta while one waits");
+                $stop;
+            end
+            if (theta_valid && th_seen != 0 && th_seen >= pil_seen_n + int'(pil_valid)) begin
+                $error("rx_symbol: a data symbol's theta before its pilots");
+                $stop;
+            end
+            if (chan_valid && (chan_shift > 5'd19 || chan_n == 5'd0 || chan_n > 5'd21)) begin
+                $error("rx_symbol: a shift or n outside the channel's formats");
                 $stop;
             end
             if (chan_valid && chan_ok) begin

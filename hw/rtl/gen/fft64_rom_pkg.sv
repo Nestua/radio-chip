@@ -7,7 +7,7 @@ package fft64_rom_pkg;
     // Widths of FixedOfdmConfig::default().
     localparam int IN_BITS  = 13;
     localparam int IN_SHIFT = 1;
-    localparam int W_BITS   = 16;
+    localparam int FFT_W_BITS = 16;
     localparam int T_BITS   = 12;
     // Bit s set: stage s (0 first) halves its outputs.
     localparam logic [5:0] HALVE = 6'b101010;

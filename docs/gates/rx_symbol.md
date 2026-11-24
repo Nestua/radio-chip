@@ -90,8 +90,8 @@ index off by one, Z·Hs for Z·Hs*): **14 of 14 fail**.
 
 **Not decided here** (with the top level, ADR 0010 6.2): the schedule model (`radio_phy::rx_data`)
 keeps its allowances — products 3, rotator 4, demap 9, CORDIC 18 — until it is restated (the
-RTL below: pilots 9 edges after the products start, φ's request 10 after the rotation starts,
-the first soft value 8 after φ); the reader's rule that the next window waits for `bins_ok`
+RTL below, in edges after the last of each event's triggers: pilots 9, φ's request 10, φ 18
+after the CORDIC takes it, the first soft value 8); the reader's rule that the next window waits for `bins_ok`
 (by the schedule's margins it never waits, but nothing structural guarantees it); the tracker's
 pair products (the schedule put them on the products unit; here the tracker gets the pilots);
 the CORDIC's arbitration between the tracker and this block.
@@ -122,10 +122,14 @@ zeros, `soft_j`, `soft_last`, `soft_mod`) against the model; **every event's edg
 latencies in the block's header (pilots 9, φ's request 10, φ 18 after the CORDIC took it, the
 first soft value 8, then one a clock). Registers start random (`+verilator+rand+reset+2`).
 
-`rx_symbol G3: 127 packets x 2 passes, 234 completed, 696 symbols, 736 pilots, 724 phases, 34252
-soft subcarriers, 39 aborts (11 resets, 19 replayed), 14489 bins held, 88 scales late, 158
-SIGNAL thetas before the pilots, 292809 edges, 0 mismatches` — PASS. Lint clean
-(`make -C hw lint`).
+The CORDIC's arbiter is the bench's too (`cordic_hold`: half the requests wait 1 to 30
+clocks, as when the tracker has it), and one aborted packet in three is aborted in the third
+clock a request waits.
+
+`rx_symbol G3: 127 packets x 2 passes, 237 completed, 833 symbols, 870 pilots, 848 phases, 40577
+soft subcarriers, 36 aborts (13 resets, 19 replayed), 16032 bins held, 78 scales late, 157
+SIGNAL thetas before the pilots, 428 CORDIC requests held (11 aborted waiting), 273936 edges, 0
+mismatches` — PASS. Lint clean (`make -C hw lint`). (Commit: below, with the mutations.)
 
 **A defect the gate found in the first run**: every 16- and 64-QAM threshold was 0. Both
 `rx_channel_pkg` (the tracker's K = 16) and `rx_symbol_pkg` declared `K_FRAC`; `rx_symbol`
@@ -133,3 +137,52 @@ imports both, and Verilator resolved the name to the first import's without a wa
 standard makes it an error). The constants are now `KAPPA_BITS`/`KAPPA_FRAC`, and a test of
 `rvec` (`generated_packages_declare_distinct_names`) fails when two generated packages declare
 one name differently (it fails on the old name).
+
+**Mutations** (each on a private copy of `hw/`, the full gate). `cordic_iter` (its own gate):
+the iteration count, the half turn, the drop, `busy`, the sign test of y, the shift of x, the
+zero flag, the counter's start — **8 of 8 fail**. `rx_symbol`, the final run on the final bench:
+the products' rounding (round to odd) and saturation, the product's sign, the pilots' base sign
+(as written and as re-read), the polarity's wrap at 127, the half table step, the phase's sign,
+φ in the pilots' phase, the quadrant fold, the rotation's sign, the second fold, the lanes'
+order, the soft rounding, the clip (at 126), n + F − 1, the scale's three waits (q of the
+modulation, `mod_ok`, BPSK's q standing in), SIGNAL's modulation, θ's bypass and buffer, the
+pilots' count, the sum's reset, the slot emptied, every reset of a drop (slots, stage valid,
+`p_wait`, the channel, the scales, the modulation, θ, the first symbol, the fill count, the
+polarity, the engine, the CORDIC request), the slot of the store's word (`rsel` for the
+pipeline's tag: only the last subcarrier differs), the products' order, the Hs and g addresses,
+`bins_ok`, the last product, `pil_valid` a product early, the soft pass's length, the second
+threshold's constant, `soft_last`, `p_wait` never set, SIGNAL's flag, the request not cleared
+when taken, the pilots' imaginary sign; and two checks of the new assertions (a bench giving θ
+a cycle before its pilots' `pil_valid`; a shift bound of 2) — **53 of 54 fail**.
+
+How the bench got there: the first run, 50 of 51 failed, seven of them only by a lint warning
+(each rewritten as a twin that compiles and fails in simulation, all seven now fail). The one
+that passed: **the CORDIC request not cleared by a drop** — the bench's CORDIC was always free,
+so a request lived one clock and no abort met it. The bench got the arbiter (`cordic_hold`) and
+the abort while a request waits; it fails now. **Equivalent, argued and found by the review**:
+`th_cur` taken from θ's input whenever θ comes, instead of from the buffer when one waits —
+different only when a data symbol's θ comes in the cycle the previous symbol takes its buffered
+θ, which needs θ before its own pilots; the header now forbids that and an assertion stops
+simulation on it (its check above fails).
+
+### The review (fresh agent, 2026-11-24)
+
+It reran every gate, regenerated the vectors and the package byte for byte, rebuilt every width
+and bound by hand (none can overflow on the inputs' formats; the products' narrowing is exact
+for every shift up to 31), the rounding at each step against the model, the phase modulo 2^P,
+the polarity sequence against the scrambler and the standard, the lanes' order, the slots'
+collisions, the θ buffer, every latency of the header by its own count, and killed ten mutants
+of its own. **No defect in the RTL.** It found, and this entry fixed:
+- the G3 evidence above was from the bench before the CORDIC's arbiter and had no commit: now
+  the current output, the commit below;
+- one order of θ the header allowed and the bench never drove (the equivalent mutant above):
+  now forbidden and asserted;
+- no G3 mutation record: above;
+- "Not decided here" counted the offsets from the engines' start instead of the triggers: fixed;
+- **the package test let a name appear twice with the same declaration** — still ambiguous
+  under IEEE 1800, and `W_BITS` was in both `fft64_rom_pkg` and `rx_channel_pkg`: the test now
+  refuses every duplicate, and the FFT's width is `FFT_W_BITS` (`fft64` gate rerun: 0
+  mismatches);
+- `SOFT_BITS` and `SQ_BITS` were written as numbers in the generator: now derived (soft_max,
+  2·A); the input ranges (`chan_shift` ≤ 19, n in 1 … 21) are asserted; the header says the
+  CORDIC's answer must be routed by the arbiter (it carries no tag).

@@ -47,15 +47,15 @@ module fft64
     output logic                      in_ready,  // for a registered valid: drop valid the cycle after it falls
     output logic                      out_valid,
     output logic [5:0]                out_bin,
-    output logic signed [W_BITS-1:0]  out_re,
-    output logic signed [W_BITS-1:0]  out_im
+    output logic signed [FFT_W_BITS-1:0]  out_re,
+    output logic signed [FFT_W_BITS-1:0]  out_im
 );
     localparam int FT = T_BITS - 2;         // the twiddle's fractional bits
-    localparam int PW = W_BITS + T_BITS + 1; // w·b, exact
+    localparam int PW = FFT_W_BITS + T_BITS + 1; // w·b, exact
     localparam int SW = PW + 1;             // a·2^FT ± w·b
 
     localparam logic signed [T_BITS-1:0] ONE = T_BITS'(1 << FT);
-    localparam logic signed [SW-1:0]     TOP = SW'((1 << (W_BITS - 1)) - 1);
+    localparam logic signed [SW-1:0]     TOP = SW'((1 << (FFT_W_BITS - 1)) - 1);
     localparam logic signed [SW-1:0]     BOT = -TOP - SW'(1);
 
     // One token: the data and its tags. `cur`: the token's input frame is a window; `prev`:
@@ -66,8 +66,8 @@ module fft64
         logic [5:0]               lab;
         logic                     cur;
         logic                     prev;
-        logic signed [W_BITS-1:0] re;
-        logic signed [W_BITS-1:0] im;
+        logic signed [FFT_W_BITS-1:0] re;
+        logic signed [FFT_W_BITS-1:0] im;
     } tok_t;
 
     function automatic logic [5:0] rev6(input logic [5:0] x);
@@ -83,7 +83,7 @@ module fft64
     endfunction
 
     // v / 2^sh, half to even, saturated to W bits.
-    function automatic logic signed [W_BITS-1:0] narrow(input logic signed [SW-1:0] v,
+    function automatic logic signed [FFT_W_BITS-1:0] narrow(input logic signed [SW-1:0] v,
                                                        input int sh);
         logic signed [SW-1:0] fl, r;
         logic [SW-1:0] rem, half;
@@ -93,9 +93,9 @@ module fft64
         half = SW'(1) << (sh - 1);
         up   = (rem > half) || (rem == half && fl[0]);
         r    = fl + SW'(up);
-        if (r > TOP) return TOP[W_BITS-1:0];
-        if (r < BOT) return BOT[W_BITS-1:0];
-        return r[W_BITS-1:0];
+        if (r > TOP) return TOP[FFT_W_BITS-1:0];
+        if (r < BOT) return BOT[FFT_W_BITS-1:0];
+        return r[FFT_W_BITS-1:0];
     endfunction
 
     // x·w for the twiddles of stages 2 and 3: w is 0, ±ONE or ± one of the ROM's magnitudes
@@ -103,7 +103,7 @@ module fft64
     localparam logic signed [T_BITS-1:0] C8  = tw_re(8);
     localparam logic signed [T_BITS-1:0] C4R = tw_re(4);
     localparam logic signed [T_BITS-1:0] C4I = -tw_im(4);
-    function automatic logic signed [PW-1:0] mulc(input logic signed [W_BITS-1:0] x,
+    function automatic logic signed [PW-1:0] mulc(input logic signed [FFT_W_BITS-1:0] x,
                                                  input logic signed [T_BITS-1:0] w);
         logic signed [PW-1:0] xe;
         xe = PW'(x);
@@ -171,8 +171,8 @@ module fft64
         t_in.lab  <= cnt;
         t_in.cur  <= !flushing;
         t_in.prev <= prev_real;
-        t_in.re   <= W_BITS'(tok_re) <<< IN_SHIFT;
-        t_in.im   <= W_BITS'(tok_im) <<< IN_SHIFT;
+        t_in.re   <= FFT_W_BITS'(tok_re) <<< IN_SHIFT;
+        t_in.im   <= FFT_W_BITS'(tok_im) <<< IN_SHIFT;
     end
 
 `ifndef SYNTHESIS
@@ -198,7 +198,7 @@ module fft64
         logic                  later;
         logic signed [T_BITS-1:0] wr, wi;
         logic signed [PW-1:0]  mr, mi;
-        logic signed [W_BITS-1:0] br, bi;
+        logic signed [FFT_W_BITS-1:0] br, bi;
         always_comb begin
             later = st[s].lab[5-s];
             br    = st[s].re;
@@ -250,8 +250,8 @@ module fft64
         end
 
         // Butterfly register and the delay line (D words, advancing on a token).
-        logic signed [W_BITS-1:0] fr[D], fi[D];
-        logic signed [W_BITS-1:0] push_re, push_im, o_re, o_im;
+        logic signed [FFT_W_BITS-1:0] fr[D], fi[D];
+        logic signed [FFT_W_BITS-1:0] push_re, push_im, o_re, o_im;
         logic signed [SW-1:0]     ar, ai;
         always_comb begin
             ar = SW'(fr[0]) <<< FT;
@@ -265,8 +265,8 @@ module fft64
                 // The first half of a group: the last group's difference out, this input in.
                 o_re    = fr[0];
                 o_im    = fi[0];
-                push_re = pre[W_BITS-1:0];
-                push_im = pim[W_BITS-1:0];
+                push_re = pre[FFT_W_BITS-1:0];
+                push_im = pim[FFT_W_BITS-1:0];
             end
         end
 
