@@ -79,7 +79,7 @@ T2's), on the 52 used bins (IEEE 802.11-2020 §17.3.3, L(k) = ±1):
   `drop` returns it to idle, the stores as they are; the divider takes the same drop.
 
 **Evidence** (`cargo test --release -p radio-phy --test g0_rx_channel`, 3 tests green; commit
-in the PR, see the last entry): a
+e4aaee5): a
 register-for-register model of this architecture (`tests/g0_rx_channel.rs`) against the model
 on 300 random full-scale packets, 680 channels of one to eight taps at amplitudes 2^0 … 2^16
 with noise, and the corners (silence, the rails, pilots removed singly, in pairs and all, the
@@ -126,7 +126,7 @@ free, or after the variance's `q_valid` when it was queued. Against ADR 0010's s
 (`rx_data`): its channel allowance is 110 after the last bin, the RTL 63; its divisions are
 q + 2 each, as here.
 
-**Evidence** (`make -C hw rx_channel`; commit in the PR, see the last entry):
+**Evidence** (`make -C hw rx_channel`, `scripts/check.sh` all green; commit e4aaee5):
 `rx_channel: 338 packets x 3 passes, 8293 quotients, 4056 requests (181 queued), 215 drops
 (107 replayed at once, 40 resets, 56 during a division, 48 after a packet at the rails), 52728
 store words (+33889 during the quotients), 809457 edges, 0 mismatches` — PASS. Lint clean
