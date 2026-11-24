@@ -263,4 +263,4 @@ products: a stage-specific form saves a few hundred cells, for the run through t
   new rules for a transform that runs while its window arrives (G0, "The schedule model"):
   `radio_phy::rx_data` is restated when the top level of ADR 0010 6.2 is built; its
   `DataTiming::fft` allowance (96) is now 75 after the window's last sample for this block.
-- The bin store (a third slot or T1 + T2 accumulated): the channel's block.
+- The bin store (a third slot or T1 + T2 accumulated): the channel's block — T1 + T2 accumulated (the founder, 2026-11-24; `rx_channel.md`).

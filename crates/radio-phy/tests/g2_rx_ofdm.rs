@@ -904,9 +904,10 @@ fn the_tracker_constants_worked_by_hand() {
         }
     );
     // One outer pilot gone: only the inner pair measures (1/14 → 4681), and with a variance
-    // of 7.5 nominal ones the measurement is not used (the limit is 3).
+    // of 7.5 nominal ones (7680) the measurement is not used (the limit is 3); the variance is
+    // reported saturated to its 12 bits (`variance_max`, docs/gates/rx_channel.md).
     let weak = c([0, 2000, 2000, 1000], 78_000);
-    assert_eq!((weak.outer, weak.inner, weak.variance), (0, 4681, 7680));
+    assert_eq!((weak.outer, weak.inner, weak.variance), (0, 4681, 4095));
     // No pair at all, gains no estimate produces, unusable widths: nothing.
     let none = TrackerConstants::default();
     assert_eq!(c([0, 0, 5, 5], 100), none);
@@ -1161,11 +1162,8 @@ fn a_weak_pilot_pair_is_not_followed() {
     let h = estimate_channel(&y[fft_start..fft_start + 128]).unwrap();
     let ch = estimate_channel_fixed(&z[fft_start..fft_start + 128], &fx).unwrap();
     let c = tracker_constants(&ch, &fx);
-    assert!(
-        (4 * 1024..16 * 1024).contains(&c.variance),
-        "variance {} / 1024",
-        c.variance
-    );
+    // Above 4 nominal ones (≈ 8): saturated to the 12 bits' 4095 (`variance_max`).
+    assert_eq!(c.variance, 4095, "variance {} / 1024", c.variance);
     let (mut tf, mut ti) = (Tracking::default(), FixedTracking::unknown(&fx));
     let unit = 2.0 * std::f64::consts::PI / 4_194_304.0;
     let mut largest = 0f64;
@@ -1191,7 +1189,7 @@ fn the_tracker_constants_at_their_edges() {
     // float tracker. Inner pair gone, flat otherwise: D = 9·10⁶ (24 bits: shift 8 → 35 156,
     // N_o 3906); 3·3906/(14·35 156) = 1560.3/2¹⁶ (1/42), variance
     // 5·52 000·2000/(52·9·10⁶) = 1.111 → 1137. Outer pair gone: 1/14 → 4681, variance
-    // 5·20 800·1600/(52·630 000) = 5.08 → 5201.
+    // 5·20 800·1600/(52·630 000) = 5.08 → 5201, saturated to 4095 (unused above 3072).
     assert_eq!(
         c([1000, 0, 0, 1000], 52_000),
         TrackerConstants {
@@ -1205,20 +1203,21 @@ fn the_tracker_constants_at_their_edges() {
         TrackerConstants {
             outer: 0,
             inner: 4681,
-            variance: 5201
+            variance: 4095
         }
     );
     // Roundings that the round cases above do not separate. a = 13 237, b = 6238,
     // N_o = 50 962 039 656, N_i = 13 264 069 665, D = 471 922 426 569 (39 bits: shift 23 →
     // 56 257, 6075, 1581): 3·6075/(14·56 257) = 1516.502/2¹⁶ → 1517 (half up; a shift of
     // 24 gives 1516), 1581/(14·56 257) = 131.55 → 132 (a shift of 24 gives 131); variance
-    // 5·4 494 101/(52·56 257) = 7.681 → 7865.
+    // 5·4 494 101/(52·56 257) = 7.681 → 7865, saturated to 4095 (the variance's rounding is
+    // separated by the cases above: 1137, 1396, 1493).
     assert_eq!(
         c([12_588, 165, 6073, 649], 456_560),
         TrackerConstants {
             outer: 1517,
             inner: 132,
-            variance: 7865
+            variance: 4095
         }
     );
     // Used up to 3 nominal variances, 3 included; not at 0.

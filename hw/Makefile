@@ -16,18 +16,20 @@ VERILATOR ?= verilator
 VFLAGS    := --cc --exe --build -Wall --x-assign unique --x-initial unique lint.vlt
 RVEC      := cargo run -q --release -p radio-tools --bin rvec --
 # Blocks gated on rvec vectors; `ram` is gated against a reference model in its testbench.
-VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide decide_t1 front dc_estimate handoff fft64
+VEC_BLOCKS := scrambler conv_encoder viterbi round_sat ltf_corr cordic nco det latch search search_alone decide decide_t1 front dc_estimate handoff fft64 rx_channel
 # `cordic_arb` replays the CORDIC's vectors; `handoff_forced` holds the hand-off to itself.
 BLOCKS    := ram cordic_arb handoff_forced $(VEC_BLOCKS)
 # Generated SystemVerilog (rvec).
 GEN_RTL   := rtl/gen/rx_front_rom_pkg.sv
 GEN_FFT   := rtl/gen/fft64_rom_pkg.sv
+GEN_CHAN  := rtl/gen/rx_channel_pkg.sv
 # Sources and top module per block, packages first.
 TOP_ram       := ram_bank
 TOP_scrambler := scrambler
 TOP_conv_encoder := conv_encoder
 TOP_viterbi   := viterbi
 TOP_fft64     := fft64
+TOP_rx_channel := channel_chain
 TOP_round_sat := round_sat_bank
 TOP_ltf_corr  := ltf_corr
 TOP_cordic    := cordic
@@ -48,6 +50,7 @@ SRC_scrambler := rtl/scrambler.sv
 SRC_conv_encoder := rtl/conv_encoder.sv
 SRC_viterbi   := rtl/viterbi.sv
 SRC_fft64     := $(GEN_FFT) rtl/fft64.sv
+SRC_rx_channel := $(GEN_CHAN) rtl/lib/ram_1w1r.sv rtl/div_serial.sv rtl/rx_channel.sv tb/channel_chain.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv
 SRC_ltf_corr  := $(GEN_RTL) rtl/round_sat.sv rtl/ltf_corr.sv
 SRC_cordic    := $(GEN_RTL) rtl/cordic.sv
@@ -82,6 +85,7 @@ vectors:
 	cd .. && for b in $(VEC_BLOCKS); do $(RVEC) $$b > hw/vectors/$$b.txt || exit 1; done
 	cd .. && mkdir -p hw/rtl/gen && $(RVEC) rx-front-rom > hw/$(GEN_RTL)
 	cd .. && $(RVEC) fft64-rom > hw/$(GEN_FFT)
+	cd .. && $(RVEC) rx-channel-pkg > hw/$(GEN_CHAN)
 
 ram:
 	rm -rf obj_dir/ram && mkdir -p obj_dir/ram
@@ -108,6 +112,14 @@ fft64: vectors/fft64.txt
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/fft64 --top-module fft64 \
 		$(SRC_fft64) tb/tb_fft64.cpp -o sim_fft64
 	./obj_dir/fft64/sim_fft64 vectors/fft64.txt +verilator+rand+reset+2
+
+# The channel and the per-packet quotients (with the serial divider): every packet's shift,
+# Σg, quotients and stores against the model, their edges, requests, drops.
+rx_channel: vectors/rx_channel.txt
+	rm -rf obj_dir/rx_channel && mkdir -p obj_dir/rx_channel
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir/rx_channel --top-module channel_chain \
+		$(SRC_rx_channel) tb/tb_rx_channel.cpp -o sim_rx_channel
+	./obj_dir/rx_channel/sim_rx_channel vectors/rx_channel.txt +verilator+rand+reset+2
 
 # The decoder at one trellis step a clock, against decode_windowed: every bit in its cycle,
 # idle cycles inside blocks, blocks back to back, resets with a block in flight.
