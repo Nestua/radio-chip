@@ -27,6 +27,13 @@ found is at the end.
   switching simulation for its power come later. The area table below still says 0.5 to
   0.7: read 0.96.
 - **Decision 5:** octets and a status to the MAC; the frame check sequence is the MAC's.
+  **Made exact by the founder on 2026-11-24** (the top level's G0, `docs/gates/rx_data.md`):
+  the time mark is an **age** on `rx_end`, the ADC samples since the frame's last sample was
+  at the pins (the MAC subtracts it from its own stamp of `rx_end`; `rx_handoff` gains a
+  free-running sample count for it); T1, T2 and SIGNAL go through `fft64` chained. With the
+  schedule restated from the RTL as built, the table's case below gives the verdict 482 and
+  the last octet 905 clocks after the first beat: **643 and 1066 after t** (the table's ≈ 650
+  and ≈ 1070).
 
 Decisions 1 (the blocks) and 6 (the order of work) were not asked on their own: they are
 the proposal's, and the first is partly left to the blocks' own G0 (the FFT's

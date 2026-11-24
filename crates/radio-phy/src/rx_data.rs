@@ -1,109 +1,119 @@
-//! The data path of [`RxDataFixed`] as a schedule in clocks (ADR 0010, decision 6.1c): in
-//! which clock the reader takes each beat of the hand-off's stream, when each FFT window is
-//! transformed, when the shared CORDIC, divider, products unit and rotator take each job,
-//! when the Viterbi decoder steps, and in which clock the verdict's strobe and every event
-//! for the MAC are out.
+//! The data path of [`RxDataFixed`] as a schedule in clocks (ADR 0010, decision 6.1c), restated
+//! from the RTL as built (decision 6.2; the top level's G0, `docs/gates/rx_data.md`): in which
+//! clock the top level's reader takes each beat of the hand-off's stream, when `fft64` gives
+//! each window's bins, when `rx_channel`, `rx_symbol`, `rx_track`, `rx_deint`, the Viterbi
+//! decoder and `rx_signal` give what they give, the shared CORDIC's and divider's order, and in
+//! which clock the verdict's strobe and every event for the MAC are out.
 //!
-//! The model decides *what* comes out ([`RxDataFixed`] is called with every beat taken, and
-//! its events are given back as they are); this module decides *when*. It is a reader of the
-//! hand-off ([`HandoffReader`]), so [`crate::rx_handoff::run_handoff`] runs the front's
-//! stream and this data path together, the verdict going back in the clock the schedule
-//! gives it. Every latency below is an **allowance for RTL not yet written** ([`DataTiming`]):
-//! the structure — what waits for what, and the order on each shared unit — is the decision
-//! here; the numbers are replaced block by block as the RTL comes (ADR 0010, decision 6.2).
+//! The model decides *what* comes out ([`RxDataFixed`] is called with every beat taken, and its
+//! events are given back as they are); this module decides *when*. It is a reader of the
+//! hand-off ([`HandoffReader`]), so [`crate::rx_handoff::run_handoff`] runs the front's stream
+//! and this data path together, the verdict going back in the clock the schedule gives it. The
+//! top level's RTL (`hw/rtl/rx_data.sv`, to come) is held to it cycle for cycle at its pins.
 //!
 //! # The clocks
 //!
-//! Counts are from cycle to cycle, as in [`crate::rx_decision`]: a unit with a latency of k
-//! that has its input in cycle X has its output registered in cycle X + k. Beat n of a packet
-//! (n = 0 the first sample of T1's window) is taken in cycle c(n). A window is *complete* in
-//! the cycle W its last sample is taken.
+//! Cycle c ends at clock edge c. A signal *registered* on edge E is seen in cycle E + 1 and
+//! *taken* by the block it is wired to on edge E + 1; every wire between two blocks of the data
+//! path is direct (no register) except where this text says. The blocks' latencies are their
+//! headers' (in edges after the edge that takes the trigger), each checked by the block's own
+//! bench; [`RxDataSchedule::symbols`] and the other lists give registered edges. A beat of the
+//! stream is *taken in cycle c* when `out_valid` and the reader's `out_ready` are high in it.
+//! The verdict's strobe *in cycle c* is `rx_signal`'s `sig_valid` registered on edge c − 1
+//! (`rx_handoff` takes it on edge c), and an event for the MAC *in cycle c* is one registered
+//! on edge c − 1.
 //!
-//! **The windows.** T1's at samples 0 … 63, T2's at 64 … 127, SIGNAL's at 144 + σ₀ … and data
-//! symbol i's at 144 + 80·i + σᵢ₋₁ …, σ the tracker's shift (decision 2: one symbol after
-//! another). SIGNAL's and the first data symbol's places are known at the first beat (SIGNAL's
-//! fit is identically zero, ADR 0010 decision 3). For data symbol i + 1 (i ≥ 1) a shift moves
-//! by at most a sample a symbol, so the samples before 144 + 80·(i + 1) + σᵢ₋₁ − 1 are taken
-//! (and dropped) whenever they come; from there on the reader waits for cycle Sᵢ + 1, Sᵢ the
-//! cycle symbol i's shift is registered. A window's first sample also waits for a window
-//! store: `window_stores` of them, each held from its window's first sample to its
-//! transform's start + `fft_read`.
+//! # The reader (the top level's; ready is a register)
 //!
-//! **The FFT**, one transform at a time: F = max(W + 1, the last transform's bins), the bins
-//! B = F + `fft`.
+//! Windows: T1 at samples 0 … 63, T2 at 64 … 127, SIGNAL at 144 + σ₀ (σ the tracker's shift;
+//! σ₀ the packet's start, 0), data symbol k at 144 + 80·k + σ, σ after symbol k − 1's move. A
+//! window's samples go to `fft64` through one register (taken in cycle c, seen by the FFT in
+//! c + 1); T1 and T2 carry `in_next` on their 64th sample (the founder's choice, 2026-11-24:
+//! T1 → T2 → SIGNAL chained), SIGNAL and the data symbols are flushed. Other samples are taken
+//! and dropped. `out_ready` in cycle c is registered on edge c − 1 from what is seen in cycle
+//! c − 1, so a beat that waits for a block's output registered on edge E is taken in cycle
+//! E + 2 at the earliest. For data symbol k's window, with S the first sample of its old place
+//! less one (a shift moves by a sample a symbol at most):
+//! - samples before S are taken whenever they come;
+//! - from S on, cycle ≥ θ + 2, θ the edge symbol k − 1's θ is registered (SIGNAL's for k = 1),
+//!   and for k ≥ 2 also cycle ≥ V + 2, V the edge of the verdict (the reader learns the
+//!   number of data symbols there);
+//! - the window's first sample also waits for the FFT (cycle ≥ W + 65, W the cycle of the last
+//!   flushed window's 64th sample: the flush's 64 tokens) and for `rx_symbol`'s slot (cycle ≥
+//!   F + 43, F the edge of the first soft value of the symbol two before, whose last read
+//!   empties the slot on F + 41).
 //!
-//! **The channel**: Hs, the gains, the packet's shift and Σg registered in C = B(T2) +
-//! `channel`.
+//! From the frame's last window on (once the reader knows it: cycle ≥ V + 2), and from V + 2
+//! after a SIGNAL that failed, the reader takes the stream's tail and drops it. After a mark it
+//! takes nothing until the packet's last event is out (ADR 0010, Context 3, rule 5); every
+//! block takes the top level's drop with that event.
 //!
-//! **The divider** (one, serial, a quotient bit a clock and `divide_overhead`), in a fixed
-//! order per packet: from C, BPSK's scale (quotient bits: the bit length of its constant A,
-//! plus one: A·2ⁿ/Σg lies in (A, 2A]), the tracker's two coefficients (K − 2 bits each), the
-//! variance (V + 2 bits: it is compared with 3 nominal ones); then per data symbol i its fit
-//! (P + R − 4 bits, the model's saturation of δ), and after the first symbol's fit the data's
-//! scale (asked at the verdict: it waits for the rate).
+//! # The blocks, in edges
 //!
-//! **The CORDIC** (iterative, one angle at a time, `cordic` clocks each), in a fixed order:
-//! SIGNAL's common phase, then its two pair angles (they feed only the fit's sums); for each
-//! data symbol its two pair angles, then its common phase.
+//! - **`fft64`**: a window's 64th sample taken in cycle c; bin j (in the order it leaves) taken
+//!   by the block behind it on edge c + 14 + j when the window is flushed; when it is chained,
+//!   bin 0 on c + 14 and bin j ≥ 1 on c′ + 14, c′ the cycle the next window's sample j − 1 is
+//!   taken. Bin 63 is bin −1, used: a window's last used bin is its 64th.
+//! - **`rx_channel`**: chan_valid registered on CH = T2's last bin + 63; the quotients on q₀ =
+//!   CH + 3 + 18 (BPSK's scale), then each 2 + its quotient bits later (outer 14, inner 14,
+//!   variance 12): CH + 21, 37, 53, 67. The data's scale (not asked for BPSK: its scale is
+//!   already in): asked with the verdict (taken V + 1), the divider takes it no earlier than
+//!   V + 3, quotient bits 18, 19, 20 (QPSK, 16-QAM, 64-QAM), q_valid on the division's done + 1.
+//! - **The divider** (`div_share` → `div_serial`): a division taken on edge e is done on e + q
+//!   and the divider takes again on e + q + 1; `rx_channel` (a) before the tracker (b) when
+//!   both wait.
+//! - **The CORDIC** (`cordic_share` → `cordic_iter`): a request registered on R is taken on
+//!   max(R + 1, the CORDIC free), the angle registered 17 later, the CORDIC free 18 after the
+//!   take. In a packet the requests come in the order SIGNAL's outer, inner, its φ, then per
+//!   data symbol outer, inner, φ (each is checked; a break is a violation).
+//! - **`rx_symbol`**, symbol s: pil_valid on max(its last bin, CH + 1, the last pilots + 48) +
+//!   9; its φ request on max(pilots + 48, θ, the last first soft value + 41) + 10; φ 18 after
+//!   the CORDIC took it; the first soft value on F = max(φ, the scale's take, for data the
+//!   verdict's take V + 1) + 8, then one a clock, 48.
+//! - **`rx_track`**: start taken on c₀ + 1 (registered from the first beat); SIGNAL's θ on
+//!   start + 5 (+ 3 without a ratio). A step: T = max(pilots + 1, the last step's end) + 1;
+//!   outer request T + 6, inner max(T + 10, the outer's take); λ at C = max(T + 14, the
+//!   variance's take + 1); G₀ = max(C + 7, outer angle + 2), G₁ = max(G₀ + 1, inner angle + 2).
+//!   SIGNAL's step ends on G₁ + 10 (G₁ + 2 when the packet measures nothing). A data symbol:
+//!   its division asked on G₁ + 10 (26 quotient bits), θ 5 after its done; with nothing
+//!   measured θ on G₁ + 3. The end of a data step is its θ.
+//! - **`rx_deint`**: SIGNAL's block taken c₀ + 1, the data's V + 1; a symbol's first step
+//!   v_valid on max(its last soft value + 1, the block's take, the last step − 1) + 2, then a
+//!   step an edge.
+//! - **The Viterbi decoder**: step t taken on e(t) (= v_valid + 1); the bit of step t − 95
+//!   registered on e(t) + 4 for 95 ≤ t < steps − 1; at the last step the min(96, steps) bits not
+//!   yet out from e(last) + 4, one an edge.
+//! - **`rx_signal`**: the verdict registered on V = e(SIGNAL's 24th step) + 29.
+//! - **The octets** (the descrambler, next PR; an allowance, [`DataTiming::octet`]): an octet
+//!   registered `octet` edges after its last bit; the frame's end with its last octet, and a
+//!   seed of zero ends where the last octet would have been.
 //!
-//! **Symbol s** (0 = SIGNAL), its products u = Z·Hs* on the products unit from
-//! P = max(B, C, the cycle the last symbol's soft pass has read its products): the four
-//! pilots in P … P + 3; the two pair products hi·conj(lo) in Q = P + 3 + `product` and Q + 1
-//! (the pilots registered), normalised a clock later; the 48 data products in the other
-//! slots from P + 4 on. Then:
+//! An end by a mark (an abort, or the stream ending early) comes in the cycle after the mark,
+//! or when the windows already complete have been decoded, if that is later: the bit of their
+//! last step registered and an octet's latency after it.
 //!
-//! | What | Cycle |
+//! # The case of ADR 0010's table, by hand (`tests/g2_rx_data_schedule.rs`)
+//!
+//! 24 octets at 54 Mb/s (one data symbol), the window not moved, a beat offered every cycle
+//! from c₀ = 0, the CFO's ratio known; registered edges unless "taken":
+//!
+//! | What | Edge |
 //! |---|---|
-//! | the outer pair's angle, the inner's | asked at Q + `product` + 1 and Q + `product` + 2, on the CORDIC in its order |
-//! | the fit (data symbols) | its division asked `fit_in` after the inner angle |
-//! | θ and the shift, S | the fit's quotient + `after_fit`; SIGNAL's θ at the first beat |
-//! | the pilots rotated by θ | four inputs to the rotator from R = max(S, the pilots registered, the rotator free) |
-//! | the common phase φ | asked R + 3 + `rotator` + 1 (the sum), on the CORDIC in its order |
-//! | the soft pass | from D₀ = max(φ + 1, the scale, the rotator free, the soft buffer's slot free): subcarrier j issued in D₀ + j·k, k = ⌈N_BPSC / `soft_products`⌉ |
-//! | the symbol's soft values written | L = D₀ + 47·k + `demap` |
-//! | its trellis steps | from max(L + 1, the decoder free), a step a clock: 24 for SIGNAL, N_DBPS for data (the last symbol up to the anchor 16 + 8·LENGTH + 6) |
-//!
-//! Two waits need no rule of their own, whatever the latencies: the soft pass never reads a
-//! data product before it is registered (D₀ > φ ≥ P + 3 + `product` + 4 + `rotator`, and
-//! subcarrier j's product, registered by P + 6 + j + `product`, is read in D₀ + j·k); and a data symbol's fit never comes
-//! before the previous symbol's sums are in (its angles follow that symbol's on the CORDIC).
-//! Mutants that drop either wait change no cycle (`docs/gates/rx_ofdm.md`).
-//!
-//! The soft buffer holds `soft_symbols` symbols (SIGNAL counted): symbol s's slot is free the
-//! cycle after the decoder's last step of symbol s − `soft_symbols`.
-//!
-//! **Out.** The verdict's strobe, the start, or SIGNAL's failure: `signal_check` after
-//! SIGNAL's 24th step. Data bit b (from the first SERVICE bit), with the window
-//! d = min(depth, anchor): for b < anchor − d, `viterbi_out` after step b + d; the rest from
-//! state 0's register at the anchor, a bit a clock, `viterbi_out` + 1 + (b − anchor + d)
-//! after the anchor's step. An octet (and the seed's end, at bit 6) `octet` after its last
-//! bit; the frame's end with its last octet. An end by a mark: the cycle after the mark, or
-//! the last event before it if that is later. Events keep the model's order.
-//!
-//! **The reader** after the frame's last window (or once the model has ended the frame)
-//! takes the stream's tail and drops it. After a mark it takes nothing until the packet's
-//! last event is out (ADR 0010, Context 3, rule 5: the next stream waits in the hand-off's
-//! history).
-//!
-//! # The case of ADR 0010's table, by hand (default timing)
-//!
-//! 24 octets at 54 Mb/s (one data symbol), the window not moved, a beat offered every
-//! cycle from c₀ (the first beat):
-//!
-//! | What | Cycle − c₀ |
-//! |---|---|
-//! | T1, T2, SIGNAL, data windows complete | 63, 127, 207, 287 |
-//! | their transforms start; bins | 64, 160, 256, 352; 160, 256, 352, 448 |
-//! | the channel | 366 |
-//! | divider: BPSK's scale, two coefficients, the variance | 366 → 386 → 402 → 418 → 432 |
-//! | SIGNAL: products from; φ; its soft pass; values written | 366; 398; 399 … 446; 455 |
-//! | SIGNAL's 24 steps; **the verdict** | 456 … 479; **509** |
-//! | data: products from; pair angles | 448; 458 → 476, 476 → 494 |
-//! | its fit; θ; the data's scale | 499 → 529; 531; 529 → 551 |
-//! | φ; the soft pass; values written | 557; 558 … 605; 614 |
-//! | 214 steps | 615 … 828 |
-//! | octet 0 (bit 23 at step 119); octet 11 (bit 111) | 737; 825 |
-//! | octet 12 (bit 119, the flush's second bit); **octet 23, the end** | 834; **922** |
+//! | T1, T2, SIGNAL taken in cycles | 0 … 63, 64 … 127, 144 … 207 |
+//! | T2's last bin taken (with SIGNAL's sample 62); chan_valid | 220; 283 |
+//! | quotients: BPSK's scale, outer, inner, variance | 304, 320, 336, 350 |
+//! | SIGNAL: its bins taken; pilots; θ₀ | 221 … 284; 293; 6 |
+//! | its step: T; outer taken, inner taken; G₁; end | 295; 302, 320; 360; 370 |
+//! | its φ asked, taken, out; first soft value | 351, 352, 370; 378 |
+//! | its 24 steps; **the verdict** (seen in cycle 482) | 428 … 451; **481** |
+//! | data window (waits for the flush: 207 + 65) | 272 … 335 |
+//! | its bins taken; pilots; T | 349 … 412; 421; 423 |
+//! | outer taken, inner taken; G₁; the fit taken, done; θ | 430, 448; 467; 478, 504; 509 |
+//! | the data's scale taken (after the fit), q_valid | 505; 526 |
+//! | φ asked, out; first soft value | 519, 538; 546 |
+//! | 214 steps | 596 … 809 |
+//! | bit 0 (step 95), bit 117; the flush's 96 bits | 696, 813; 814 … 909 |
+//! | octet 0 (bit 23), 11 (bit 111), 12 (bit 119), **23, the end** | 720, 808, 816, **904** |
 //!
 //! [`RxDataFixed`]: crate::rx_data_fixed::RxDataFixed
 
@@ -118,78 +128,76 @@ use std::collections::VecDeque;
 
 /// Samples of an FFT window.
 const FFT_SIZE: usize = 64;
-/// The first sample of SIGNAL's nominal window, from T1's.
+/// SIGNAL's nominal window, from T1's.
 const SIGNAL_START: usize = 2 * FFT_SIZE + 16;
 /// Samples of a symbol.
 const SYMBOL: usize = 80;
-/// Data subcarriers, pilots.
-const DATA: usize = 48;
-const PILOTS: usize = 4;
 /// SIGNAL's trellis steps.
 const SIGNAL_STEPS: usize = 24;
 
-/// What the data path's schedule is laid out against: allowances for blocks not yet built.
-/// Latencies are from cycle to cycle.
+/// `fft64`: from a window's 64th sample taken to its bin 0 taken (12 pipeline registers
+/// behind the input register, and the reader's register in front).
+const FFT_BIN0: usize = 14;
+/// `fft64`: from a flushed window's 64th sample taken to the next window's first sample
+/// taken (the flush's 64 tokens).
+const FFT_FLUSH: usize = 65;
+/// `rx_channel`: chan_valid after the edge that takes T2's last used bin.
+const CHAN: usize = 63;
+/// `rx_channel`: from chan_valid to the first division's take (asked an edge later).
+const CHAN_ASK: usize = 2;
+/// `rx_channel`: between a done and the next division's take, and from a done to q_valid.
+const CHAN_NEXT: usize = 1;
+/// The data scale's request (taken with the verdict) to the divider's earliest take.
+const SCALE_ASK: usize = 2;
+/// `rx_symbol`: pil_valid after its triggers.
+const PIL: usize = 9;
+/// `rx_symbol`: the products pass, from pil_valid to its last product written.
+const PRODUCTS: usize = 48;
+/// `rx_symbol`: the CORDIC request after its triggers.
+const PHI_ASK: usize = 10;
+/// `rx_symbol`: φ after the CORDIC's take.
+const PHI: usize = 18;
+/// `rx_symbol`: the first soft value after its triggers.
+const SOFT: usize = 8;
+/// `rx_symbol`: the soft pass's last read after its first soft value (the slot empty).
+const SOFT_READ: usize = 41;
+/// `cordic_iter`: the angle after its take; the next take after the angle.
+const ANGLE: usize = 17;
+/// `rx_track`: SIGNAL's θ after start (with a ratio, without).
+const TH0: usize = 5;
+const TH0_NONE: usize = 3;
+/// `rx_track`: the outer and inner requests, λ, the angles' products, from T.
+const REQ_OUTER: usize = 6;
+const REQ_INNER: usize = 10;
+const LAMBDA: usize = 14;
+const G0: usize = 7;
+/// `rx_track`: SIGNAL's end after G₁ (measured, not), a data symbol's division asked after
+/// G₁, θ after the division's done, θ without a measurement after G₁.
+const SIG_END: usize = 10;
+const SIG_END_NONE: usize = 2;
+const FIT_ASK: usize = 10;
+const TH_FIT: usize = 5;
+const TH_NONE: usize = 3;
+/// `rx_track`: the fit's quotient bits (`rx_track.md`, G0: |δ| < 2^26 on every frame).
+const FIT_QBITS: usize = 26;
+/// `rx_deint`: the first step after its triggers.
+const DEINT: usize = 2;
+/// `viterbi.sv`: a bit after its step's take; the traceback window.
+const VITERBI: usize = 4;
+const DEPTH: usize = 96;
+/// `rx_signal` behind `viterbi.sv`: the verdict after SIGNAL's last step's take.
+const VERDICT: usize = 29;
+
+/// What is still an allowance: blocks not yet built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataTiming {
-    /// From a transform's start to its 64 bins registered; also the least time between two
-    /// starts (ADR 0010's 96; `fft64`'s G0 settles it).
-    pub fft: usize,
-    /// From a transform's start to its window store free (its 64 samples read).
-    pub fft_read: usize,
-    /// Window stores of 64 samples.
-    pub window_stores: usize,
-    /// From T2's bins to Hs, the gains, the packet's shift and Σg: two passes over 52 bins.
-    pub channel: usize,
-    /// The products unit (one complex product a clock).
-    pub product: usize,
-    /// The iterative CORDIC: one angle in this many clocks.
-    pub cordic: usize,
-    /// A division's clocks beyond its quotient bits (the operands' load, the rounding).
-    pub divide_overhead: usize,
-    /// From the inner pair's angle to the fit's division asked: the error's two products,
-    /// the sums, the determinant and the numerator.
-    pub fit_in: usize,
-    /// From the fit's quotient to θ and the shift: δ's saturation, the drift's product.
-    pub after_fit: usize,
-    /// The data path's rotator, as `hw/rtl/nco.sv`.
-    pub rotator: usize,
-    /// From a subcarrier's issue to its soft values written: the rotator, the thresholds,
-    /// the demapper, the scale's product, the clip.
-    pub demap: usize,
-    /// The soft scale's multipliers: soft values a clock.
-    pub soft_products: usize,
-    /// Symbols the soft buffer holds.
-    pub soft_symbols: usize,
-    /// From a trellis step to its decided bit registered (the best state's tree).
-    pub viterbi_out: usize,
-    /// From SIGNAL's last step to the verdict: the field's checks, the re-encoding, the
-    /// number of symbols.
-    pub signal_check: usize,
-    /// From an octet's last bit to the octet out.
+    /// From an octet's last bit registered to the octet registered (the descrambler).
     pub octet: usize,
 }
 
 impl Default for DataTiming {
     fn default() -> Self {
-        Self {
-            fft: 96,
-            fft_read: 64,
-            window_stores: 2,
-            channel: 110,
-            product: 3,
-            cordic: 18,
-            divide_overhead: 2,
-            fit_in: 5,
-            after_fit: 2,
-            rotator: 4,
-            demap: 9,
-            soft_products: 6,
-            soft_symbols: 2,
-            viterbi_out: 3,
-            signal_check: 30,
-            octet: 1,
-        }
+        Self { octet: 1 }
     }
 }
 
@@ -215,36 +223,43 @@ pub struct WindowRun {
     pub first: usize,
     /// See `first`.
     pub last: usize,
-    /// Its transform's start, and its bins registered.
-    pub fft: usize,
-    /// See `fft`.
+    /// Its last bin taken (for T1 and T2: once the next window's samples have pushed it out;
+    /// 0 when they never did).
     pub bins: usize,
 }
 
-/// One symbol's work on the schedule.
+/// One symbol's work on the schedule (registered edges unless "taken").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SymbolRun {
     /// The packet's tag.
     pub packet: u8,
     /// 0 SIGNAL, 1 … the data symbols.
     pub symbol: usize,
-    /// The products' first slot.
-    pub products: usize,
-    /// The pair angles: (asked, done) each, outer then inner.
+    /// Its last bin taken.
+    pub bins: usize,
+    /// pil_valid.
+    pub pilots: usize,
+    /// The tracker's step: T.
+    pub step: usize,
+    /// The pair angles: (request, take), outer then inner.
     pub outer: (usize, usize),
     /// See `outer`.
     pub inner: (usize, usize),
-    /// The fit's division (start, quotient); `None` for SIGNAL.
+    /// G₁.
+    pub g1: usize,
+    /// The fit's division (take, done); `None` for SIGNAL and with nothing measured.
     pub fit: Option<(usize, usize)>,
-    /// θ and the shift registered (SIGNAL: the first beat).
+    /// θ (SIGNAL: θ₀; its step's end is `end`).
     pub theta: usize,
-    /// The common phase registered.
-    pub phi: usize,
-    /// The scale this symbol uses registered.
+    /// The step's end.
+    pub end: usize,
+    /// φ: (request, take, φ).
+    pub phi: (usize, usize, usize),
+    /// The scale this symbol uses, taken.
     pub scale: usize,
-    /// The soft pass's first issue, and the symbol's soft values written.
+    /// The first and the last soft value.
     pub soft: (usize, usize),
-    /// The trellis steps: (first cycle, last cycle); `None`: none.
+    /// The trellis steps' v_valid: (first, last); `None`: none.
     pub steps: Option<(usize, usize)>,
 }
 
@@ -270,20 +285,21 @@ pub struct DivisionRun {
     pub packet: u8,
     /// Which.
     pub job: Division,
-    /// Asked, started, quotient registered.
+    /// The first edge it could be taken on.
     pub asked: usize,
-    /// See `asked`.
+    /// The edge the divider took it on.
     pub start: usize,
-    /// See `asked`.
+    /// Its done registered.
     pub done: usize,
 }
 
-/// The data symbols' trellis steps: the first data step's index (0-based) and its cycle.
+/// The data symbols' trellis steps: the first data step's index (0-based), how many, the
+/// first one's v_valid.
 #[derive(Debug, Clone, Copy)]
 struct Steps {
     from: usize,
     count: usize,
-    cycle: usize,
+    first: usize,
 }
 
 /// The frame being decoded, once SIGNAL has said what it is.
@@ -291,43 +307,66 @@ struct Steps {
 struct FrameInfo {
     rate: Rate,
     symbols: usize,
+    length: usize,
     anchor: usize,
 }
 
-/// The open packet.
-#[derive(Debug, Clone)]
-struct Packet {
-    tag: u8,
-    /// The tracker's shift as the last window was placed.
-    shift: i64,
-    /// Beats taken.
-    n: usize,
-    /// The window being filled: its index (0 T1, 1 T2, 2 + s symbol s), first sample, the
-    /// first sample the reader may take freely, the cycle after which the rest may be taken.
-    next: Option<Next>,
-    /// The first-sample cycle of the window being filled.
-    filling: Option<usize>,
-    /// Windows whose store is not yet free: the cycle each is.
-    held: Vec<usize>,
-    channel: usize,
-    first_beat: usize,
-    frame: Option<FrameInfo>,
-    verdict: usize,
-    data_steps: Vec<Steps>,
-    data_done: usize,
-    octets: usize,
-    /// Symbol ends of the decoder, by symbol, for the soft buffer's slots.
-    decoded: Vec<usize>,
-    /// The model has ended the frame, or it is past its last window: the tail is dropped.
-    draining: bool,
-}
-
+/// A window to come: its index (0 T1, 1 T2, 2 + s symbol s), first sample, the first sample
+/// that waits, the cycle from which those may be taken, the cycle from which its first may.
 #[derive(Debug, Clone, Copy)]
 struct Next {
     index: usize,
     start: usize,
     free_below: usize,
     after: usize,
+    gate: usize,
+}
+
+/// The open packet.
+#[derive(Debug, Clone)]
+struct Packet {
+    tag: u8,
+    first_beat: usize,
+    /// Beats taken.
+    n: usize,
+    next: Option<Next>,
+    /// The cycles of the window being filled; the last complete one's (for chained bins).
+    cycles: Vec<usize>,
+    last_cycles: Vec<usize>,
+    /// The tracker's shift as the last window was placed.
+    shift: i64,
+    /// θ₀ registered.
+    theta0: usize,
+    measures: bool,
+    /// chan_valid and the variance's q_valid registered; BPSK's scale taken.
+    chan: usize,
+    variance: usize,
+    bpsk_scale: usize,
+    /// The verdict registered.
+    verdict: Option<usize>,
+    frame: Option<FrameInfo>,
+    /// The cycle from which the next flushed window's first sample may be taken.
+    fft_free: usize,
+    /// Per symbol (0 SIGNAL): its first soft value.
+    first_soft: Vec<usize>,
+    last_pilots: usize,
+    last_end: usize,
+    /// The last step's v_valid (any block).
+    last_step: Option<usize>,
+    signal_last_take: usize,
+    data_steps: Vec<Steps>,
+    data_done: usize,
+    octets: usize,
+    /// The data scale's request: the first edge it could be taken on, its quotient bits; and
+    /// once taken, its q_valid taken.
+    scale_ask: Option<(usize, usize, Modulation)>,
+    data_scale: Option<usize>,
+    /// The shared units: the first edge each may take a job on; the last CORDIC request.
+    cordic_free: usize,
+    divider_free: usize,
+    last_request: usize,
+    /// From this cycle the reader drops the stream's tail.
+    drain_from: Option<usize>,
 }
 
 /// The streaming data path on a schedule in clocks; see the module's documentation.
@@ -337,24 +376,16 @@ pub struct RxDataSchedule {
     cfg: RxOfdmConfig,
     fx: FixedOfdmConfig,
     t: DataTiming,
-    depth: usize,
+    ratio_known: bool,
     packet: Option<Packet>,
     /// A mark was taken: nothing more until this cycle has passed.
     wait_until: Option<usize>,
-    // The shared units: the first cycle each is free.
-    fft_free: usize,
-    product_free: usize,
-    cordic_free: usize,
-    divider_free: usize,
-    rotator_free: usize,
-    decoder_free: usize,
-    /// The products' store: free from this cycle (the last soft pass has read it).
-    u_free: usize,
     events: Vec<(usize, RxDataEvent)>,
     strobes: VecDeque<(usize, u8, Option<SignalVerdict>)>,
     windows: Vec<WindowRun>,
     symbols: Vec<SymbolRun>,
     divisions: Vec<DivisionRun>,
+    violations: Vec<(usize, &'static str)>,
 }
 
 impl RxDataSchedule {
@@ -371,24 +402,15 @@ impl RxDataSchedule {
             cfg,
             fx,
             t,
-            depth: match fx.traceback {
-                0 => usize::MAX,
-                d => d,
-            },
+            ratio_known: ratio.is_some_and(|r| r != 0),
             packet: None,
             wait_until: None,
-            fft_free: 0,
-            product_free: 0,
-            cordic_free: 0,
-            divider_free: 0,
-            rotator_free: 0,
-            decoder_free: 0,
-            u_free: 0,
             events: Vec::new(),
             strobes: VecDeque::new(),
             windows: Vec::new(),
             symbols: Vec::new(),
             divisions: Vec::new(),
+            violations: Vec::new(),
         })
     }
 
@@ -413,22 +435,26 @@ impl RxDataSchedule {
         &self.divisions
     }
 
+    /// The blocks' contracts the schedule found broken (cycle, which): none on any run the
+    /// gates make; the RTL stops its simulation on each.
+    pub fn violations(&self) -> &[(usize, &'static str)] {
+        &self.violations
+    }
+
     /// The cycle of the last event (0: none).
     pub fn last_event(&self) -> usize {
         self.events.last().map_or(0, |e| e.0)
     }
 
-    /// Whether a beat at the stream's pins is taken in cycle `clock`.
+    /// Whether a beat at the stream's pins is taken in cycle `clock` (the reader's ready).
     pub fn ready_at(&self, clock: usize) -> bool {
-        if let Some(w) = self.wait_until {
-            if clock <= w {
-                return false;
-            }
+        if self.wait_until.is_some_and(|w| clock <= w) {
+            return false;
         }
         let Some(p) = &self.packet else {
             return true;
         };
-        if p.draining {
+        if p.drain_from.is_some_and(|d| clock >= d) {
             return true;
         }
         let Some(next) = p.next else {
@@ -437,15 +463,10 @@ impl RxDataSchedule {
         if p.n < next.free_below {
             return true;
         }
-        if clock <= next.after {
+        if clock < next.after {
             return false;
         }
-        if p.n == next.start {
-            // A window store: those not yet free in this cycle.
-            let busy = p.held.iter().filter(|&&f| clock < f).count();
-            return busy < self.t.window_stores;
-        }
-        true
+        p.n != next.start || clock >= next.gate
     }
 
     /// The verdict's strobe of cycle `clock`, if any.
@@ -461,65 +482,86 @@ impl RxDataSchedule {
 
     /// The beat taken in cycle `clock`.
     pub fn take(&mut self, clock: usize, beat: HandoffBeat) {
-        if let Some(w) = self.wait_until {
-            if clock > w {
-                self.wait_until = None;
-            }
+        if self.wait_until.is_some_and(|w| clock > w) {
+            self.wait_until = None;
         }
-        let starts = matches!(beat, HandoffBeat::Sample { first: Some(_), .. });
         let out = self.model.push(beat);
         match beat {
             HandoffBeat::End(_) => {
-                self.stamp_ends(clock, &out);
+                self.end_by_mark(clock, &out);
                 self.packet = None;
                 self.wait_until = Some(self.last_event());
             }
-            HandoffBeat::Sample { first, .. } => {
-                if starts {
-                    // An end for a packet in flight (no mark before it), then the new one.
-                    let (ends, rest): (Vec<_>, Vec<_>) = out
-                        .iter()
-                        .partition(|e| matches!(e, RxDataEvent::End(RxDataEnd::Aborted(_))));
-                    self.stamp_ends(clock, &ends);
-                    let tag = first.map_or(0, |f| f.packet);
-                    self.open(clock, tag);
-                    self.sample(clock, &rest);
-                } else {
-                    self.sample(clock, &out);
+            HandoffBeat::Sample { first: Some(f), .. } => {
+                // An end for a packet in flight (no mark before it: the hand-off as built
+                // never does this), then the new one.
+                let (ends, rest): (Vec<_>, Vec<_>) = out
+                    .iter()
+                    .partition(|e| matches!(e, RxDataEvent::End(RxDataEnd::Aborted(_))));
+                if !ends.is_empty() {
+                    self.violations
+                        .push((clock, "a first beat with no mark before it"));
                 }
+                self.end_by_mark(clock, &ends);
+                self.open(clock, f.packet);
+                self.sample(clock, &rest);
             }
+            HandoffBeat::Sample { first: None, .. } => self.sample(clock, &out),
         }
     }
 
     fn open(&mut self, clock: usize, tag: u8) {
+        let th0 = if self.ratio_known { TH0 } else { TH0_NONE };
         self.packet = Some(Packet {
             tag,
-            shift: self.model.shift(),
+            first_beat: clock,
             n: 0,
             next: Some(Next {
                 index: 0,
                 start: 0,
                 free_below: 0,
                 after: 0,
+                gate: 0,
             }),
-            filling: None,
-            held: Vec::new(),
-            channel: 0,
-            first_beat: clock,
+            cycles: Vec::with_capacity(FFT_SIZE),
+            last_cycles: Vec::new(),
+            shift: self.model.shift(),
+            // start registered from the first beat, taken an edge later.
+            theta0: clock + 1 + th0,
+            measures: false,
+            chan: 0,
+            variance: 0,
+            bpsk_scale: 0,
+            verdict: None,
             frame: None,
-            verdict: 0,
+            fft_free: 0,
+            first_soft: Vec::new(),
+            last_pilots: 0,
+            last_end: 0,
+            last_step: None,
+            signal_last_take: 0,
             data_steps: Vec::new(),
             data_done: 0,
             octets: 0,
-            decoded: Vec::new(),
-            draining: false,
+            scale_ask: None,
+            data_scale: None,
+            cordic_free: 0,
+            divider_free: 0,
+            last_request: 0,
+            drain_from: None,
         });
     }
 
-    /// Ends given by a mark or a new first beat: the cycle after, or the last event's.
-    fn stamp_ends(&mut self, clock: usize, out: &[RxDataEvent]) {
+    /// Ends given by a mark (or a first beat with no mark): the cycle after it, or once the
+    /// complete windows have been decoded.
+    fn end_by_mark(&mut self, clock: usize, out: &[RxDataEvent]) {
+        let decoded = self
+            .packet
+            .as_ref()
+            .and_then(|p| p.last_step.filter(|_| !p.data_steps.is_empty()))
+            .map_or(0, |s| s + 1 + VITERBI + self.t.octet + 1);
         for e in out {
-            self.push_event(clock + 1, *e);
+            self.push_event((clock + 1).max(decoded), *e);
         }
     }
 
@@ -539,314 +581,441 @@ impl RxDataSchedule {
         let n = p.n;
         p.n += 1;
         let mut completed = None;
-        if let Some(next) = p.next {
-            if n == next.start {
-                p.filling = Some(clock);
+        let draining = p.drain_from.is_some_and(|d| clock >= d);
+        if let Some(next) = p.next.filter(|_| !draining) {
+            if n >= next.start && n < next.start + FFT_SIZE {
+                p.cycles.push(clock);
             }
             if n == next.start + FFT_SIZE - 1 {
-                completed = Some((next.index, p.filling.unwrap_or(clock)));
+                completed = Some(next.index);
             }
         }
-        if let Some((index, first)) = completed {
-            self.window_done(&mut p, index, first, clock);
-            // The events of this window, then where the next one is.
-            self.stamp(&mut p, clock, out);
-            p.filling = None;
-            p.next = self.next_window(&p, index);
-            p.shift = self.model.shift();
-        } else {
-            self.stamp(&mut p, clock, out);
-        }
-        if !self.model.busy() {
-            p.draining = true;
+        match completed {
+            Some(index) => self.window_done(&mut p, index, clock, out),
+            None => {
+                for e in out {
+                    self.push_event(clock + 1, *e);
+                }
+            }
         }
         self.packet = Some(p);
     }
 
-    /// Where the window after `index` is, as far as the reader may know it.
+    /// A window's 64th sample taken in `clock`.
+    fn window_done(&mut self, p: &mut Packet, index: usize, clock: usize, out: &[RxDataEvent]) {
+        let cycles = std::mem::take(&mut p.cycles);
+        let first = cycles.first().copied().unwrap_or(clock);
+        // The window before, chained into this one: its bins, pushed out by these samples.
+        if index == 1 || index == 2 {
+            let chained = if index == 1 { Window::T1 } else { Window::T2 };
+            let bins = cycles.get(FFT_SIZE - 2).map_or(clock, |c| c + FFT_BIN0);
+            let prev = &p.last_cycles;
+            self.windows.push(WindowRun {
+                packet: p.tag,
+                window: chained,
+                first: prev.first().copied().unwrap_or(0),
+                last: prev.last().copied().unwrap_or(0),
+                bins,
+            });
+            if index == 2 {
+                self.channel(p, bins);
+            }
+        }
+        let flushed_bins = clock + FFT_BIN0 + FFT_SIZE - 1;
+        if index >= 2 {
+            p.fft_free = clock + FFT_FLUSH;
+            self.windows.push(WindowRun {
+                packet: p.tag,
+                window: Window::Symbol(index - 2),
+                first,
+                last: clock,
+                bins: flushed_bins,
+            });
+        }
+        p.last_cycles = cycles;
+        let s = index.saturating_sub(2);
+        if index == 2 {
+            p.measures = self.model.measures().unwrap_or(false);
+            self.signal(p, flushed_bins);
+        } else if index > 2 {
+            let real = p.frame.is_some_and(|f| s <= f.symbols);
+            if real {
+                self.data_symbol(p, s, flushed_bins);
+            }
+        }
+        self.stamp(p, clock, out);
+        // The frame's last window: the tail is dropped from here, once the reader knows.
+        if let (Some(f), Some(v)) = (p.frame, p.verdict) {
+            if index >= 2 && s == f.symbols {
+                p.drain_from = Some((clock + 1).max(v + 2));
+            }
+        }
+        p.next = self.next_window(p, index);
+        p.shift = self.model.shift();
+    }
+
+    /// Where the window after `index` is, as the reader knows it.
     fn next_window(&self, p: &Packet, index: usize) -> Option<Next> {
         let shift = self.model.shift();
+        let fixed = |start: usize| Next {
+            index: index + 1,
+            start,
+            free_below: start,
+            after: 0,
+            gate: 0,
+        };
         match index {
-            0 => Some(Next {
-                index: 1,
-                start: FFT_SIZE,
-                free_below: FFT_SIZE,
-                after: 0,
-            }),
-            // SIGNAL's and the first data symbol's places are known at the first beat.
-            1 | 2 => {
-                let start = place(SIGNAL_START + SYMBOL * (index - 1), shift);
-                Some(Next {
-                    index: index + 1,
-                    start,
-                    free_below: start,
-                    after: 0,
-                })
-            }
+            0 => Some(fixed(FFT_SIZE)),
+            1 => Some(fixed(place(SIGNAL_START, shift))),
             _ => {
-                let s = index - 2;
-                let frame = p.frame?;
-                if s >= frame.symbols {
-                    return None;
-                }
-                let nominal = SIGNAL_START + SYMBOL * (s + 1);
+                // Data symbol k = index − 1.
+                let k = index - 1;
+                let nominal = SIGNAL_START + SYMBOL * k;
                 let start = place(nominal, shift);
-                // A shift moves by a sample a symbol at most: before the old place less one
-                // nothing can be the window.
                 let free_below = place(nominal, p.shift).saturating_sub(1).min(start);
-                let theta = self
-                    .symbols
-                    .last()
-                    .filter(|r| r.packet == p.tag && r.symbol == s)
-                    .map_or(0, |r| r.theta);
+                let theta = if k == 1 {
+                    p.theta0
+                } else {
+                    self.symbols
+                        .last()
+                        .filter(|r| r.packet == p.tag && r.symbol == k - 1)
+                        .map_or(0, |r| r.theta)
+                };
+                let mut after = theta + 2;
+                if k >= 2 {
+                    after = after.max(p.verdict.map_or(usize::MAX, |v| v + 2));
+                }
+                let slot = k
+                    .checked_sub(2)
+                    .and_then(|i| p.first_soft.get(i))
+                    .map_or(0, |&f| f + SOFT_READ + 2);
                 Some(Next {
                     index: index + 1,
                     start,
                     free_below,
-                    after: theta,
+                    after,
+                    gate: after.max(p.fft_free).max(slot),
                 })
             }
         }
     }
 
-    fn window_done(&mut self, p: &mut Packet, index: usize, first: usize, clock: usize) {
-        let t = self.t;
-        let fft = (clock + 1).max(self.fft_free);
-        let bins = fft + t.fft;
-        self.fft_free = bins;
-        p.held.retain(|&f| f > clock);
-        p.held.push(fft + t.fft_read);
-        let window = match index {
-            0 => Window::T1,
-            1 => Window::T2,
-            i => Window::Symbol(i - 2),
-        };
-        self.windows.push(WindowRun {
-            packet: p.tag,
-            window,
-            first,
-            last: clock,
-            fft,
-            bins,
-        });
-        match window {
-            Window::T1 => {}
-            Window::T2 => {
-                p.channel = bins + t.channel;
-                let c = p.channel;
-                let a = |m| bit_len(scale_constant(m, &self.cfg, &self.fx)) + 1;
-                let bpsk = a(Modulation::Bpsk);
-                let coef = self.fx.coef_frac.saturating_sub(2) as usize;
-                let var = self.fx.var_frac as usize + 2;
-                self.divide(p.tag, Division::Scale(Modulation::Bpsk), c, bpsk);
-                self.divide(p.tag, Division::Outer, c, coef);
-                self.divide(p.tag, Division::Inner, c, coef);
-                self.divide(p.tag, Division::Variance, c, var);
+    /// The channel and the packet's quotients, T2's last bin taken on `t2`.
+    fn channel(&mut self, p: &mut Packet, t2: usize) {
+        p.chan = t2 + CHAN;
+        let q = |m| bit_len(scale_constant(m, &self.cfg, &self.fx)) + 1;
+        let coef = self.fx.coef_frac.saturating_sub(2) as usize;
+        let var = self.fx.var_frac as usize + 2;
+        let jobs = [
+            (Division::Scale(Modulation::Bpsk), q(Modulation::Bpsk)),
+            (Division::Outer, coef),
+            (Division::Inner, coef),
+            (Division::Variance, var),
+        ];
+        let mut take = p.chan + CHAN_ASK;
+        let mut last_q = 0;
+        for (i, (job, bits)) in jobs.into_iter().enumerate() {
+            let done = take + bits;
+            self.divisions.push(DivisionRun {
+                packet: p.tag,
+                job,
+                asked: take,
+                start: take,
+                done,
+            });
+            last_q = done + CHAN_NEXT;
+            if i == 0 {
+                p.bpsk_scale = last_q + 1;
             }
-            Window::Symbol(s) => self.symbol(p, s, bins),
+            take = done + 1 + CHAN_NEXT;
         }
+        p.variance = last_q;
+        p.divider_free = last_q;
     }
 
-    fn divide(&mut self, packet: u8, job: Division, asked: usize, bits: usize) -> usize {
-        let start = asked.max(self.divider_free);
-        let done = start + bits + self.t.divide_overhead;
-        self.divider_free = done;
+    /// The CORDIC: a request registered on `req`; its take.
+    fn cordic(&mut self, p: &mut Packet, req: usize) -> usize {
+        if req < p.last_request {
+            self.violations
+                .push((req, "CORDIC requests out of the schedule's order"));
+        }
+        p.last_request = req;
+        let take = (req + 1).max(p.cordic_free);
+        p.cordic_free = take + ANGLE + 1;
+        take
+    }
+
+    /// The divider: a job that may be taken from `asked`; its (take, done).
+    fn divide(
+        &mut self,
+        p: &mut Packet,
+        job: Division,
+        asked: usize,
+        bits: usize,
+    ) -> (usize, usize) {
+        let take = asked.max(p.divider_free);
+        let done = take + bits;
+        p.divider_free = done + 1;
         self.divisions.push(DivisionRun {
-            packet,
+            packet: p.tag,
             job,
             asked,
-            start,
+            start: take,
             done,
         });
-        done
+        (take, done)
     }
 
-    fn angle(&mut self, asked: usize) -> (usize, usize) {
-        let start = asked.max(self.cordic_free);
-        let done = start + self.t.cordic;
-        self.cordic_free = done;
-        (asked, done)
-    }
-
-    /// The pilots' rotation by θ and the common phase: φ registered.
-    fn phase(&mut self, theta: usize, pilots: usize) -> usize {
-        let r = theta.max(pilots).max(self.rotator_free);
-        self.rotator_free = r + PILOTS;
-        self.angle(r + PILOTS - 1 + self.t.rotator + 1).1
-    }
-
-    /// Symbol s's work from its bins.
-    fn symbol(&mut self, p: &mut Packet, s: usize, bins: usize) {
-        let t = self.t;
-        let products = bins.max(p.channel).max(self.u_free).max(self.product_free);
-        let pilots = products + PILOTS - 1 + t.product;
-        let q = pilots;
-        // The data products' slots: from P + 4, around the pair products'.
-        let mut slots = Vec::with_capacity(DATA);
-        let mut slot = products + PILOTS;
-        while slots.len() < DATA {
-            if slot != q && slot != q + 1 {
-                slots.push(slot);
-            }
-            slot += 1;
+    /// The data scale, if asked and not yet taken: taken now if it comes before a job that
+    /// may be taken from `before` (rx_channel first on a tie), or unconditionally.
+    fn data_scale(&mut self, p: &mut Packet, before: Option<usize>) {
+        let Some((asked, bits, m)) = p.scale_ask else {
+            return;
+        };
+        let first = match before {
+            Some(b) => asked.max(p.divider_free) <= b.max(p.divider_free),
+            None => true,
+        };
+        if first {
+            let (_, done) = self.divide(p, Division::Scale(m), asked, bits);
+            p.scale_ask = None;
+            p.data_scale = Some(done + CHAN_NEXT + 1);
         }
-        self.product_free = slot.max(q + 2);
-        let outer_in = q + t.product + 1;
-        let inner_in = q + 1 + t.product + 1;
-        let (theta, phi, outer, inner, fit, scale, modulation) = if s == 0 {
-            let phi = self.phase(p.first_beat, pilots);
-            let outer = self.angle(outer_in);
-            let inner = self.angle(inner_in);
-            let scale = self
-                .divisions
-                .iter()
-                .rev()
-                .find(|d| d.packet == p.tag && d.job == Division::Scale(Modulation::Bpsk))
-                .map_or(0, |d| d.done);
-            (
-                p.first_beat,
-                phi,
-                outer,
-                inner,
-                None,
-                scale,
-                Modulation::Bpsk,
-            )
-        } else {
-            let outer = self.angle(outer_in);
-            let inner = self.angle(inner_in);
-            let asked = inner.1 + t.fit_in;
-            let bits = (self.fx.front.nco_phase_bits + self.fx.rate_frac).saturating_sub(4);
-            let fit_done = self.divide(p.tag, Division::Fit(s), asked, bits as usize);
-            let fit_start = self.divisions.last().map_or(asked, |d| d.start);
-            let theta = fit_done + t.after_fit;
-            let modulation = p.frame.map_or(Modulation::Bpsk, |f| f.rate.modulation());
-            if s == 1 {
-                let bits = bit_len(scale_constant(modulation, &self.cfg, &self.fx)) + 1;
-                self.divide(p.tag, Division::Scale(modulation), p.verdict, bits);
-            }
-            let scale = self
-                .divisions
-                .iter()
-                .rev()
-                .find(|d| d.packet == p.tag && d.job == Division::Scale(modulation))
-                .map_or(0, |d| d.done);
-            let phi = self.phase(theta, pilots);
-            (
-                theta,
-                phi,
-                outer,
-                inner,
-                Some((fit_start, fit_done)),
-                scale,
-                modulation,
-            )
+    }
+
+    /// The tracker's step of symbol s from its pilots registered on `pilots`, the last step's
+    /// end `prev`: (T, outer, inner, G₁).
+    fn step(
+        &mut self,
+        p: &mut Packet,
+        pilots: usize,
+        prev: usize,
+    ) -> (usize, (usize, usize), (usize, usize), usize) {
+        let t = (pilots + 1).max(prev) + 1;
+        let outer_req = t + REQ_OUTER;
+        let outer = self.cordic(p, outer_req);
+        let inner_req = (t + REQ_INNER).max(outer);
+        let inner = self.cordic(p, inner_req);
+        let c = (t + LAMBDA).max(p.variance + 2);
+        let g0 = (c + G0).max(outer + ANGLE + 2);
+        let g1 = (g0 + 1).max(inner + ANGLE + 2);
+        (t, (outer_req, outer), (inner_req, inner), g1)
+    }
+
+    /// rx_symbol's φ: (request, take, φ).
+    fn phi(&mut self, p: &mut Packet, pilots: usize, theta: usize) -> (usize, usize, usize) {
+        let prev_soft = p.first_soft.last().map_or(0, |&f| f + SOFT_READ);
+        let req = (pilots + PRODUCTS).max(theta).max(prev_soft) + PHI_ASK;
+        let take = self.cordic(p, req);
+        (req, take, take + PHI)
+    }
+
+    /// rx_deint's steps for a symbol whose last soft value is registered on `last_soft`, the
+    /// block taken on `block`: (first, last) v_valid.
+    fn steps(
+        &mut self,
+        p: &mut Packet,
+        last_soft: usize,
+        block: usize,
+        count: usize,
+    ) -> (usize, usize) {
+        let prev = p.last_step.map_or(0, |s| s.saturating_sub(1));
+        let first = (last_soft + 1).max(block).max(prev) + DEINT;
+        let last = first + count - 1;
+        p.last_step = Some(last);
+        (first, last)
+    }
+
+    /// SIGNAL's work from its last bin taken on `bins`.
+    fn signal(&mut self, p: &mut Packet, bins: usize) {
+        let pilots = bins.max(p.chan + 1) + PIL;
+        let theta0 = p.theta0;
+        let (t, outer, inner, g1) = self.step(p, pilots, theta0);
+        let end = g1 + if p.measures { SIG_END } else { SIG_END_NONE };
+        let phi = self.phi(p, pilots, theta0);
+        let scale = p.bpsk_scale;
+        let soft = phi.2.max(scale) + SOFT;
+        let block = p.first_beat + 1;
+        let steps = self.steps(p, soft + DATA_LAST, block, SIGNAL_STEPS);
+        p.signal_last_take = steps.1 + 1;
+        p.verdict = Some(steps.1 + 1 + VERDICT);
+        p.first_soft.push(soft);
+        p.last_pilots = pilots;
+        p.last_end = end;
+        self.symbols.push(SymbolRun {
+            packet: p.tag,
+            symbol: 0,
+            bins,
+            pilots,
+            step: t,
+            outer,
+            inner,
+            g1,
+            fit: None,
+            theta: theta0,
+            end,
+            phi,
+            scale,
+            soft: (soft, soft + DATA_LAST),
+            steps: Some(steps),
+        });
+    }
+
+    /// Data symbol s's work from its last bin taken on `bins`.
+    fn data_symbol(&mut self, p: &mut Packet, s: usize, bins: usize) {
+        let (Some(v), Some(f)) = (p.verdict, p.frame) else {
+            return;
         };
-        let k = modulation
-            .bits_per_subcarrier()
-            .div_ceil(t.soft_products.max(1));
-        let slot_free = s
-            .checked_sub(t.soft_symbols)
-            .and_then(|i| p.decoded.get(i))
-            .map_or(0, |&z| z + 1);
-        let d0 = (phi + 1).max(scale).max(self.rotator_free).max(slot_free);
-        self.rotator_free = d0 + DATA * k;
-        self.u_free = d0 + DATA * k;
-        let written = d0 + (DATA - 1) * k + t.demap;
-        // The trellis steps.
-        let count = if s == 0 {
-            SIGNAL_STEPS
-        } else {
-            match p.frame {
-                Some(f) => f
-                    .rate
-                    .data_bits_per_symbol()
-                    .min(f.anchor.saturating_sub(p.data_done)),
-                None => 0,
+        let pilots = bins.max(p.chan + 1).max(p.last_pilots + PRODUCTS) + PIL;
+        // rx_track's one pilot register is free 8 edges after the last step started.
+        if pilots + 1 < self.symbols.last().map_or(0, |r| r.step + 8) {
+            self.violations
+                .push((pilots, "pilots before the tracker's register is free"));
+        }
+        let prev = p.last_end;
+        let (t, outer, inner, g1) = self.step(p, pilots, prev);
+        let (fit, theta) = if p.measures {
+            let asked = g1 + FIT_ASK + 1;
+            self.data_scale(p, Some(asked));
+            if p.scale_ask.is_some() && s > 1 {
+                self.violations
+                    .push((asked, "the data's scale still waiting at a later fit"));
             }
+            let (take, done) = self.divide(p, Division::Fit(s), asked, FIT_QBITS);
+            (Some((take, done)), done + TH_FIT)
+        } else {
+            (None, g1 + TH_NONE)
         };
+        let phi = self.phi(p, pilots, theta);
+        let modulation = f.rate.modulation();
+        let scale = if modulation == Modulation::Bpsk {
+            p.bpsk_scale
+        } else {
+            self.data_scale(p, None);
+            p.data_scale.unwrap_or(0)
+        };
+        let soft = phi.2.max(scale).max(v + 1) + SOFT;
+        // rx_deint's slot: free from the edge before the last step of the symbol two before.
+        if let Some(&(_, last)) = self
+            .symbols
+            .iter()
+            .rev()
+            .filter(|r| r.packet == p.tag)
+            .nth(1)
+            .and_then(|r| r.steps.as_ref())
+        {
+            if last > soft + 1 {
+                self.violations
+                    .push((soft, "a soft pass into rx_deint's full slot"));
+            }
+        }
+        let count = f
+            .rate
+            .data_bits_per_symbol()
+            .min(f.anchor.saturating_sub(p.data_done));
         let steps = (count > 0).then(|| {
-            let first = (written + 1).max(self.decoder_free);
-            let last = first + count - 1;
-            self.decoder_free = last + 1;
+            let (first, last) = self.steps(p, soft + DATA_LAST, v + 1, count);
+            if s == 1 && first + 1 < p.signal_last_take + SIGNAL_STEPS + 2 {
+                self.violations
+                    .push((first, "the decoder's contract between two blocks"));
+            }
             (first, last)
         });
-        p.decoded.push(steps.map_or(written, |(_, last)| last));
         if let Some((first, _)) = steps {
-            if s == 0 {
-                p.verdict = first + count - 1 + t.signal_check;
-            } else {
-                p.data_steps.push(Steps {
-                    from: p.data_done,
-                    count,
-                    cycle: first,
-                });
-                p.data_done += count;
-            }
+            p.data_steps.push(Steps {
+                from: p.data_done,
+                count,
+                first,
+            });
+            p.data_done += count;
         }
+        p.first_soft.push(soft);
+        p.last_pilots = pilots;
+        p.last_end = theta;
         self.symbols.push(SymbolRun {
             packet: p.tag,
             symbol: s,
-            products,
+            bins,
+            pilots,
+            step: t,
             outer,
             inner,
+            g1,
             fit,
             theta,
+            end: theta,
             phi,
             scale,
-            soft: (d0, written),
+            soft: (soft, soft + DATA_LAST),
             steps,
         });
     }
 
-    /// The cycle data step k (1-based) is taken in.
-    fn step_cycle(p: &Packet, k: usize) -> Option<usize> {
+    /// Data step k's (0-based) take by the decoder.
+    fn step_take(p: &Packet, k: usize) -> Option<usize> {
         p.data_steps
             .iter()
-            .find(|s| k > s.from && k <= s.from + s.count)
-            .map(|s| s.cycle + (k - s.from - 1))
+            .find(|s| k >= s.from && k < s.from + s.count)
+            .map(|s| s.first + (k - s.from) + 1)
     }
 
-    /// The cycle data bit `b` is out of the decoder.
-    fn bit_out(&self, p: &Packet, b: usize) -> Option<usize> {
+    /// Data bit `b`'s edge out of the decoder.
+    fn bit_out(p: &Packet, b: usize) -> Option<usize> {
         let anchor = p.frame?.anchor;
-        let d = self.depth.min(anchor).max(1);
+        let d = DEPTH.min(anchor);
         let regular = anchor - d;
         if b < regular {
-            Some(Self::step_cycle(p, b + d)? + self.t.viterbi_out)
+            Some(Self::step_take(p, b + DEPTH - 1)? + VITERBI)
         } else {
-            Some(Self::step_cycle(p, anchor)? + self.t.viterbi_out + 1 + (b - regular))
+            Some(Self::step_take(p, anchor - 1)? + VITERBI + (b - regular))
         }
     }
 
-    /// The model's events of one beat, with their cycles.
+    /// The cycle an octet whose last bit is `b` is out in.
+    fn octet_at(&self, p: &Packet, b: usize, clock: usize) -> usize {
+        Self::bit_out(p, b).map_or(clock + 1, |e| e + self.t.octet + 1)
+    }
+
+    /// The model's events of a window, with their cycles.
     fn stamp(&mut self, p: &mut Packet, clock: usize, out: &[RxDataEvent]) {
+        let v = p.verdict.map_or(clock + 1, |v| v + 1);
         for &e in out {
             let at = match e {
                 RxDataEvent::Verdict {
                     packet, verdict, ..
                 } => {
-                    self.strobes.push_back((p.verdict, packet, verdict));
-                    p.verdict
+                    self.strobes.push_back((v, packet, verdict));
+                    v
                 }
                 RxDataEvent::Start { signal, .. } => {
                     let symbols = crate::ppdu::data_symbols(signal.rate, signal.length);
                     p.frame = Some(FrameInfo {
                         rate: signal.rate,
                         symbols,
+                        length: signal.length,
                         anchor: 16 + 8 * signal.length + 6,
                     });
-                    p.verdict
+                    let m = signal.rate.modulation();
+                    if m != Modulation::Bpsk {
+                        let bits = bit_len(scale_constant(m, &self.cfg, &self.fx)) + 1;
+                        // The verdict seen in v: the request taken there, asked an edge later.
+                        p.scale_ask = Some((v + SCALE_ASK, bits, m));
+                    }
+                    v
                 }
-                RxDataEvent::End(RxDataEnd::Signal(_)) => p.verdict,
+                RxDataEvent::End(RxDataEnd::Signal(_)) => {
+                    p.drain_from = Some(v + 1);
+                    v
+                }
                 RxDataEvent::Octet { .. } => {
                     let b = 16 + 8 * p.octets + 7;
                     p.octets += 1;
-                    self.bit_out(p, b).map_or(clock + 1, |c| c + self.t.octet)
+                    self.octet_at(p, b, clock)
                 }
                 RxDataEvent::End(RxDataEnd::Decoded) => self.last_event(),
                 RxDataEvent::End(RxDataEnd::Seed) => {
-                    self.bit_out(p, 6).map_or(clock + 1, |c| c + self.t.octet)
+                    let last = p.frame.map_or(0, |f| f.length);
+                    self.octet_at(p, 16 + 8 * last - 1, clock)
                 }
                 RxDataEvent::End(_) => clock + 1,
             };
@@ -854,6 +1023,9 @@ impl RxDataSchedule {
         }
     }
 }
+
+/// From a symbol's first soft value to its last.
+const DATA_LAST: usize = 47;
 
 impl HandoffReader for RxDataSchedule {
     fn ready(&mut self, clock: usize) -> bool {

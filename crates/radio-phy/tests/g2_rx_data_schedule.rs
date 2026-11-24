@@ -1,10 +1,12 @@
-//! Gate for the data path's schedule in clocks (ADR 0010, decision 6.1c):
-//! `rx_data::RxDataSchedule` reads the hand-off's stream a beat a clock when it may, and
-//! gives `RxDataFixed`'s events, each in a cycle the schedule says.
+//! Gate for the data path's schedule in clocks (ADR 0010, decisions 6.1c and 6.2), restated
+//! from the RTL as built: `rx_data::RxDataSchedule` reads the hand-off's stream a beat a clock
+//! when the top level's reader may, and gives `RxDataFixed`'s events, each in a cycle the
+//! schedule says.
 //!
 //! References: the events are `RxDataFixed`'s on the beats the schedule took (gated in
-//! `g2_rx_data_stream.rs`); the cycles are the schedule's table worked by hand (the module's
-//! text and the G0 in `docs/gates/rx_ofdm.md`); the hand-off run with this reader is
+//! `g2_rx_data_stream.rs`); the rules are the blocks' headers, each checked by its own bench;
+//! the cycles are the schedule's table worked by hand (the module's text and the G0 in
+//! `docs/gates/rx_data.md`); the hand-off run with this reader is
 //! `run_handoff`'s (gated in `g2_rx_handoff_schedule.rs`). A model gate: no reference from
 //! outside the project.
 
@@ -120,13 +122,16 @@ fn first_stream(adc: &[(i16, i16)]) -> Vec<HandoffBeat> {
     beats
 }
 
-/// A beat offered every cycle from `c0`, taken when the schedule is ready.
-fn offer(s: &mut RxDataSchedule, beats: &[HandoffBeat], c0: usize) {
+/// A beat offered every cycle from `c0`, taken when the schedule is ready; the cycle each
+/// was taken in.
+fn offer(s: &mut RxDataSchedule, beats: &[HandoffBeat], c0: usize) -> Vec<usize> {
     let mut clock = c0;
     let mut i = 0;
+    let mut taken = Vec::with_capacity(beats.len());
     while i < beats.len() {
         if s.ready_at(clock) {
             s.take(clock, beats[i]);
+            taken.push(clock);
             i += 1;
         }
         clock += 1;
@@ -135,6 +140,7 @@ fn offer(s: &mut RxDataSchedule, beats: &[HandoffBeat], c0: usize) {
             "stalled at beat {i}"
         );
     }
+    taken
 }
 
 #[test]
@@ -143,23 +149,32 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
     let beats = first_stream(&adc);
     let c0 = 1000;
     let mut s = schedule(DataTiming::default());
-    offer(&mut s, &beats, c0);
+    let taken = offer(&mut s, &beats, c0);
+    assert!(s.violations().is_empty(), "{:?}", s.violations());
     let rel = |c: usize| c - c0;
+    // The tail: up to the next window's old place less one (302) at once, the rest from the
+    // cycle after the reader has seen the verdict (481 + 2), the frame's last window known.
+    assert_eq!((rel(taken[288]), rel(taken[302])), (336, 350));
+    assert_eq!(rel(taken[303]), 483);
 
+    // T1 and T2 chained (their bins pushed out by the next window's samples), SIGNAL and the
+    // data symbol flushed; the data window waits for SIGNAL's flush (207 + 65).
     let w: Vec<_> = s
         .windows()
         .iter()
-        .map(|w| (w.window, rel(w.first), rel(w.last), rel(w.fft), rel(w.bins)))
+        .map(|w| (w.window, rel(w.first), rel(w.last), rel(w.bins)))
         .collect();
     assert_eq!(
         w,
         [
-            (Window::T1, 0, 63, 64, 160),
-            (Window::T2, 64, 127, 160, 256),
-            (Window::Symbol(0), 144, 207, 256, 352),
-            (Window::Symbol(1), 224, 287, 352, 448),
+            (Window::T1, 0, 63, 140),
+            (Window::T2, 64, 127, 220),
+            (Window::Symbol(0), 144, 207, 284),
+            (Window::Symbol(1), 272, 335, 412),
         ]
     );
+    // chan_valid on 220 + 63 = 283; the four quotients 18 + 2, 14 + 2, 14 + 2, 12 + 2 apart;
+    // the fit before the data's scale (asked at the verdict, 481 + 3).
     let d: Vec<_> = s
         .divisions()
         .iter()
@@ -168,38 +183,56 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
     assert_eq!(
         d,
         [
-            (Division::Scale(Modulation::Bpsk), 366, 366, 386),
-            (Division::Outer, 366, 386, 402),
-            (Division::Inner, 366, 402, 418),
-            (Division::Variance, 366, 418, 432),
-            (Division::Fit(1), 499, 499, 529),
-            (Division::Scale(Modulation::Qam64), 509, 529, 551),
+            (Division::Scale(Modulation::Bpsk), 285, 285, 303),
+            (Division::Outer, 305, 305, 319),
+            (Division::Inner, 321, 321, 335),
+            (Division::Variance, 337, 337, 349),
+            (Division::Fit(1), 478, 478, 504),
+            (Division::Scale(Modulation::Qam64), 484, 505, 525),
         ]
     );
     let sig = s.symbols()[0];
-    assert_eq!(rel(sig.products), 366);
-    assert_eq!((rel(sig.phi), rel(sig.scale)), (398, 386));
-    assert_eq!((rel(sig.outer.0), rel(sig.outer.1)), (376, 416));
-    assert_eq!((rel(sig.inner.0), rel(sig.inner.1)), (377, 434));
-    assert_eq!((rel(sig.soft.0), rel(sig.soft.1)), (399, 455));
+    assert_eq!(
+        (rel(sig.bins), rel(sig.pilots), rel(sig.step)),
+        (284, 293, 295)
+    );
+    assert_eq!((rel(sig.outer.0), rel(sig.outer.1)), (301, 302));
+    assert_eq!((rel(sig.inner.0), rel(sig.inner.1)), (305, 320));
+    assert_eq!((rel(sig.g1), rel(sig.end), rel(sig.theta)), (360, 370, 6));
+    assert_eq!(
+        (rel(sig.phi.0), rel(sig.phi.1), rel(sig.phi.2)),
+        (351, 352, 370)
+    );
+    assert_eq!(rel(sig.scale), 305);
+    assert_eq!((rel(sig.soft.0), rel(sig.soft.1)), (378, 425));
     let (a, b) = sig.steps.unwrap();
-    assert_eq!((rel(a), rel(b)), (456, 479));
+    assert_eq!((rel(a), rel(b)), (428, 451));
     let data = s.symbols()[1];
-    assert_eq!(rel(data.products), 448);
-    assert_eq!((rel(data.outer.0), rel(data.outer.1)), (458, 476));
-    assert_eq!((rel(data.inner.0), rel(data.inner.1)), (459, 494));
-    assert_eq!(rel(data.theta), 531);
-    assert_eq!((rel(data.phi), rel(data.scale)), (557, 551));
-    assert_eq!((rel(data.soft.0), rel(data.soft.1)), (558, 614));
+    assert_eq!(
+        (rel(data.bins), rel(data.pilots), rel(data.step)),
+        (412, 421, 423)
+    );
+    assert_eq!((rel(data.outer.0), rel(data.outer.1)), (429, 430));
+    assert_eq!((rel(data.inner.0), rel(data.inner.1)), (433, 448));
+    assert_eq!(rel(data.g1), 467);
+    let (ft, fd) = data.fit.unwrap();
+    assert_eq!((rel(ft), rel(fd), rel(data.theta)), (478, 504, 509));
+    assert_eq!(
+        (rel(data.phi.0), rel(data.phi.1), rel(data.phi.2)),
+        (519, 520, 538)
+    );
+    assert_eq!(rel(data.scale), 527);
+    assert_eq!((rel(data.soft.0), rel(data.soft.1)), (546, 593));
     let (a, b) = data.steps.unwrap();
-    assert_eq!((rel(a), rel(b)), (615, 828));
+    assert_eq!((rel(a), rel(b)), (596, 809));
 
-    // The events: the verdict and the start at 509, the octets, the end with the last.
+    // The events (in the cycle after their register): the verdict and the start at 482, the
+    // octets, the end with the last.
     let ev = s.events();
     assert!(matches!(ev[0].1, RxDataEvent::Verdict { .. }));
-    assert_eq!(rel(ev[0].0), 509);
+    assert_eq!(rel(ev[0].0), 482);
     assert!(matches!(ev[1].1, RxDataEvent::Start { .. }));
-    assert_eq!(rel(ev[1].0), 509);
+    assert_eq!(rel(ev[1].0), 482);
     let octets: Vec<(usize, u8)> = ev
         .iter()
         .filter_map(|e| match e.1 {
@@ -208,38 +241,61 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
         })
         .collect();
     assert_eq!(octets.iter().map(|o| o.1).collect::<Vec<_>>(), psdus[0]);
-    assert_eq!(octets[0].0, 737);
-    assert_eq!(octets[11].0, 825);
-    assert_eq!(octets[12].0, 834);
-    assert_eq!(octets[23].0, 922);
-    // Bits 0 … 117 a step apart, the flush a bit a clock: octets eight clocks apart, but
-    // the flush's first bit a clock after the last step's (the best state's tree, + 1).
+    assert_eq!(octets[0].0, 721);
+    assert_eq!(octets[11].0, 809);
+    assert_eq!(octets[12].0, 817);
+    assert_eq!(octets[23].0, 905);
+    // Bits 0 … 117 a step apart, the flush's 96 bits from the edge after the last regular
+    // one: octets eight clocks apart throughout.
     for j in 1..24 {
-        let gap = if j == 12 { 9 } else { 8 };
-        assert_eq!(octets[j].0 - octets[j - 1].0, gap, "octet {j}");
+        assert_eq!(octets[j].0 - octets[j - 1].0, 8, "octet {j}");
     }
     let end = ev
         .iter()
         .find(|e| e.1 == RxDataEvent::End(RxDataEnd::Decoded))
         .unwrap();
-    assert_eq!(rel(end.0), 922);
+    assert_eq!(rel(end.0), 905);
 }
 
 #[test]
-fn a_long_frame_runs_at_one_symbol_in_245_clocks_whatever_the_rate() {
-    // Beats offered every cycle (the reader behind the antenna): the loop from one shift to
-    // the next is the window (1 + 64), the transform (1 + 96), the pilots (3 + 3), the pair
-    // products (2 + 3 + 1), two angles (36), the fit (5 + 30 + 2): 245 clocks.
+fn a_long_frame_runs_at_one_symbol_in_240_clocks_whatever_the_rate() {
+    // Beats offered every cycle (the reader behind the antenna): from one θ to the next the
+    // sample before the window (θ + 2) and the window (1 + 63), the transform's last bin
+    // (77), the pilots (9), the step's start (2), the step with its division (86): 240.
     for rate in RATES {
         let (adc, _, _) = train(&[(rate, 1500, 30.0, 0.0)], 0, 2);
         let beats = first_stream(&adc);
         let mut s = schedule(DataTiming::default());
         offer(&mut s, &beats, 0);
+        assert!(s.violations().is_empty(), "{rate:?}: {:?}", s.violations());
         let thetas: Vec<usize> = s.symbols().iter().skip(1).map(|r| r.theta).collect();
         assert!(thetas.len() > 50, "{rate:?}");
         for (i, w) in thetas.windows(2).enumerate().skip(1) {
-            assert_eq!(w[1] - w[0], 245, "{rate:?}, data symbol {}", i + 2);
+            assert_eq!(w[1] - w[0], 240, "{rate:?}, data symbol {}", i + 2);
         }
+        // Each data window's first sample waits for the last θ (+ 2) and the FFT's flush.
+        let wins: Vec<_> = s
+            .windows()
+            .iter()
+            .filter(|w| matches!(w.window, Window::Symbol(k) if k >= 1))
+            .collect();
+        for (k, w) in wins.iter().enumerate().skip(1) {
+            let prev_theta = s.symbols()[k].theta;
+            assert!(w.first >= prev_theta + 2, "{rate:?} window {k}");
+            assert!(w.first >= wins[k - 1].last + 65, "{rate:?} window {k}");
+        }
+        // BPSK's data needs no second scale.
+        let scales = s
+            .divisions()
+            .iter()
+            .filter(|d| matches!(d.job, Division::Scale(_)))
+            .count();
+        let want = if rate.modulation() == Modulation::Bpsk {
+            1
+        } else {
+            2
+        };
+        assert_eq!(scales, want, "{rate:?}");
         assert_eq!(
             s.events().last().unwrap().1,
             RxDataEvent::End(RxDataEnd::Decoded),
@@ -278,6 +334,7 @@ fn held_to_the_model(run: &HandoffRun, s: &RxDataSchedule, what: &str) {
     for (_, b) in &run.beats {
         want.extend(model.push(*b));
     }
+    assert!(s.violations().is_empty(), "{what}: {:?}", s.violations());
     let got: Vec<RxDataEvent> = s.events().iter().map(|e| e.1).collect();
     assert_eq!(got, want, "{what}: the model's events");
     for w in s.events().windows(2) {
@@ -398,50 +455,6 @@ fn a_frame_after_a_long_one_waits_in_the_history_and_decodes() {
 }
 
 #[test]
-fn a_window_waits_for_a_store_and_the_soft_buffer_for_the_decoder() {
-    // One window store: SIGNAL's first sample waits for T2's transform to start and read.
-    let one = DataTiming {
-        window_stores: 1,
-        ..DataTiming::default()
-    };
-    let (adc, _, _) = train(&[(Rate::R54, 24, 30.0, 0.0)], 0, 1);
-    let beats = first_stream(&adc);
-    let mut s = schedule(one);
-    offer(&mut s, &beats, 0);
-    let w = s.windows();
-    // T2's first sample after T1's store is free (64 + 64), SIGNAL's after T2's.
-    assert_eq!(w[1].first, w[0].fft + 64);
-    assert_eq!(w[2].first, w[1].fft + 64);
-    // A slow decoder: one soft slot; the next symbol's soft pass waits for its steps.
-    let slow = DataTiming {
-        soft_symbols: 1,
-        ..DataTiming::default()
-    };
-    let (adc, _, _) = train(&[(Rate::R54, 600, 30.0, 0.0)], 0, 4);
-    let beats = first_stream(&adc);
-    let mut s = schedule(slow);
-    offer(&mut s, &beats, 0);
-    let mut store_waits = 0;
-    for p in s.symbols().windows(2).skip(1) {
-        assert!(p[1].soft.0 > p[0].steps.unwrap().1, "{p:?}");
-        // The products' store: the next symbol's products after this one's soft pass.
-        assert!(p[1].products >= p[0].soft.0 + 48, "{p:?}");
-        let bins = s
-            .windows()
-            .iter()
-            .find(|w| w.window == Window::Symbol(p[1].symbol));
-        if p[1].products > bins.unwrap().bins {
-            store_waits += 1;
-        }
-    }
-    assert!(store_waits > 10, "{store_waits}");
-    assert_eq!(
-        s.events().last().unwrap().1,
-        RxDataEvent::End(RxDataEnd::Decoded)
-    );
-}
-
-#[test]
 fn a_stronger_frame_inside_the_data_aborts_the_first_in_order() {
     // Frame B, 10 dB stronger, starts in frame A's data: the hand-off's abort mark ends A
     // (after the octets of the windows A had taken), and B's stream waits until A's end is
@@ -534,6 +547,32 @@ fn a_stream_cut_after_a_window_waits_for_the_last_ones_octets() {
         "the end waits for the octets: {} {mark}",
         ends[0].0
     );
+    // Exactly when the complete windows are decoded: the last step's bit (+ 1 + 4), an
+    // octet's latency (+ 1), seen a cycle later; not the last octet's cycle.
+    // A's symbols: up to B's SIGNAL (both streams carry the same tag here).
+    let b_signal = s
+        .symbols()
+        .iter()
+        .skip(1)
+        .position(|r| r.symbol == 0)
+        .unwrap()
+        + 1;
+    let last_step = s.symbols()[..b_signal]
+        .iter()
+        .filter_map(|r| r.steps)
+        .map(|st| st.1)
+        .max()
+        .unwrap();
+    assert_eq!(ends[0].0, last_step + 7);
+    let last_octet = s
+        .events()
+        .iter()
+        .take_while(|e| !matches!(e.1, RxDataEvent::End(_)))
+        .filter(|e| matches!(e.1, RxDataEvent::Octet { .. }))
+        .last()
+        .unwrap()
+        .0;
+    assert!(last_octet < ends[0].0, "{last_octet}");
     assert!(
         taken[cut + 1] > ends[0].0,
         "B waits: {} {}",
