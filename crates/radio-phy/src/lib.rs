@@ -23,6 +23,7 @@ pub mod rx_decision;
 pub mod rx_front;
 pub mod rx_front_fixed;
 pub mod rx_handoff;
+pub mod rx_octets;
 pub mod rx_ofdm;
 pub mod rx_ofdm_fixed;
 pub mod scrambler;
