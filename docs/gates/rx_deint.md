@@ -71,7 +71,7 @@ RTL gate's (G3) to show (and does: the RTL mutant "rd never toggles" fails, belo
 
 ## 2026-11-24 · G3 · `hw/rtl/rx_deint.sv` bit-exact with the model, every step in its edge
 
-Commit: this branch (`r0-09-deint`). Command: `make -C hw rx_deint`. Vectors:
+Commit: `59e1e4a`. Command: `make -C hw rx_deint`. Vectors:
 `hw/vectors/rx_deint.txt` (`rvec rx_deint`): 153 packets of two blocks, SIGNAL and the data,
 at all eight rates; lengths 0 … 3, 23, 24, 100, the anchor's edge lengths and 8 random ones a
 rate; at 54 Mb/s the longest PSDU (4095 octets, 152 symbols, 32 782 steps).
