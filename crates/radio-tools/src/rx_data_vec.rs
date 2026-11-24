@@ -174,6 +174,8 @@ pub struct Cover {
     drop_takes: usize,
     /// Data window 1 complete in the verdict's own cycle.
     window_at_verdict: usize,
+    /// θ of data symbol 1 before the verdict (a frame that does not measure its timing).
+    theta_before_verdict: usize,
 }
 
 /// One run: the beats with their availability, through a fresh schedule; written out.
@@ -289,6 +291,11 @@ fn run_split(
         })
         .map(|(c, _)| *c)
         .collect();
+    cover.theta_before_verdict += s
+        .symbols()
+        .iter()
+        .filter(|r| r.symbol == 1 && verdicts.iter().any(|&v| r.theta + 1 < v))
+        .count();
     cover.window_at_verdict += s
         .windows()
         .iter()
@@ -397,6 +404,23 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
         );
         run(out, &mut c, &label, ratio, &b, 0, 0)?;
     }
+    // Frames that do not measure their timing (noise near 0 dB at 6 Mb/s): θ of data symbol
+    // 1 comes before the verdict, and data window 2 waits for the verdict itself.
+    // A search over SNR and seeds; the generator requires a hit.
+    let mut found = 0;
+    for k in 0..200 {
+        let snr = [0.5, 1.0, 1.5, 2.0][k % 4];
+        let b = stream(Rate::R6, 24, snr, 0.0)?;
+        let mut trial = Cover::default();
+        run(&mut Vec::new(), &mut trial, "probe", ratio, &b, 0, 0)?;
+        if trial.theta_before_verdict > 0 {
+            run(out, &mut c, &format!("no-measure-{k}"), ratio, &b, 0, 0)?;
+            found += 1;
+            if found == 2 {
+                break;
+            }
+        }
+    }
     // No ratio written.
     let b = stream(Rate::R12, 50, 30.0, 0.0)?;
     run(out, &mut c, "no-ratio", None, &b, 0, 0)?;
@@ -414,6 +438,9 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
     let next = stream(Rate::R54, 100, 30.0, 0.0)?;
     for (label, cut, mark, pace) in [
         ("cut-data", 144 + 80 * 6 + 64, HandoffEnd::Acquisition, 0),
+        // After data window 1, before the verdict (the review's deadlock, 2026-11-25).
+        ("cut-after-window1", 295, HandoffEnd::Overrun, 0),
+        ("cut-after-window1-pace2", 290, HandoffEnd::Acquisition, 2),
         ("cut-before-verdict", 218, HandoffEnd::Acquisition, 0),
         ("cut-in-signal", 180, HandoffEnd::Overrun, 0),
         ("cut-in-t2", 100, HandoffEnd::Acquisition, 0),
@@ -519,9 +546,18 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
     let halow = clock_ratio(FS, 0.9e9);
     for (label, word) in [
         ("halow-cfo-high", (1i64 << 21) - 1),
+        // The shift runs to tens of samples (σ's width).
+        ("halow-cfo-drift-high", 1i64 << 20),
+        ("halow-cfo-drift-low", -(1i64 << 20)),
         ("halow-cfo-low", -(1i64 << 21)),
     ] {
-        let mut b = stream(Rate::R12, 40, 30.0, 0.0)?;
+        // The drift runs: 100 symbols, the windows moved a sample a symbol at most.
+        let (rate, octets) = if label.contains("drift") {
+            (Rate::R6, 300)
+        } else {
+            (Rate::R12, 40)
+        };
+        let mut b = stream(rate, octets, 30.0, 0.0)?;
         if let Some(HandoffBeat::Sample { first: Some(f), .. }) = b.first_mut() {
             f.cfo_phase = word;
         }
@@ -538,7 +574,12 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
 pub fn write(out: &mut impl Write) -> io::Result<()> {
     let c = vectors(out)?;
     eprintln!("rvec rx_data: {c:?}");
-    if c.drop_takes == 0 || c.early == 0 || c.late == 0 || c.window_at_verdict == 0 {
+    if c.drop_takes == 0
+        || c.early == 0
+        || c.late == 0
+        || c.window_at_verdict == 0
+        || c.theta_before_verdict == 0
+    {
         return Err(io::Error::other(format!("a case not covered: {c:?}")));
     }
     if c.ends

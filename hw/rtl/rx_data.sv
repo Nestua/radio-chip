@@ -161,7 +161,7 @@ module rx_data
     logic [K_W:0]    idx_q;         // the window being filled: 0 T1, 1 T2, 2 SIGNAL, 2 + k data k
     logic [N_W-1:0]  base_q;        // its nominal first beat (σ not added)
     logic [N_W-1:0]  free_q;        // data windows: beats below are taken freely
-    logic signed [3:0] sigma_q;     // the tracker's moves
+    logic signed [11:0] sigma_q;    // the tracker's moves: at most 1 + 1366 (θ0 and a data symbol's)
     logic [K_W:0]    thetas_q;      // θs seen (θ0 the first)
     logic [6:0]      fft_cnt_q;     // the FFT's flush: 0 when a flushed window may start
     logic            drain_q;       // the tail is taken and dropped
@@ -225,7 +225,7 @@ module rx_data
     logic [1:0]      kind_d;
     logic [N_W-1:0]  n_d, base_d, free_d;
     logic [K_W:0]    idx_d, thetas_d;
-    logic signed [3:0] sigma_d;
+    logic signed [11:0] sigma_d;
     logic [6:0]      fft_cnt_d;
     logic [K_W-1:0]  symbols_d, wd_d;
     logic [7:0]      ndbps_d;
@@ -262,8 +262,8 @@ module rx_data
         // The tracker's θ and its move.
         if (open_q && theta_valid) begin
             thetas_d = thetas_q + 1'b1;
-            if (move_early) sigma_d = sigma_q - 4'sd1;
-            else if (move_late) sigma_d = sigma_q + 4'sd1;
+            if (move_early) sigma_d = sigma_q - 12'sd1;
+            else if (move_late) sigma_d = sigma_q + 12'sd1;
         end
 
         // The window being filled starts at its base, + σ for the data symbols: SIGNAL's θ0
@@ -282,8 +282,8 @@ module rx_data
             end
         end
 
-        // The verdict.
-        if (open_q && s_valid) begin
+        // The verdict (also after a mark: the end by the mark waits for it).
+        if ((open_q || mark_q) && s_valid) begin
             vseen_d   = 1'b1;
             vok_d     = !s_fail;
             symbols_d = s_symbols;
@@ -581,7 +581,7 @@ module rx_data
 `ifndef SYNTHESIS
     // The contracts the schedule assumes and this level can see (radio_phy::rx_data's
     // violations): a stream's first beat only with no packet open; a flushed window's sample
-    // never into the FFT's skid; a soft pass only into a free slot of rx_deint.
+    // never into the FFT's skid. (A soft pass into a full slot stops rx_deint itself.)
     always_ff @(posedge clk) begin
         if (rst_n) begin
             if (t_new && open_q) begin

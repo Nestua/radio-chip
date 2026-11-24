@@ -235,53 +235,83 @@ the block per run, offers beat i from max(its pace, the cycle after beat i − 1
 every beat taken in the model's cycle, every verdict strobe, start, octet (data, first, last,
 seed, SERVICE) and end (status, info) in its cycle, and nothing in any other.
 
-49 runs: ADR 0010's table; every rate at 1 and 100 octets a beat a cycle and at 24 octets at
-the antenna's pace; 1500 octets at 6 Mb/s with ±40 ppm, at 54 Mb/s −40 and 24 Mb/s +40
-(windows moved early 349 times, late 349); no ratio written; a CFO word forged at both ends
-under HaLow's fs/fc ratio (θ0 moves the windows: SIGNAL's stays); marks cutting a frame in T2,
-in SIGNAL's window, after it before the verdict (a beat a cycle and at pace), inside the data,
-and between the last window and the frame's end (before and after the verdict), of each kind,
-each followed by a frame that decodes; SIGNAL failed on noise (one run takes a beat in the
-drop's own cycle; the generator requires it), and noise that passed SIGNAL (truncated by its
-mark); data window 1 complete in the verdict's own cycle and a mark after it (found by a
-search of two paces and a gap, the generator requires it); two frames back to back.
+55 runs: ADR 0010's table; every rate at 1 and 100 octets a beat a cycle and at 24 octets at
+the antenna's pace; 1500 octets at 6 Mb/s with ±40 ppm, at 54 Mb/s −40 and 24 Mb/s +40; no
+ratio written; a CFO word forged under HaLow's fs/fc ratio (θ0 moves the windows: SIGNAL's
+stays; at ±2^20 over 100 symbols the shift runs to tens of samples; windows moved early 450
+times, late 450); frames that do not measure their timing (θ of data symbol 1 before the
+verdict: a search over SNR near 1 dB, the generator requires it); marks cutting a frame in
+T2, in SIGNAL's window, after data window 1 and before the verdict (a beat a cycle and every
+2 clocks), after SIGNAL's window before the verdict, inside the data, and between the last
+window and the frame's end (before and after the verdict), of each kind, each followed by a
+frame that decodes; SIGNAL failed on noise (one run takes a beat in the drop's own cycle; the
+generator requires it), and noise that passed SIGNAL (truncated by its mark); data window 1
+complete in the verdict's own cycle and a mark after it (a search of two paces and a gap,
+required); two frames back to back. Not at this level: the seed-zero end (status 1; no frame
+`build_ppdu` makes has one: `rx_octets`' own gate has it).
 
 ```
 make -C hw rx_data
-rx_data G3: 49 runs, 505206 cycles, 161928 beats, 9028 events, 0 mismatches
+rx_data G3: 55 runs, 565949 cycles, 185633 beats, 9900 events, 0 mismatches
 ```
 
 First run: 414 mismatches (the reader not ready in its first cycle after reset). The HaLow
-runs found the one rule the RTL had wrong: θ0's move had been applied to SIGNAL's own window;
-the model places SIGNAL at 144 and moves from data symbol 1 on (its text said so: σ₀ = 0).
-Fixed. `make -C hw lint` clean. The RTL stops its simulation on a first beat with no mark
-before it and on a sample into the FFT's skid (the schedule's violations it can see; the
-blocks' own assertions stop it on the rest: `rx_deint`'s full slot, `rx_channel`'s,
-`rx_symbol`'s).
+runs found a rule the RTL had wrong: θ0's move had been applied to SIGNAL's own window; the
+model places SIGNAL at 144 and moves from data symbol 1 on (its text said so: σ₀ = 0). Fixed.
+`make -C hw lint` clean. The RTL stops its simulation on a first beat with no mark before it
+and on a sample into the FFT's skid (the schedule's violations it can see; the blocks' own
+assertions stop it on the rest: `rx_deint`'s full slot, `rx_channel`'s, `rx_symbol`'s).
 
-**Mutants** (each in a private copy of `hw/`; script in the session's scratchpad): 43 on the
+### Review (independent, 2026-11-25)
+
+The reviewer reproduced the gate and the vectors (byte-identical), swept marks and paces with
+its own generator (about 2000 runs) and found:
+- **a deadlock** (fixed): a mark taken after data window 1 and before the verdict (one beat
+  a cycle, beats 288 … 302 of a 6 Mb/s frame; paces of 1 to 3 clocks) left the verdict
+  unrecorded (it was taken only while the packet was open), so the end by the mark never
+  came and `in_ready` stayed low until a reset. The verdict is now taken while a mark waits
+  too. The gate's cuts had been at 100, 180, 218, 414 and 688; two runs now cut at 295 and 290;
+  both failed on the old RTL (215 mismatches each);
+- **σ wrapped at ±8** (fixed): it was 4 bits, the model's shift has no bound but the frame's:
+  θ0's move and one a data symbol at most, |σ| ≤ 1 + 1366, so σ is 12 bits (G0, below). A
+  6 Mb/s frame of 4095 octets at +70 ppm reaches +8; HaLow's ratio with a forged word ±2^20
+  reaches ±45. Both forged runs are now in the gate and failed on the old RTL;
+- **a false argument** in this journal (G0, the schedule's survivors, and the first version
+  of this entry): "θ of data symbol 1 comes after the verdict" holds only for a frame that
+  measures its timing; one that does not has θ on G₁ + 3, before the verdict, and data
+  window 2 then waits for the verdict itself. The RTL had it right; the gate did not reach
+  it. The runs that do not measure now make the mutant fail;
+- the `ifndef SYNTHESIS` comment named a check this level does not make: corrected. Everything
+  else held: the wiring against the blocks' headers, the anchor argument below, θ never in a
+  window's last cycle, no vacuous pass.
+
+**G0, added**: σ's bound. A move is ±1 with each θ, θ0's and one a data symbol: |σ| ≤ 1 +
+1366 < 2^11. 12 bits signed.
+
+**Mutants** (each in a private copy of `hw/`; script in the session's scratchpad): 44 on the
 RTL as committed — every reader rule moved by one (free beats, θ, the verdict, the flush 63 and
-65, the slot, the frame's last window, the symbol's 80 and SIGNAL's 144, σ's sign and each
-move), the routing (`bin_t2`, the bins' window count, `in_next` on T1 and on SIGNAL), each end
-rule (the 5 edges ±1, the end with `rx_start`, the status of the kinds, the ready after a
-mark at once and a cycle late, the expected steps at the verdict and per window), the drop's
-reach (the FFT's register, all ends), the first beat's tag and the start's edge: **35 of 43
-fail** (one, the expected steps updated before the verdict's own, only after the vectors
-gained the run that completes data window 1 in the verdict's cycle). The eight that pass:
-- three rules the schedule's own gate also cannot bind (this journal, G0, "The gate's
-  mutants"): the verdict before data window 2 (θ of data symbol 1 comes after it), the slot
-  (free ~160 clocks before it is asked for), BPSK's second scale (it is done before the fit
-  needs the divider);
+65, the slot, the frame's last window, the symbol's 80 and SIGNAL's 144 and σ on SIGNAL, σ's
+sign, each move, σ at 4 bits), the routing (`bin_t2`, the bins' window count, `in_next` on T1
+and on SIGNAL), each end rule (the 5 edges ±1, the end with `rx_start`, the verdict only while
+open, the status of the kinds, the ready after a mark at once and a cycle late, the expected
+steps at the verdict, per window and before the verdict's own update), the drop's reach (the
+FFT's register, all ends), the first beat's tag and the start's edge: **38 of 44 fail**. Four
+of them only after the vectors grew (the expected steps before the verdict's update, the
+verdict wait, the verdict only while open, σ at 4 bits). The six that pass:
+- two rules the schedule's own gate cannot bind either (G0, "The gate's mutants"): the slot
+  (free ~160 clocks before it is asked for), BPSK's second scale (done before the fit needs
+  the divider);
 - four that cannot act: the free beats with θ's move of the same cycle (θ never comes in a
   window's last cycle) or with θ0's (θ0 is ~140 beats early); the end by a mark before
   SIGNAL's window waiting for the steps (none exist yet); the end by a mark after the frame's
   last window (the count of its steps reaches N_DBPS·symbols, never the anchor 16 + 8·L + 6,
-  which is ≡ 6 mod 8 while every N_DBPS but 36 is a multiple of 8, and 36·k ≢ 6 mod 8);
-- one dead branch, removed after the run (`start` of SIGNAL in the ready rule, read only for
-  data windows).
+  which is ≡ 6 mod 8 while every N_DBPS but 36 is a multiple of 8, and 36·k mod 8 is 0 or 4).
+One more was a dead branch, removed (`start` of SIGNAL in the ready rule).
 
 ### Open
 
 - The age on `rx_end` (next PR): `rx_handoff`'s sample count and the model's side.
+- The G0's list of the schedule's non-binding rules says "θ of data symbol 1 comes after the
+  verdict": true only for a frame that measures; see the review above.
 - `rx_data` through the open ASIC flow (area and timing of the whole data path against ADR
   0010's 1.5 to 2.0 mm²).
