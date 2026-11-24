@@ -1622,3 +1622,15 @@ g2_rx_data_schedule`, 7 tests green; clippy clean):
 
 **Next.** RTL in ADR 0010's order: the Viterbi decoder's gated clock and the decoder's G3,
 then `fft64` (its G0 with the architecture first).
+
+## 2026-11-24 · the schedule model's SIGNAL check from the RTL
+
+`DataTiming::signal_check` 10 → **30**: `hw/rtl/rx_signal.sv` behind `viterbi.sv` gives the
+verdict 29 edges after the edge that took SIGNAL's last step (the decoder's flush, a bit a
+clock, which the allowance had not counted; `docs/gates/rx_signal.md`), 30 cycle to cycle. In
+the hand-worked table of `radio_phy::rx_data` the verdict and the start move from 489 to **509**
+after the first beat (650 → 670 after the declaration's tick: about 0.12 µs of ADR 0010's SIFS
+budget, which had some 9 µs left); nothing else in the table moves, since the data's scale,
+asked at the verdict, waits for the divider until 529 as before. Evidence: `cargo test --release
+-p radio-phy --test g2_rx_data_schedule`, 7 tests green with the table's 489 replaced by 509 (and
+held at 489 before the change). Open: `viterbi_out` (3) against the RTL's 5, with the top level.

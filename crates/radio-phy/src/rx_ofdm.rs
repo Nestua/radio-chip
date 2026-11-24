@@ -584,6 +584,16 @@ pub struct SignalCheck {
 /// The SIGNAL field from the 48 deinterleaved soft values of its symbol, with its
 /// [`SignalCheck`].
 pub fn signal_checked(soft: &[i32]) -> Result<(Signal, SignalCheck), RxOfdmError> {
+    let (field, check) = signal_field(soft)?;
+    field.map(|s| (s, check))
+}
+
+/// The SIGNAL field (or the check it fails) and its [`SignalCheck`], which is formed whether
+/// the field passes or not (`hw/rtl/rx_signal.sv` reports it either way). The outer error is the
+/// decoder's only.
+pub fn signal_field(
+    soft: &[i32],
+) -> Result<(Result<Signal, RxOfdmError>, SignalCheck), RxOfdmError> {
     let bits =
         decode(soft, CodeRate::R1_2, Termination::ZeroAfter(24)).map_err(RxOfdmError::Viterbi)?;
     // Rate 1/2: two coded bits per decoded bit, in the order the soft values came.
@@ -599,6 +609,11 @@ pub fn signal_checked(soft: &[i32]) -> Result<(Signal, SignalCheck), RxOfdmError
         agree: count(false),
         disagree: count(true),
     };
+    Ok((field_of(&bits), check))
+}
+
+/// The field's checks on SIGNAL's decoded bits, in order: parity, rate, length.
+fn field_of(bits: &[u8]) -> Result<Signal, RxOfdmError> {
     let field = bits.get(..18).ok_or(RxOfdmError::SignalParity)?;
     if field.iter().fold(0u8, |p, b| p ^ b) != 0 {
         return Err(RxOfdmError::SignalParity);
@@ -611,7 +626,7 @@ pub fn signal_checked(soft: &[i32]) -> Result<(Signal, SignalCheck), RxOfdmError
     if !(1..=MAX_PSDU_LEN).contains(&length) {
         return Err(RxOfdmError::SignalLength);
     }
-    Ok((Signal { rate, length }, check))
+    Ok(Signal { rate, length })
 }
 
 /// Decodes the SIGNAL field with the given channel estimate; `fft_start` as in [`decode_ppdu`].
