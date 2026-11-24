@@ -172,6 +172,8 @@ pub struct Cover {
     late: usize,
     /// Beats taken in the cycle of a failed SIGNAL's end (the drop's own cycle).
     drop_takes: usize,
+    /// Data window 1 complete in the verdict's own cycle.
+    window_at_verdict: usize,
 }
 
 /// One run: the beats with their availability, through a fresh schedule; written out.
@@ -183,6 +185,21 @@ fn run(
     beats: &[HandoffBeat],
     pace: usize,
     offset: usize,
+) -> io::Result<()> {
+    run_split(out, cover, label, ratio, beats, pace, offset, None)
+}
+
+/// [`run`] with the pace changed from beat `later.0` on to `later.1`, after a gap of `later.2`.
+#[allow(clippy::too_many_arguments)]
+fn run_split(
+    out: &mut impl Write,
+    cover: &mut Cover,
+    label: &str,
+    ratio: Option<u16>,
+    beats: &[HandoffBeat],
+    pace: usize,
+    offset: usize,
+    later: Option<(usize, usize, usize)>,
 ) -> io::Result<()> {
     let mut s = RxDataSchedule::new(
         RxOfdmConfig::default(),
@@ -196,7 +213,10 @@ fn run(
     let mut clock = 0usize;
     let mut lines = Vec::with_capacity(beats.len());
     for (i, b) in beats.iter().enumerate() {
-        let avail = pace * i + offset;
+        let avail = match later {
+            Some((from, q, gap)) if i >= from => pace * from + offset + gap + q * (i - from),
+            _ => pace * i + offset,
+        };
         clock = clock.max(avail);
         let from = clock;
         while !s.ready_at(clock) {
@@ -255,6 +275,25 @@ fn run(
         .filter(|(c, e)| matches!(e, RxDataEvent::End(RxDataEnd::Signal(_))) && takes.contains(c))
         .count();
     cover.drop_takes += hits;
+    let verdicts: Vec<usize> = s
+        .events()
+        .iter()
+        .filter(|(_, e)| {
+            matches!(
+                e,
+                RxDataEvent::Verdict {
+                    verdict: Some(_),
+                    ..
+                }
+            )
+        })
+        .map(|(c, _)| *c)
+        .collect();
+    cover.window_at_verdict += s
+        .windows()
+        .iter()
+        .filter(|w| w.window == radio_phy::rx_data::Window::Symbol(1) && verdicts.contains(&w.last))
+        .count();
     if !s.violations().is_empty() {
         return Err(io::Error::other(format!(
             "{label}: violations {:?}",
@@ -446,6 +485,36 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
             break;
         }
     }
+    // Data window 1 complete in the verdict's own cycle, then a mark inside the data: the
+    // steps expected at the mark count that window (a pace search; the generator requires a
+    // hit). Each try is written to a buffer and kept only when it hits.
+    let mut hit = false;
+    let mut beats: Vec<HandoffBeat> = a[..144 + 80 * 4 + 10].to_vec();
+    beats.push(HandoffBeat::End(HandoffEnd::Acquisition));
+    beats.extend_from_slice(&next);
+    'search: for pace in [1usize, 8] {
+        for after in 2..=5 {
+            for gap in 0..80 {
+                let later = Some((208, after, gap));
+                let mut trial = Cover::default();
+                let mut sink = Vec::new();
+                run_split(
+                    &mut sink, &mut trial, "probe", ratio, &beats, pace, 0, later,
+                )?;
+                if trial.window_at_verdict > 0 {
+                    let label = format!("window-at-verdict-{pace}-{after}-{gap}");
+                    run_split(out, &mut c, &label, ratio, &beats, pace, 0, later)?;
+                    hit = true;
+                    break 'search;
+                }
+            }
+        }
+    }
+    if !hit {
+        return Err(io::Error::other(
+            "no pace puts data window 1 in the verdict's cycle",
+        ));
+    }
     // A sub-GHz carrier (HaLow's ratio) and a forged CFO word: SIGNAL's θ moves its window.
     let halow = clock_ratio(FS, 0.9e9);
     for (label, word) in [
@@ -469,7 +538,7 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
 pub fn write(out: &mut impl Write) -> io::Result<()> {
     let c = vectors(out)?;
     eprintln!("rvec rx_data: {c:?}");
-    if c.drop_takes == 0 || c.early == 0 || c.late == 0 {
+    if c.drop_takes == 0 || c.early == 0 || c.late == 0 || c.window_at_verdict == 0 {
         return Err(io::Error::other(format!("a case not covered: {c:?}")));
     }
     if c.ends

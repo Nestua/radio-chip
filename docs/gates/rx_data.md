@@ -235,7 +235,7 @@ the block per run, offers beat i from max(its pace, the cycle after beat i − 1
 every beat taken in the model's cycle, every verdict strobe, start, octet (data, first, last,
 seed, SERVICE) and end (status, info) in its cycle, and nothing in any other.
 
-48 runs: ADR 0010's table; every rate at 1 and 100 octets a beat a cycle and at 24 octets at
+49 runs: ADR 0010's table; every rate at 1 and 100 octets a beat a cycle and at 24 octets at
 the antenna's pace; 1500 octets at 6 Mb/s with ±40 ppm, at 54 Mb/s −40 and 24 Mb/s +40
 (windows moved early 349 times, late 349); no ratio written; a CFO word forged at both ends
 under HaLow's fs/fc ratio (θ0 moves the windows: SIGNAL's stays); marks cutting a frame in T2,
@@ -243,11 +243,12 @@ in SIGNAL's window, after it before the verdict (a beat a cycle and at pace), in
 and between the last window and the frame's end (before and after the verdict), of each kind,
 each followed by a frame that decodes; SIGNAL failed on noise (one run takes a beat in the
 drop's own cycle; the generator requires it), and noise that passed SIGNAL (truncated by its
-mark); two frames back to back.
+mark); data window 1 complete in the verdict's own cycle and a mark after it (found by a
+search of two paces and a gap, the generator requires it); two frames back to back.
 
 ```
 make -C hw rx_data
-rx_data G3: 48 runs, 500662 cycles, 160320 beats, 8922 events, 0 mismatches
+rx_data G3: 49 runs, 505206 cycles, 161928 beats, 9028 events, 0 mismatches
 ```
 
 First run: 414 mismatches (the reader not ready in its first cycle after reset). The HaLow
@@ -264,8 +265,9 @@ RTL as committed — every reader rule moved by one (free beats, θ, the verdict
 move), the routing (`bin_t2`, the bins' window count, `in_next` on T1 and on SIGNAL), each end
 rule (the 5 edges ±1, the end with `rx_start`, the status of the kinds, the ready after a
 mark at once and a cycle late, the expected steps at the verdict and per window), the drop's
-reach (the FFT's register, all ends), the first beat's tag and the start's edge: **34 of 43
-fail**. The nine that pass:
+reach (the FFT's register, all ends), the first beat's tag and the start's edge: **35 of 43
+fail** (one, the expected steps updated before the verdict's own, only after the vectors
+gained the run that completes data window 1 in the verdict's cycle). The eight that pass:
 - three rules the schedule's own gate also cannot bind (this journal, G0, "The gate's
   mutants"): the verdict before data window 2 (θ of data symbol 1 comes after it), the slot
   (free ~160 clocks before it is asked for), BPSK's second scale (it is done before the fit
@@ -275,16 +277,11 @@ fail**. The nine that pass:
   SIGNAL's window waiting for the steps (none exist yet); the end by a mark after the frame's
   last window (the count of its steps reaches N_DBPS·symbols, never the anchor 16 + 8·L + 6,
   which is ≡ 6 mod 8 while every N_DBPS but 36 is a multiple of 8, and 36·k ≢ 6 mod 8);
-- one dead branch removed after the run (`start` of SIGNAL in the ready rule, read only for
-  data windows);
-- **one case not covered**: a data window completing in the verdict's own cycle, then a mark
-  before the frame's end (the expected steps would miss that window). The code handles it (the
-  window's update follows the verdict's in one cycle); no vector makes it. Open below.
+- one dead branch, removed after the run (`start` of SIGNAL in the ready rule, read only for
+  data windows).
 
 ### Open
 
-- The case above: a vector with data window 1's last beat in the verdict's cycle and a mark
-  after (a pace search like the drop's).
 - The age on `rx_end` (next PR): `rx_handoff`'s sample count and the model's side.
 - `rx_data` through the open ASIC flow (area and timing of the whole data path against ADR
   0010's 1.5 to 2.0 mm²).
