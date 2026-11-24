@@ -129,7 +129,7 @@ clock a request waits.
 `rx_symbol G3: 127 packets x 2 passes, 237 completed, 833 symbols, 870 pilots, 848 phases, 40577
 soft subcarriers, 36 aborts (13 resets, 19 replayed), 16032 bins held, 78 scales late, 157
 SIGNAL thetas before the pilots, 428 CORDIC requests held (11 aborted waiting), 273936 edges, 0
-mismatches` — PASS. Lint clean (`make -C hw lint`). (Commit: below, with the mutations.)
+mismatches` — PASS. Lint clean (`make -C hw lint`). Commit 18fa0d3, `scripts/check.sh` all green.
 
 **A defect the gate found in the first run**: every 16- and 64-QAM threshold was 0. Both
 `rx_channel_pkg` (the tracker's K = 16) and `rx_symbol_pkg` declared `K_FRAC`; `rx_symbol`
