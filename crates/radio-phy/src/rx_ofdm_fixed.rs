@@ -801,57 +801,62 @@ pub fn symbol_soft_fixed(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn symbol_with(
-    window: &[IQ],
+/// u(c) = Z(c)·Hs*(c) after the packet's shift, half to even, saturated to U bits.
+fn product(z: &[IQ; FFT_SIZE], ch: &FixedChannel, c: i8, fx: &FixedOfdmConfig) -> IQ {
+    let b = fft_bin(c);
+    let (zr, zi) = (i128::from(z[b].0), i128::from(z[b].1));
+    let (hr, hi) = (i128::from(ch.hs[b].0), i128::from(ch.hs[b].1));
+    (
+        sat(rsh_even(zr * hr + zi * hi, ch.shift), fx.prod_bits),
+        sat(rsh_even(zi * hr - zr * hi, ch.shift), fx.prod_bits),
+    )
+}
+
+/// The pilots' products at −21, −7, 7, 21 with the transmitted signs removed (U + 1 bits: the
+/// sign of −2^(U−1) is not saturated). IEEE 802.11-2020 §17.3.5.9: base {1, 1, 1, −1} times
+/// the polarity sequence p_n, `polarity_index` 0 for SIGNAL and k + 1 for DATA symbol k.
+fn pilots_of(
+    z: &[IQ; FFT_SIZE],
     ch: &FixedChannel,
     polarity_index: usize,
+    fx: &FixedOfdmConfig,
+) -> [IQ; 4] {
+    let polarity = i64::from(pilot_polarity(polarity_index));
+    let mut p = [(0i64, 0i64); 4];
+    for ((slot, &c), &base) in p.iter_mut().zip(&PILOT_SUBCARRIERS).zip(&PILOT_BASE) {
+        let s = polarity * i64::from(base);
+        let v = product(z, ch, c, fx);
+        *slot = (s * v.0, s * v.1);
+    }
+    p
+}
+
+/// The common phase φ (P bits, units of 2π/2^P): the CORDIC's angle (A bits, widened) of the
+/// sum of the pilots rotated by −c·θ.
+fn common_phase(p: &[IQ; 4], theta: i64, fx: &FixedOfdmConfig, t: &Tables) -> i64 {
+    let mut sum = (0i64, 0i64);
+    for (v, &c) in p.iter().zip(&PILOT_SUBCARRIERS) {
+        let r = rotate(*v, -i64::from(c) * theta, fx, t);
+        sum = (sum.0 + r.0, sum.1 + r.1);
+    }
+    cordic_with(sum.0, sum.1, &fx.front, &t.cordic)
+        << (fx.front.nco_phase_bits - fx.front.angle_bits)
+}
+
+/// The soft pass: each data subcarrier from −26 to 26 rotated by −(φ + c·θ), demapped with
+/// thresholds scaled by its gain, scaled by the packet's quotient and clipped. The values in
+/// on-air order, N_BPSC a subcarrier.
+#[allow(clippy::too_many_arguments)]
+fn soft_pass(
+    z: &[IQ; FFT_SIZE],
+    ch: &FixedChannel,
     modulation: Modulation,
+    phi: i64,
+    theta: i64,
     cfg: &RxOfdmConfig,
     fx: &FixedOfdmConfig,
-    tracking: &mut FixedTracking,
     t: &Tables,
-) -> Option<(Vec<i32>, i64)> {
-    // No estimate has a shift this large (a gain is at most 2·W + 3 bits); a record built by
-    // hand must not reach the shifter with one.
-    if ch.shift > 2 * fx.fft_bits + 3 {
-        return None;
-    }
-    let z = window_fft(window, fx, t)?;
-    let p_bits = fx.front.nco_phase_bits;
-    // u(k) = Z(k)·Hs*(k) after the packet's shift, U bits.
-    let u = |c: i8| -> IQ {
-        let b = fft_bin(c);
-        let (zr, zi) = (i128::from(z[b].0), i128::from(z[b].1));
-        let (hr, hi) = (i128::from(ch.hs[b].0), i128::from(ch.hs[b].1));
-        (
-            sat(rsh_even(zr * hr + zi * hi, ch.shift), fx.prod_bits),
-            sat(rsh_even(zi * hr - zr * hi, ch.shift), fx.prod_bits),
-        )
-    };
-    let (mut theta, mut phi) = (0i64, 0i64);
-    if cfg.pilot_tracking {
-        // IEEE 802.11-2020 §17.3.5.9: pilots at −21, −7, 7, 21, base {1, 1, 1, −1} times the
-        // polarity sequence p_n (index 0 for SIGNAL).
-        let polarity = i64::from(pilot_polarity(polarity_index));
-        let mut p = [(0i64, 0i64); 4];
-        for ((slot, &c), &base) in p.iter_mut().zip(&PILOT_SUBCARRIERS).zip(&PILOT_BASE) {
-            let s = polarity * i64::from(base);
-            let v = u(c);
-            *slot = (s * v.0, s * v.1);
-        }
-        if cfg.timing_tracking {
-            track_fixed(&p, ch, polarity_index, tracking, fx, t);
-            theta = tracking.theta;
-        }
-        let mut sum = (0i64, 0i64);
-        for (v, &c) in p.iter().zip(&PILOT_SUBCARRIERS) {
-            let r = rotate(*v, -i64::from(c) * theta, fx, t);
-            sum = (sum.0 + r.0, sum.1 + r.1);
-        }
-        // The CORDIC's angle in A bits, widened to the rotator's P.
-        phi = cordic_with(sum.0, sum.1, &fx.front, &t.cordic) << (p_bits - fx.front.angle_bits);
-    }
+) -> Vec<i32> {
     let n_bpsc = modulation.bits_per_subcarrier();
     let limit = i128::from(cfg.soft_max.max(0));
     let (q, n) = soft_scale(ch.gain_sum, modulation, cfg, fx);
@@ -874,7 +879,7 @@ pub(crate) fn symbol_with(
     let mut on_air = Vec::with_capacity(48 * n_bpsc);
     let mut m = Vec::with_capacity(n_bpsc);
     for c in data_subcarriers() {
-        let v = rotate(u(c), -(phi + i64::from(c) * theta), fx, t);
+        let v = rotate(product(z, ch, c, fx), -(phi + i64::from(c) * theta), fx, t);
         let g = ch.gain[fft_bin(c)];
         m.clear();
         if modulation == Modulation::Bpsk {
@@ -885,6 +890,82 @@ pub(crate) fn symbol_with(
         }
         on_air.extend(m.iter().map(|&v| soft(v)));
     }
+    on_air
+}
+
+/// The pilots of one symbol from its 64 bins `z` (bin order): u at −21, −7, 7, 21 with the
+/// transmitted signs removed, U + 1 bits — what the symbol block hands the tracker
+/// (`hw/rtl/rx_symbol.sv`, `docs/gates/rx_symbol.md`). `None` for a shift no estimate has or
+/// unusable widths.
+pub fn symbol_pilots(
+    z: &[IQ; FFT_SIZE],
+    ch: &FixedChannel,
+    polarity_index: usize,
+    fx: &FixedOfdmConfig,
+) -> Option<[IQ; 4]> {
+    if !fx.is_valid() || ch.shift > 2 * fx.fft_bits + 3 {
+        return None;
+    }
+    Some(pilots_of(z, ch, polarity_index, fx))
+}
+
+/// One symbol from its 64 bins `z` (bin order) and the tracker's slope θ (P + 1 bits):
+/// the soft values in **on-air order** (before the deinterleaver), N_BPSC a data subcarrier
+/// from −26 to 26, and the common phase φ — [`symbol_soft_fixed`] after its FFT and its
+/// tracker step, what the symbol block computes (`hw/rtl/rx_symbol.sv`). θ and φ are 0
+/// without pilot tracking, as there. `None` for a shift no estimate has or unusable widths.
+#[allow(clippy::too_many_arguments)]
+pub fn symbol_from_bins(
+    z: &[IQ; FFT_SIZE],
+    ch: &FixedChannel,
+    polarity_index: usize,
+    modulation: Modulation,
+    theta: i64,
+    cfg: &RxOfdmConfig,
+    fx: &FixedOfdmConfig,
+) -> Option<(Vec<i32>, i64)> {
+    let t = tables(fx)?;
+    if ch.shift > 2 * fx.fft_bits + 3 {
+        return None;
+    }
+    let (theta, phi) = if cfg.pilot_tracking {
+        let theta = if cfg.timing_tracking { theta } else { 0 };
+        let p = pilots_of(z, ch, polarity_index, fx);
+        (theta, common_phase(&p, theta, fx, &t))
+    } else {
+        (0, 0)
+    };
+    Some((soft_pass(z, ch, modulation, phi, theta, cfg, fx, &t), phi))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn symbol_with(
+    window: &[IQ],
+    ch: &FixedChannel,
+    polarity_index: usize,
+    modulation: Modulation,
+    cfg: &RxOfdmConfig,
+    fx: &FixedOfdmConfig,
+    tracking: &mut FixedTracking,
+    t: &Tables,
+) -> Option<(Vec<i32>, i64)> {
+    // No estimate has a shift this large (a gain is at most 2·W + 3 bits); a record built by
+    // hand must not reach the shifter with one.
+    if ch.shift > 2 * fx.fft_bits + 3 {
+        return None;
+    }
+    let z = window_fft(window, fx, t)?;
+    let p_bits = fx.front.nco_phase_bits;
+    let (mut theta, mut phi) = (0i64, 0i64);
+    if cfg.pilot_tracking {
+        let p = pilots_of(&z, ch, polarity_index, fx);
+        if cfg.timing_tracking {
+            track_fixed(&p, ch, polarity_index, tracking, fx, t);
+            theta = tracking.theta;
+        }
+        phi = common_phase(&p, theta, fx, t);
+    }
+    let on_air = soft_pass(&z, ch, modulation, phi, theta, cfg, fx, t);
     // The window follows the slope left in it, as the float receiver's.
     if cfg.pilot_tracking && cfg.timing_tracking {
         // Half a sample of slope: 2^(P−7).
