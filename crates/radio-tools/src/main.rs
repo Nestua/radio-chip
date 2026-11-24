@@ -9,6 +9,7 @@
 //! written to the ignored `target/ext/`.
 
 mod rx_channel_vec;
+mod rx_symbol_vec;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -4139,7 +4140,7 @@ fn fft64_rom(out: &mut impl Write) -> io::Result<()> {
          \x20   // Widths of FixedOfdmConfig::default().\n\
          \x20   localparam int IN_BITS  = {};\n\
          \x20   localparam int IN_SHIFT = {};\n\
-         \x20   localparam int W_BITS   = {};\n\
+         \x20   localparam int FFT_W_BITS = {};\n\
          \x20   localparam int T_BITS   = {};\n\
          \x20   // Bit s set: stage s (0 first) halves its outputs.\n\
          \x20   localparam logic [5:0] HALVE = 6'b{:06b};",
@@ -4192,9 +4193,11 @@ fn main() -> ExitCode {
         "fft64-rom" => fft64_rom(&mut out),
         "rx_channel" => rx_channel_vec::vectors(&mut out),
         "rx-channel-pkg" => rx_channel_vec::package(&mut out),
+        "rx_symbol" => rx_symbol_vec::vectors(&mut out),
+        "rx-symbol-pkg" => rx_symbol_vec::package(&mut out),
         _ => {
             eprintln!(
-                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, fft64, rx_channel, rx-front-rom, fft64-rom, rx-channel-pkg, ofdm-symbols, ppdu-frames"
+                "usage: rvec <block>\nblocks: scrambler, conv_encoder, viterbi, round_sat, ltf_corr, cordic, nco, det, latch, search, search_alone, decide, decide_t1, front, dc_estimate, handoff, fft64, rx_channel, rx_symbol, rx-front-rom, fft64-rom, rx-channel-pkg, rx-symbol-pkg, ofdm-symbols, ppdu-frames"
             );
             return ExitCode::from(2);
         }
@@ -4205,5 +4208,88 @@ fn main() -> ExitCode {
             eprintln!("rvec: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The names a generated package declares (localparams and functions), each with its
+    /// declaration up to the end of the line.
+    fn names(text: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            let head = if let Some(rest) = line.strip_prefix("localparam ") {
+                rest.split('=').next().unwrap_or("")
+            } else if let Some(rest) = line.strip_prefix("function automatic ") {
+                rest.split('(').next().unwrap_or("")
+            } else {
+                continue;
+            };
+            // The name is the last identifier before `=` or `(`, outside brackets.
+            let mut depth = 0;
+            let outside: String = head
+                .chars()
+                .map(|c| {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth > 0 || c == ']' {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            if let Some(name) = outside.split_whitespace().last() {
+                let body = line
+                    .split("//")
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push((name.to_string(), body));
+            }
+        }
+        out
+    }
+
+    /// Every generated package can be imported beside every other (`rx_symbol` imports three).
+    /// Verilator resolves a name two imported packages declare to the first import's without a
+    /// word: the demapper's K_FRAC took the channel's 16 instead of 10 (2026-11-24). A name may
+    /// appear twice only with the same declaration (the same value).
+    #[test]
+    fn generated_packages_declare_distinct_names() {
+        let mut all: Vec<(String, String, &str)> = Vec::new();
+        let mut gen = |pkg: &'static str, f: &dyn Fn(&mut Vec<u8>) -> io::Result<()>| {
+            let mut buf = Vec::new();
+            f(&mut buf).unwrap();
+            let found = names(&String::from_utf8(buf).unwrap());
+            assert!(found.len() > 3, "{pkg}: {} names found", found.len());
+            for (n, body) in found {
+                all.push((n, body, pkg));
+            }
+        };
+        gen("rx-front-rom", &|b| rx_front_rom(b));
+        gen("fft64-rom", &|b| fft64_rom(b));
+        gen("rx-channel-pkg", &|b| rx_channel_vec::package(b));
+        gen("rx-symbol-pkg", &|b| rx_symbol_vec::package(b));
+        all.sort();
+        for w in all.windows(2) {
+            if w[0].0 == w[1].0 {
+                assert_eq!(
+                    w[0].1, w[1].1,
+                    "{} differs in {} and {}",
+                    w[0].0, w[0].2, w[1].2
+                );
+            }
+        }
+        assert!(all.iter().any(|(n, _, _)| n == "KAPPA_FRAC"));
+        assert!(all.iter().any(|(n, _, _)| n == "nco_cos"));
     }
 }
