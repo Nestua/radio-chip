@@ -4,8 +4,8 @@ Block: the top level of R0-09's data path behind `rx_handoff`, ADR 0010 decision
 item: "the top level behind `rx_handoff`, a cycle at a time against the schedule model") with
 decision 5's interfaces. Models: `radio_phy::rx_data_fixed::RxDataFixed` for *what* comes out
 (gated in `g2_rx_data_stream`), `radio_phy::rx_data::RxDataSchedule` for *when* (gate
-`g2_rx_data_schedule`). RTL: `hw/rtl/rx_data.sv` (to come, PR C). Gate: `make -C hw rx_data`
-(to come).
+`g2_rx_data_schedule`). RTL: `hw/rtl/rx_data.sv` (PR C, 2026-11-25). Gate: `make -C hw rx_data` (vectors
+`rvec rx_data`, bench `hw/tb/tb_rx_data.cpp`).
 
 ## 2026-11-24 · G0 · the interfaces, the wiring, the reader, and the schedule restated from the RTL
 
@@ -189,3 +189,102 @@ found no wrong latency rule. Taken:
   `run_handoff`), PR C.
 - The reader's registered ready into `rx_handoff`'s tick (ADR 0010 decision 2's untimed path)
   goes through timing with the front and the data path together.
+
+## 2026-11-25 · G3 · `hw/rtl/rx_data.sv` at its pins, a cycle at a time against the schedule
+
+PR C of the three (the founder's decision 1 above). Not merged: left for the founder with
+the PRs stacked on it.
+
+### What was built
+
+`hw/rtl/rx_data.sv` wires every block of the data path as "What the top level holds" says:
+`fft64` behind the reader's register (T1 and T2 with `in_next`), the bins routed by a count of
+output windows (T1, T2 to `rx_channel`, the symbols to `rx_symbol`), `rx_track` started from the
+first beat (CFO word, the MAC's `ratio`), `cordic_share` (a `rx_symbol`, b `rx_track`) before
+`cordic_iter`, `div_share` (a `rx_channel`, b `rx_track`) before `div_serial`, the quotients to
+`rx_track` and the scales (job 0, 4 + m) to `rx_symbol`, `rx_deint` with SIGNAL's block from the
+first beat and the data's at the verdict, `viterbi` → `rx_signal` and `rx_octets` (PR B). The
+verdict goes straight out to `rx_handoff` (`sig_*`, the stream's tag), `rx_start` is
+`rx_signal`'s `sig_valid` when it decoded, the octets are `rx_octets`', and `rx_end` merges the
+four ends (decoded or seed zero from `rx_octets`, SIGNAL failed from `rx_signal`, truncated or
+aborted by a mark from this level). The drop to every block is `rx_end` itself; it also
+clears the register in front of the FFT.
+
+The reader's `in_ready` is a register computed from the state after each edge (the model's "a
+beat that waits for an output registered on E is taken in E + 2"). Its rules are the model's,
+each from a signal the RTL sees: θ by counting `theta_valid` (θ0 the first), σ by
+`move_early`/`move_late`, the verdict by `sig_valid`, the FFT's flush by a counter of 64 from
+a flushed window's 64th sample, the slot by `rx_symbol`'s `bins_ok`, the frame's last window by
+a count of data windows against `sig_symbols` (0 when SIGNAL failed: the same rule drains the
+tail). The end by a mark: at once before SIGNAL's window is complete; otherwise with the
+verdict (in `rx_start`'s own cycle when no data window is complete, from `sig_valid` itself),
+when the frame is not over (complete data windows < symbols), and once the trellis steps of
+the complete windows (each a full N_DBPS) have been counted and 5 more edges have passed: the
+model's last step + 7. After a mark `in_ready` stays low until the packet's end is out.
+
+Not here: the age on `rx_end` (the founder's decision 2): it needs `rx_handoff`'s sample
+count, next PR.
+
+### The gate
+
+`make -C hw rx_data`: vectors `rvec rx_data` (`crates/radio-tools/src/rx_data_vec.rs`), bench
+`hw/tb/tb_rx_data.cpp`. The streams are the front's own (`RxHandoffFixed` on frames through
+AWGN at 30 dB, some with a clock offset), the cycles `RxDataSchedule`'s with the beats offered a
+beat a cycle or at a pace (8 clocks a sample: the antenna's; 5 for one case); the bench resets
+the block per run, offers beat i from max(its pace, the cycle after beat i − 1), and requires
+every beat taken in the model's cycle, every verdict strobe, start, octet (data, first, last,
+seed, SERVICE) and end (status, info) in its cycle, and nothing in any other.
+
+48 runs: ADR 0010's table; every rate at 1 and 100 octets a beat a cycle and at 24 octets at
+the antenna's pace; 1500 octets at 6 Mb/s with ±40 ppm, at 54 Mb/s −40 and 24 Mb/s +40
+(windows moved early 349 times, late 349); no ratio written; a CFO word forged at both ends
+under HaLow's fs/fc ratio (θ0 moves the windows: SIGNAL's stays); marks cutting a frame in T2,
+in SIGNAL's window, after it before the verdict (a beat a cycle and at pace), inside the data,
+and between the last window and the frame's end (before and after the verdict), of each kind,
+each followed by a frame that decodes; SIGNAL failed on noise (one run takes a beat in the
+drop's own cycle; the generator requires it), and noise that passed SIGNAL (truncated by its
+mark); two frames back to back.
+
+```
+make -C hw rx_data
+rx_data G3: 48 runs, 500662 cycles, 160320 beats, 8922 events, 0 mismatches
+```
+
+First run: 414 mismatches (the reader not ready in its first cycle after reset). The HaLow
+runs found the one rule the RTL had wrong: θ0's move had been applied to SIGNAL's own window;
+the model places SIGNAL at 144 and moves from data symbol 1 on (its text said so: σ₀ = 0).
+Fixed. `make -C hw lint` clean. The RTL stops its simulation on a first beat with no mark
+before it and on a sample into the FFT's skid (the schedule's violations it can see; the
+blocks' own assertions stop it on the rest: `rx_deint`'s full slot, `rx_channel`'s,
+`rx_symbol`'s).
+
+**Mutants** (each in a private copy of `hw/`; script in the session's scratchpad): 43 on the
+RTL as committed — every reader rule moved by one (free beats, θ, the verdict, the flush 63 and
+65, the slot, the frame's last window, the symbol's 80 and SIGNAL's 144, σ's sign and each
+move), the routing (`bin_t2`, the bins' window count, `in_next` on T1 and on SIGNAL), each end
+rule (the 5 edges ±1, the end with `rx_start`, the status of the kinds, the ready after a
+mark at once and a cycle late, the expected steps at the verdict and per window), the drop's
+reach (the FFT's register, all ends), the first beat's tag and the start's edge: **34 of 43
+fail**. The nine that pass:
+- three rules the schedule's own gate also cannot bind (this journal, G0, "The gate's
+  mutants"): the verdict before data window 2 (θ of data symbol 1 comes after it), the slot
+  (free ~160 clocks before it is asked for), BPSK's second scale (it is done before the fit
+  needs the divider);
+- four that cannot act: the free beats with θ's move of the same cycle (θ never comes in a
+  window's last cycle) or with θ0's (θ0 is ~140 beats early); the end by a mark before
+  SIGNAL's window waiting for the steps (none exist yet); the end by a mark after the frame's
+  last window (the count of its steps reaches N_DBPS·symbols, never the anchor 16 + 8·L + 6,
+  which is ≡ 6 mod 8 while every N_DBPS but 36 is a multiple of 8, and 36·k ≢ 6 mod 8);
+- one dead branch removed after the run (`start` of SIGNAL in the ready rule, read only for
+  data windows);
+- **one case not covered**: a data window completing in the verdict's own cycle, then a mark
+  before the frame's end (the expected steps would miss that window). The code handles it (the
+  window's update follows the verdict's in one cycle); no vector makes it. Open below.
+
+### Open
+
+- The case above: a vector with data window 1's last beat in the verdict's cycle and a mark
+  after (a pace search like the drop's).
+- The age on `rx_end` (next PR): `rx_handoff`'s sample count and the model's side.
+- `rx_data` through the open ASIC flow (area and timing of the whole data path against ADR
+  0010's 1.5 to 2.0 mm²).

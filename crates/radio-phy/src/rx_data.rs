@@ -9,7 +9,8 @@
 //! events are given back as they are); this module decides *when*. It is a reader of the
 //! hand-off ([`HandoffReader`]), so [`crate::rx_handoff::run_handoff`] runs the front's stream
 //! and this data path together, the verdict going back in the clock the schedule gives it. The
-//! top level's RTL (`hw/rtl/rx_data.sv`, to come) is held to it cycle for cycle at its pins.
+//! top level's RTL (`hw/rtl/rx_data.sv`) is held to it cycle for cycle at its pins (gate
+//! `make -C hw rx_data`, vectors `rvec rx_data`).
 //!
 //! # The clocks
 //!
