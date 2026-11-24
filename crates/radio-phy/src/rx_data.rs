@@ -90,7 +90,11 @@
 //!
 //! An end by a mark (an abort, or the stream ending early) comes in the cycle after the mark,
 //! or when the windows already complete have been decoded, if that is later: the bit of their
-//! last step registered and an octet's latency after it.
+//! last data step registered and an octet's latency after it; and never before the verdict when
+//! SIGNAL's window was complete (the verdict's strobe and `rx_start` come as without the mark,
+//! the end in the same cycle as `rx_start` at the earliest). Events of one cycle keep the
+//! model's order (start, octet, end). The top level's drop comes with the end, and clears its
+//! own register in front of the FFT too.
 //!
 //! # The case of ADR 0010's table, by hand (`tests/g2_rx_data_schedule.rs`)
 //!
@@ -349,6 +353,8 @@ struct Packet {
     fft_free: usize,
     /// Per symbol (0 SIGNAL): its first soft value.
     first_soft: Vec<usize>,
+    /// The first of this packet's entries in the symbols' list.
+    sym_from: usize,
     last_pilots: usize,
     last_end: usize,
     /// The last step's v_valid (any block).
@@ -536,6 +542,7 @@ impl RxDataSchedule {
             frame: None,
             fft_free: 0,
             first_soft: Vec::new(),
+            sym_from: self.symbols.len(),
             last_pilots: 0,
             last_end: 0,
             last_step: None,
@@ -676,9 +683,9 @@ impl RxDataSchedule {
                 let theta = if k == 1 {
                     p.theta0
                 } else {
-                    self.symbols
+                    self.symbols[p.sym_from..]
                         .last()
-                        .filter(|r| r.packet == p.tag && r.symbol == k - 1)
+                        .filter(|r| r.symbol == k - 1)
                         .map_or(0, |r| r.theta)
                 };
                 let mut after = theta + 2;
@@ -868,7 +875,7 @@ impl RxDataSchedule {
         };
         let pilots = bins.max(p.chan + 1).max(p.last_pilots + PRODUCTS) + PIL;
         // rx_track's one pilot register is free 8 edges after the last step started.
-        if pilots + 1 < self.symbols.last().map_or(0, |r| r.step + 8) {
+        if pilots + 1 < self.symbols[p.sym_from..].last().map_or(0, |r| r.step + 8) {
             self.violations
                 .push((pilots, "pilots before the tracker's register is free"));
         }
@@ -896,11 +903,9 @@ impl RxDataSchedule {
         };
         let soft = phi.2.max(scale).max(v + 1) + SOFT;
         // rx_deint's slot: free from the edge before the last step of the symbol two before.
-        if let Some(&(_, last)) = self
-            .symbols
+        if let Some(&(_, last)) = self.symbols[p.sym_from..]
             .iter()
             .rev()
-            .filter(|r| r.packet == p.tag)
             .nth(1)
             .and_then(|r| r.steps.as_ref())
         {
@@ -997,6 +1002,13 @@ impl RxDataSchedule {
                     });
                     let m = signal.rate.modulation();
                     if m != Modulation::Bpsk {
+                        // rx_channel serves a request made during its quotients only after the
+                        // variance's (2 edges later than this model would): the verdict always
+                        // comes long after, and a break of that is a violation.
+                        if v + SCALE_ASK < p.variance + 3 {
+                            self.violations
+                                .push((v, "the data's scale asked during the quotients"));
+                        }
                         let bits = bit_len(scale_constant(m, &self.cfg, &self.fx)) + 1;
                         // The verdict seen in v: the request taken there, asked an edge later.
                         p.scale_ask = Some((v + SCALE_ASK, bits, m));

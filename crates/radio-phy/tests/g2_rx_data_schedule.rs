@@ -591,3 +591,44 @@ fn a_stream_cut_after_a_window_waits_for_the_last_ones_octets() {
         .collect();
     assert_eq!(got, psdus[0]);
 }
+
+#[test]
+fn a_mark_after_signals_window_waits_for_the_verdict() {
+    // Frame A's stream cut by an abort mark after SIGNAL's window but long before its
+    // verdict: the verdict's strobe and the start come as without the mark, the end in the
+    // same cycle (after them), and B's first beat after it.
+    let (a, _, _) = train(&[(Rate::R54, 100, 30.0, 0.0)], 0, 9);
+    let (b, psdus, _) = train(&[(Rate::R24, 50, 30.0, 0.0)], 0, 10);
+    let a = first_stream(&a);
+    let b = first_stream(&b);
+    let cut = 218;
+    let mut beats: Vec<HandoffBeat> = a[..cut].to_vec();
+    beats.push(HandoffBeat::End(HandoffEnd::Acquisition));
+    beats.extend_from_slice(&b);
+    let mut s = schedule(DataTiming::default());
+    let taken = offer(&mut s, &beats, 0);
+    assert!(s.violations().is_empty(), "{:?}", s.violations());
+    let ev = s.events().to_vec();
+    assert!(matches!(ev[0].1, RxDataEvent::Verdict { .. }));
+    assert!(matches!(ev[1].1, RxDataEvent::Start { .. }));
+    assert_eq!(
+        ev[2].1,
+        RxDataEvent::End(RxDataEnd::Aborted(HandoffEnd::Acquisition))
+    );
+    let mark = taken[cut];
+    assert!(ev[0].0 > mark + 100, "{} {mark}", ev[0].0);
+    assert_eq!((ev[1].0, ev[2].0), (ev[0].0, ev[0].0));
+    let RxDataEvent::Verdict { packet, .. } = ev[0].1 else {
+        unreachable!()
+    };
+    assert_eq!(s.strobe_at(ev[0].0).map(|v| v.0), Some(packet));
+    assert!(taken[cut + 1] > ev[2].0);
+    let got: Vec<u8> = ev[3..]
+        .iter()
+        .filter_map(|e| match e.1 {
+            RxDataEvent::Octet { octet, .. } => Some(octet),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, psdus[0]);
+}

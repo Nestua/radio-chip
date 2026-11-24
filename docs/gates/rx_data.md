@@ -24,8 +24,9 @@ decision 5's interfaces. Models: `radio_phy::rx_data_fixed::RxDataFixed` for *wh
    end at the antenna, and the hold falls then.
 3. **T1 → T2 → SIGNAL chained** in `fft64` (`in_next` on T1's and T2's 64th sample): SIGNAL's
    window does not wait for T2's flush. While the reader is behind the antenna (the SIFS case)
-   the verdict and the last octet come 48 clocks earlier; at the antenna's pace the channel is
-   ready a clock after SIGNAL's bins, as with a flush. The data windows are flushed (each one's
+   the verdict and the last octet come 48 clocks earlier; at the antenna's pace (8 clocks a
+   sample) T2's last bin comes with SIGNAL's sample 62, and the channel is ready before
+   SIGNAL's last bin, so SIGNAL does not wait for it either way. The data windows are flushed (each one's
    place waits for the last θ).
 
 ### What the top level holds besides the blocks
@@ -99,7 +100,9 @@ counts here are cycle to cycle, as the old allowances were):
   pilots before `rx_track`'s one register is free, a soft pass into `rx_deint`'s full slot
   (`rx_symbol` has no hold: the margin is a symbol's work), the Viterbi decoder's contract
   between SIGNAL and the data, a first beat with no mark before it. None on any run of the
-  gate. The RTL stops its simulation on each.
+  gate. Some are a block's own contract (the slot, the pilot register, the decoder's), the
+  others the schedule's assumptions (the CORDIC's order, the data's scale after the
+  quotients); PR C's RTL is to assert those it can see.
 
 ### Evidence
 
@@ -124,7 +127,8 @@ The hand table is the only check of the rules' *values* here; the rules' *source
 blocks' benches, and the cycle-for-cycle check is PR C's gate at the RTL's pins. A model gate:
 no reference from outside the project.
 
-**The gate's mutants** (`rx_data.rs`, each against `g2_rx_data_schedule`):
+**The gate's mutants** (`rx_data.rs` at b194186, each against `cargo test --release -p
+radio-phy --test g2_rx_data_schedule`, a script that copies the file back and touches it):
 34 mutants: every latency constant moved by one or more, T2 flushed instead of chained, the
 divider's order forced each way, the reader's θ + 1, `free_below` at the window's start, the
 verdict's wait for data symbol 2 removed, the end by a mark at the last octet, the tail one
@@ -146,8 +150,34 @@ rules that never act at these latencies, each by a margin the rules themselves g
   clocks after the verdict in the table's case (its window waits for SIGNAL's flush, 65 + 63 + 77 + 9 + 2 + 86 after SIGNAL's last sample against the verdict's 274);
 - `rx_deint`'s "previous step" (removed): two symbols' first steps are at least 240 clocks
   apart, a symbol at most 216 steps.
-The RTL keeps every one of these rules (and asserts the slot's); the margins are restated if a
-block's latency changes.
+PR C's RTL is to keep every one of these rules; the margins are restated if a block's
+latency changes.
+
+### Review (independent, 2026-11-24)
+
+A fresh agent checked every rule against the blocks' RTL and benches (the conventions of each
+bench converted), re-derived the hand table and the 240 clocks a symbol independently, and
+found no wrong latency rule. Taken:
+- **an abort mark after SIGNAL's window and before its verdict** made the end wait for the
+  verdict (the model's events keep their order), which the text did not say: the rule is now
+  written (`rx_data.rs`, "An end by a mark": the verdict and `rx_start` come as without the
+  mark, the end in `rx_start`'s cycle at the earliest; events of one cycle in the model's
+  order) and gated (`a_mark_after_signals_window_waits_for_the_verdict`);
+- **the seed-zero end's position was not gated** (its mutant "one octet early" passed both
+  gates; no frame of the schedule's gate has a zero seed, and `build_ppdu` cannot make one):
+  a unit test feeds the bits (`rx_data_fixed::tests`), the Seed end on the bit Decoded would
+  come on; the mutant fails it. Noted: a zero-seed frame cut short now ends Truncated (or
+  Aborted), not Seed;
+- the data's scale asked during the quotients would be served 2 edges later by
+  `rx_channel` than the model says: unreachable (the verdict is ~130 clocks after the
+  variance), now a violation;
+- `cordic_share.sv`'s header said SIGNAL's phase comes before its pair angles: false in this
+  schedule (taken 302, 320, then 352); comment corrected;
+- the drop after a failed SIGNAL must also clear the top level's register in front of the
+  FFT (a sample taken in V + 1 would otherwise enter after the drop): in the model's text;
+- the journal's claims: the mutants' command and commit, "the RTL stops its simulation"
+  (no RTL yet), the channel's time at the antenna's pace — corrected;
+- the symbols' list filtered by tag (two packets may share one): by the packet's first entry.
 
 ### Open, for PR B and PR C
 

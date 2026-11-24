@@ -448,3 +448,66 @@ impl RxDataFixed {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ppdu::Rate;
+
+    fn frame(length: usize) -> Frame {
+        Frame {
+            ch: FixedChannel {
+                hs: [(0, 0); FFT_SIZE],
+                shift: 0,
+                gain: [0; FFT_SIZE],
+                gain_sum: 0,
+            },
+            signal: Signal {
+                rate: Rate::R6,
+                length,
+            },
+            symbols: 1,
+            next: 1,
+            viterbi: WindowedViterbi::new(CodeRate::R1_2, 96, 16 + 8 * length + 6),
+            bits: 0,
+            head: Vec::new(),
+            scrambler: None,
+            service: 0,
+            octet: 0,
+            octets: 0,
+            zero_seed: false,
+        }
+    }
+
+    /// Feeds `bits` until the frame ends; the bit index and the events of the end.
+    fn run(f: &mut Frame, bits: &[u8]) -> (usize, Vec<RxDataEvent>) {
+        let mut all = Vec::new();
+        for (k, &b) in bits.iter().enumerate() {
+            let mut out = Vec::new();
+            let more = RxDataFixed::bit(f, b, &mut out);
+            all.extend(out);
+            if !more {
+                return (k, all);
+            }
+        }
+        (usize::MAX, all)
+    }
+
+    #[test]
+    fn a_zero_seed_ends_where_the_last_octet_would_have_been() {
+        for length in [1usize, 2, 24, 100] {
+            let n = 16 + 8 * length + 6;
+            // A seed found (the first seven bits not all zero): Decoded with the last octet.
+            let mut bits = vec![1u8; n];
+            let (at, ev) = run(&mut frame(length), &bits);
+            assert_eq!(at, 16 + 8 * length - 1, "{length}");
+            assert_eq!(ev.last(), Some(&RxDataEvent::End(RxDataEnd::Decoded)));
+            assert_eq!(ev.len(), length + 1);
+            // The first seven all zero: no octet, Seed on the same bit.
+            bits[..7].fill(0);
+            let (at, ev) = run(&mut frame(length), &bits);
+            assert_eq!(at, 16 + 8 * length - 1, "{length}");
+            assert_eq!(ev, [RxDataEvent::End(RxDataEnd::Seed)], "{length}");
+        }
+    }
+}
