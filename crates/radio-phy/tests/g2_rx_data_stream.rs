@@ -12,7 +12,7 @@
 
 use radio_phy::channel::{awgn, frequency_offset, mean_power, resample, Rng};
 use radio_phy::ofdm::IfftConfig;
-use radio_phy::ppdu::{build_ppdu, data_symbols, Rate};
+use radio_phy::ppdu::{build_ppdu, Rate};
 use radio_phy::rx_data_fixed::{RxDataEnd, RxDataEvent, RxDataFixed};
 use radio_phy::rx_front::RxConfig;
 use radio_phy::rx_front_fixed::{
@@ -216,23 +216,8 @@ fn check(
         }
         _ => {}
     }
-    // A seed of zero is decided from the first data symbol, before the stream is whole; the
-    // buffer's decoder wants the whole stream first, so it is run on it padded with zeros
-    // (later samples cannot change bits already decided by the window).
-    let padded: Vec<IQ>;
-    let z = match got.start {
-        Some(sig) if got.end == Some(RxDataEnd::Seed) => {
-            let need = SIGNAL_END + 80 * data_symbols(sig.rate, sig.length) + 64;
-            padded = z
-                .iter()
-                .copied()
-                .chain(std::iter::repeat((0, 0)))
-                .take(need.max(z.len()))
-                .collect();
-            &padded[..]
-        }
-        _ => z,
-    };
+    // A seed of zero ends the frame where its last octet would have been (`rx_data.md`, G0):
+    // its stream is whole, as the buffer's decoder wants it.
     match decode_ppdu_fixed(z, 0, &cfg, &fo, start(word)) {
         Ok(d) => {
             assert_eq!(

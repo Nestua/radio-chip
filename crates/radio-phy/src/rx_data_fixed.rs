@@ -12,7 +12,9 @@
 //! What the whole-buffer decoder leaves open, settled here (ADR 0010, Context 3; the journal
 //! `docs/gates/rx_ofdm.md`, 2026-11-23):
 //! - **a scrambler seed of zero** (the first seven SERVICE bits all zero) is known before the
-//!   first octet: no octet is handed on, the end is [`RxDataEnd::Seed`];
+//!   first octet: no octet is handed on, the end is [`RxDataEnd::Seed`], given where the last
+//!   octet would have been (the frame is read to its end, as the RTL's reader cannot know
+//!   earlier that it is over: `docs/gates/rx_data.md`, G0);
 //! - **a window that needs samples past the stream's end** (the end mark comes first): the
 //!   end is [`RxDataEnd::Truncated`], after whatever octets were already out;
 //! - **the number of data symbols** for the verdict is [`SignalVerdict::of`]'s;
@@ -35,7 +37,8 @@ use crate::rx_ofdm::{
     scrambler_seed_of, signal_checked, symbol_start, RxOfdmConfig, RxOfdmError, Signal, SignalCheck,
 };
 use crate::rx_ofdm_fixed::{
-    channel_with, symbol_with, tables, FixedChannel, FixedOfdmConfig, FixedTracking, Tables,
+    channel_with, symbol_with, tables, tracker_constants, FixedChannel, FixedOfdmConfig,
+    FixedTracking, Tables,
 };
 use crate::scrambler::Scrambler;
 use crate::viterbi::WindowedViterbi;
@@ -52,7 +55,8 @@ pub enum RxDataEnd {
     Decoded,
     /// SIGNAL did not decode (parity, rate or length); no start was given.
     Signal(RxOfdmError),
-    /// The first seven SERVICE bits were all zero: no scrambler seed; no octet was given.
+    /// The first seven SERVICE bits were all zero: no scrambler seed; no octet was given. It
+    /// comes where the last octet would have.
     Seed,
     /// The stream's end mark came before the frame's last window.
     Truncated,
@@ -116,6 +120,8 @@ struct Frame {
     service: u16,
     octet: u8,
     octets: usize,
+    /// The seed was zero: the frame is read on to its end with no octet handed on.
+    zero_seed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +178,15 @@ impl RxDataFixed {
     /// Whether a frame is being decoded (a first beat seen, no end given yet).
     pub fn busy(&self) -> bool {
         !matches!(self.phase, Phase::Idle)
+    }
+
+    /// Whether the frame being decoded measures its timing (its tracker constants are usable,
+    /// `docs/gates/rx_track.md`); `None` with no frame after SIGNAL.
+    pub fn measures(&self) -> Option<bool> {
+        match &self.phase {
+            Phase::Data(f) => Some(tracker_constants(&f.ch, &self.fx).usable(&self.fx)),
+            _ => None,
+        }
     }
 
     /// The tracker's shift of the windows, in samples (what the gates count the moves by).
@@ -336,6 +351,7 @@ impl RxDataFixed {
             service: 0,
             octet: 0,
             octets: 0,
+            zero_seed: false,
         }))
     }
 
@@ -371,6 +387,17 @@ impl RxDataFixed {
     fn bit(f: &mut Frame, b: u8, out: &mut Vec<RxDataEvent>) -> bool {
         let k = f.bits;
         f.bits += 1;
+        if f.zero_seed {
+            // No octet; the end comes where the last octet would have.
+            if k >= 16 && (k - 16) % 8 == 7 {
+                f.octets += 1;
+                if f.octets == f.signal.length {
+                    out.push(RxDataEvent::End(RxDataEnd::Seed));
+                    return false;
+                }
+            }
+            return true;
+        }
         if f.scrambler.is_none() {
             f.head.push(b);
             if f.head.len() < 7 {
@@ -379,8 +406,10 @@ impl RxDataFixed {
             let Some((seed, sc)) =
                 scrambler_seed_of(&f.head).and_then(|s| Scrambler::new(s).ok().map(|sc| (s, sc)))
             else {
-                out.push(RxDataEvent::End(RxDataEnd::Seed));
-                return false;
+                // Read on to the frame's end (`docs/gates/rx_data.md`, G0): the reader of the
+                // RTL learns no earlier that the frame is over.
+                f.zero_seed = true;
+                return true;
             };
             let mut sc = sc;
             for (j, &h) in f.head.iter().enumerate() {
@@ -417,5 +446,68 @@ impl RxDataFixed {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ppdu::Rate;
+
+    fn frame(length: usize) -> Frame {
+        Frame {
+            ch: FixedChannel {
+                hs: [(0, 0); FFT_SIZE],
+                shift: 0,
+                gain: [0; FFT_SIZE],
+                gain_sum: 0,
+            },
+            signal: Signal {
+                rate: Rate::R6,
+                length,
+            },
+            symbols: 1,
+            next: 1,
+            viterbi: WindowedViterbi::new(CodeRate::R1_2, 96, 16 + 8 * length + 6),
+            bits: 0,
+            head: Vec::new(),
+            scrambler: None,
+            service: 0,
+            octet: 0,
+            octets: 0,
+            zero_seed: false,
+        }
+    }
+
+    /// Feeds `bits` until the frame ends; the bit index and the events of the end.
+    fn run(f: &mut Frame, bits: &[u8]) -> (usize, Vec<RxDataEvent>) {
+        let mut all = Vec::new();
+        for (k, &b) in bits.iter().enumerate() {
+            let mut out = Vec::new();
+            let more = RxDataFixed::bit(f, b, &mut out);
+            all.extend(out);
+            if !more {
+                return (k, all);
+            }
+        }
+        (usize::MAX, all)
+    }
+
+    #[test]
+    fn a_zero_seed_ends_where_the_last_octet_would_have_been() {
+        for length in [1usize, 2, 24, 100] {
+            let n = 16 + 8 * length + 6;
+            // A seed found (the first seven bits not all zero): Decoded with the last octet.
+            let mut bits = vec![1u8; n];
+            let (at, ev) = run(&mut frame(length), &bits);
+            assert_eq!(at, 16 + 8 * length - 1, "{length}");
+            assert_eq!(ev.last(), Some(&RxDataEvent::End(RxDataEnd::Decoded)));
+            assert_eq!(ev.len(), length + 1);
+            // The first seven all zero: no octet, Seed on the same bit.
+            bits[..7].fill(0);
+            let (at, ev) = run(&mut frame(length), &bits);
+            assert_eq!(at, 16 + 8 * length - 1, "{length}");
+            assert_eq!(ev, [RxDataEvent::End(RxDataEnd::Seed)], "{length}");
+        }
     }
 }

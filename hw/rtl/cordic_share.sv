@@ -1,7 +1,8 @@
 // The data path's iterative CORDIC shared by two requesters (ADR 0010, decision 1): the symbol
 // block's common phase (a) and the tracker's pair angles (b). Each holds its request (valid and
-// its operands) until take; a has priority, as the schedule's order (SIGNAL's phase before its
-// pair angles; a data symbol's angles come before its phase by the data's own order). The answer
+// its operands) until take; a has priority on a tie. In the schedule (radio_phy::rx_data) a
+// symbol's two pair angles are asked before its phase (SIGNAL's too: its phase waits for the
+// products pass), so the priority never decides an order there. The answer
 // goes to whoever's request the CORDIC took (the angle is broadcast; out_a / out_b say whose).
 // Golden model: none of its own (it moves operands); gate G3 through make -C hw rx_track, where
 // the bench's other requester is a.
