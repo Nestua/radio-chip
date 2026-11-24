@@ -73,7 +73,7 @@ had no width to check; it now asserts z < 2^14 and z·M < 2^26, and with 13 bits
 
 ## 2026-11-24 · G3 · `hw/rtl/rx_signal.sv` behind `viterbi.sv`, every verdict in its edge
 
-Commit: this branch (`r0-09-signal`). Command: `make -C hw rx_signal`. Vectors:
+Commit: `494bafc`. Command: `make -C hw rx_signal`. Vectors:
 `hw/vectors/rx_signal.txt` (`rvec rx_signal`): 3000 cases (1596 decoded, 262 of them patient;
 899 parity, 389 rate, 116 length failures), as in G0 plus random tails.
 
