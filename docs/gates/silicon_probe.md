@@ -162,7 +162,7 @@ logic); not rerun for that.
 RTL as committed after its review) through the same flow, image (1671deadac53), platform,
 corner, clock (6.25 ns, 160 MHz) and settings as the entries above (`tools/syn/orfs_block.sh`,
 40 % utilisation at the floorplan, memories as flip-flops). By hand on the build server
-(`/data/radio-chip/asic-top2`), about 2.5 hours; nothing else ran there but a first run of the
+(`/data/radio-chip/asic-top2`; its reports and logs kept in `asic-top2-keep`), about 2.5 hours; nothing else ran there but a first run of the
 same top on the RTL before its review (σ 4 bits, the verdict's gate; 8 flip-flops and a gate
 apart), used here only as a second placement: 3.77 mm², worst slack −1.17 ns.
 
