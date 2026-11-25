@@ -336,3 +336,11 @@ The values are unchanged.
 - skip C6's wait.
 
 The schedule restated: `rx_data.md`, same date.
+
+**2026-11-25, later.** Splitting only ma still left a 12 × 44 product per cycle, the data
+path's worst path (−1.71 ns, `silicon_probe.md`). The first stage now forms the four
+products of the halves of both operands, 12 × 22 each; the second stage sums them. The
+latency is unchanged. `make -C hw rx_track` and `make -C hw rx_data` show 0 mismatches.
+Three mutants die: the high-high shift one less (38 373 mismatches), bl signed (the
+divider's bound assertion), and mlh shifted by MAL (42 175). Through the open flow it is no
+longer on the worst paths.

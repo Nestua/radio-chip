@@ -216,3 +216,62 @@ The rows add up to 26 432; the other 61 flip-flops were not attributed (not look
 - The stores as SRAM macros (and the area of the macros themselves from the PDK).
 - `fft64`, `rx_channel`, `rx_symbol`, `rx_track`, `rx_deint` and `rx_signal` through the flow
   each on its own, to know each one's share (this run counts flip-flops only).
+
+
+## 2026-11-25 · probe · `rx_data` again, with the two products pipelined
+
+The founder chose on 2026-11-25 to pipeline the two products that missed 160 MHz. This
+probe reruns the same flow, image, platform, corner, clock (6.25 ns) and settings as the
+entry above, by hand on the build server. Each run took about 2.5 hours.
+
+| `rx_data` | Flip-flops | Design area, routed | Worst slack at 6.25 ns | TNS | Power (flow's estimate) | Worst path |
+|---|---|---|---|---|---|---|
+| c61b361 (the entry above) | 26 493 | 3.77 mm² | −1.77 ns | −83.9 ns | 405 mW | `rx_track` 24 × 44 in one cycle |
+| 070dad4 (#90: `rx_track` in halves of ma, `rx_channel` in three stages) | 26 802 | 3.79 mm² | −1.71 ns | −82.0 ns | 408 mW | `rx_track` `mb` → `mpl`: a 12 × 44 half-product per cycle |
+| d4ba06d (`rx_track`'s first stage in four 12 × 22 products) | 26 827 | 3.76 mm² | **−0.30 ns** | **−0.69 ns** | 405 mW | `fft64` stage 4 `q` → stage 5 `pre`: the twiddle's ROM and complex product in one cycle |
+
+Reports and logs are kept on the server in `/data/radio-chip/asic-pipe-keep` and
+`asic-mul4-keep`.
+
+**What it says**
+- **Splitting only ma's rows bought 0.06 ns.** A 12 × 44 product still has the full 44-bit
+  width and its final adder. Splitting both operands (four 12 × 22 products, then a
+  four-term sum) leaves `rx_track` off the worst paths. The latency is the same as #90's,
+  so the schedule does not change.
+- **`rx_channel`** no longer appears in the worst paths.
+- **The data path now misses 160 MHz by 0.30 ns (about 153 MHz).** TNS is −0.69 ns, so only
+  a few endpoints fail, all in `fft64`'s stage 5. That stage looks up the twiddle from the
+  index and multiplies, in the cycle after stage 4's register. Two fixes are open:
+  - register the twiddle one stage ahead, with no latency change (not tried);
+  - put a register in the complex product, which adds an edge to the FFT's latency and
+    restates the schedule.
+- **Area and power are unchanged** (3.76 mm², 405 mW). The stores built of flip-flops are
+  still about half of the flip-flops (the entry above).
+
+**SRAM macros**
+- **What the PDK offers.** The platform in the image has only single-port macros
+  (`RM_IHPSG13_1P_*`: 64×64, 256×48, 256×64, 512×64, 1024×8/16/64, 2048×64, 4096×8/16).
+  The smallest, 64×64, is 784.48 × 64.36 µm, which is 0.050 mm².
+- **What the stores need.** They are 1-write 1-read (`ram_1w1r`). A count over the
+  `rx_data` gate's 57 runs (instrumented in a private copy) shows how often each store reads
+  and writes in the same cycle:
+
+  | Store | Same-cycle read and write |
+  |---|---|
+  | `rx_symbol`'s two slots | 41 520 and 43 296 of about 90 000 writes |
+  | `rx_deint`'s two banks | 564 each |
+  | `rx_channel`'s `Hs` | 2149 |
+  | `rx_channel`'s gains | 0 |
+
+- **The consequence.** Only the gains' store fits a single-port macro as built. The other
+  five need a change of architecture (banking, or a slot/bank discipline that never reads
+  and writes the same macro in one cycle) before macros can be placed.
+- **The size of the prize.** With one 64×64 macro for each of the six stores, the macros
+  would take about 0.30 mm² plus halos, against roughly 0.6 mm² of flip-flops alone for
+  the same bits, before their multiplexers.
+
+**Open, for the founder**
+- `fft64`'s stage 5: register the twiddle a stage ahead (no latency change), or pipeline
+  the product (one edge more)?
+- The stores: change `rx_symbol`, `rx_deint` and `rx_channel` to single-port access so they
+  can be IHP macros, or keep flip-flops and accept the area?
