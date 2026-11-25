@@ -314,6 +314,67 @@ One more was a dead branch, removed (`start` of SIGNAL in the ready rule).
 
 ### Open
 
-- The age on `rx_end` (next PR): `rx_handoff`'s sample count and the model's side.
+- The age on `rx_end`: a G0 proposal below (2026-11-25), waiting for the founder's answers.
 - `rx_data` through the open ASIC flow (area and timing of the whole data path against ADR
   0010's 1.5 to 2.0 mm²).
+
+## 2026-11-25 · G0 (a proposal, waiting for the founder) · the age on `rx_end`
+
+The founder's decision 2 of 2026-11-24 (above): `rx_end` carries an **age**, the ADC samples
+since the frame's last sample was at the ADC's pins; the MAC stamps `rx_end` with its own clock
+and subtracts. `rx_handoff` gains a free-running sample count and the count of the stream's
+first sample with its first beat. PR C left it out; this entry is its G0. No RTL is written
+until the questions below are answered, one at a time, each with a recommendation.
+
+### What is fixed already
+
+- **The frame's end**, in the stream's samples: `RxDataEvent::Start`'s `frame_end` =
+  `symbol_start(0, symbols) + 64` = 144 + 80·symbols + 64, one past the last data symbol's
+  FFT window, counted from T1's first sample; known at the verdict. (Whether "the frame's last
+  sample" should be that, or the window's end moved by the tracker's σ, is part of
+  question 3's precision: σ is a few samples at most.)
+- **Where the count comes from**: `rx_handoff` writes ADC sample n at history address
+  n mod 512 (`HISTORY`), and the front's `acq_fft` is the history address of T1's first
+  sample. A free-running count c of ADC samples written gives that sample's full count as
+  c − ((c − `acq_fft`) mod 512) at the declaration's tick, carried with the first beat
+  (`out_first_n`).
+- **The age at `rx_end`**: (the count as `rx_end` is seen) − (`out_first_n` + `frame_end`).
+  In `rx_data.sv`: an adder at the verdict (the frame's end in samples), a subtractor at the
+  end; `rx_handoff`'s count is an input.
+- **Its range for a decoded frame**: the reader is at most a history behind the pins (512
+  samples: further is an overrun, a mark) and decodes a frame's last window within a few µs
+  of reading it (the schedule's 1.74 to 5.95 µs, < 120 samples): the age < 512 + 120 < 2^10.
+  Counted modulo 2^W, the subtraction is exact for any W ≥ 11.
+
+### The questions for the founder
+
+1. **Which ends carry an age.** (a) *Recommended:* only the decoded end and the seed-zero end
+   (the frame's end is known and is in the past; these are the ones the MAC times an ACK or
+   a CCA busy period by); every other end gives `rx_age_valid` = 0. (b) Every end after
+   `rx_start` (truncated and aborted too): the frame's end is known from SIGNAL but may lie
+   in the future (an abort mid-frame), so the age would be signed, or clamped at 0.
+   (c) Every end, the ends without SIGNAL timed from the stream's last sample taken.
+2. **The width.** *Recommended:* a 16-bit count in `rx_handoff` and a 16-bit age (the bound
+   above needs 11; 16 leaves room for a larger history or a slower reader without a change of
+   interface), wrapping, no saturation needed.
+3. **"Now"**: *recommended:* the count of ADC samples written before `rx_end`'s cycle (a
+   register in `rx_handoff`, read by `rx_data` combinationally in that cycle); the MAC's
+   stamp is of the same cycle. The alternative, the count at the end's register edge, is a
+   cycle's difference (1/8 of a sample) and needs a second register.
+4. **The model's side.** `HandoffStart` gains the first sample's ADC index (`at`); the
+   schedule (`RxDataSchedule`) gets the ADC count per cycle from `run_handoff` (it knows when
+   each sample was written) and gives the age with each end; `g2_rx_data_schedule` checks it
+   against the frame's end at the antenna directly (`train`'s starts); `rvec rx_data` carries
+   the count and the first sample's count in its beats. `rx_handoff`'s gates (`handoff`,
+   `handoff_forced`) gain the count and `out_first_n`.
+
+### What changes where (once answered)
+
+| Where | What |
+|---|---|
+| `radio_phy::rx_front_fixed` | `HandoffStart::at` (10 places build it) |
+| `radio_phy::rx_handoff` | `run_handoff` gives the count per cycle |
+| `radio_phy::rx_data` | the age with every end that carries one |
+| `hw/rtl/rx_handoff.sv` | the count (W bits), `out_first_n` |
+| `hw/rtl/rx_data.sv` | `in_first_n`, `adc_count` in; `rx_age`, `rx_age_valid` out |
+| gates | `handoff`, `handoff_forced`, `rx_data`, `g2_rx_data_schedule` rerun |
