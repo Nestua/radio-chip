@@ -155,3 +155,59 @@ logic); not rerun for that.
   the area" is still unchecked.
 - One corner, default settings, no sign-off, as before.
 
+
+## 2026-11-25 · probe · the receiver's data path, whole (`rx_data`)
+
+**What was run.** `hw/rtl/rx_data.sv` with every block under it (PR C, #86, at c61b361: the
+RTL as committed after its review) through the same flow, image (1671deadac53), platform,
+corner, clock (6.25 ns, 160 MHz) and settings as the entries above (`tools/syn/orfs_block.sh`,
+40 % utilisation at the floorplan, memories as flip-flops). By hand on the build server
+(`/data/radio-chip/asic-top2`), about 2.5 hours; nothing else ran there but a first run of the
+same top on the RTL before its review (σ 4 bits, the verdict's gate; 8 flip-flops and a gate
+apart), used here only as a second placement: 3.77 mm², worst slack −1.17 ns.
+
+| `rx_data` | Cells | Flip-flops | Area after synthesis | Design area, routed | Worst slack at 6.25 ns | TNS | Power (flow's estimate) |
+|---|---|---|---|---|---|---|---|
+| the data path, c61b361 | 384 725 after synthesis | 26 493 | 4.61 mm² | **3.77 mm²** | **−1.77 ns** | −83.9 ns | 405 mW |
+
+Flip-flops by block (the final netlist's instance names):
+
+| Block | Flip-flops | What most of them are |
+|---|---|---|
+| `viterbi` | 7010 | survivors and metrics (its own probe: 7012, 0.96 mm² routed) |
+| `rx_symbol` | 5620 | two slots of 64 words (memories as flip-flops) |
+| `rx_deint` | 4789 | two banks of 48 × 48 bits (memories as flip-flops) |
+| `rx_channel` | 4308 | the channel's and the gains' stores (memories as flip-flops) |
+| `fft64` | 2712 | the delay lines (63 words) and the pipeline |
+| `rx_track` | 1137 | the shared multiplier's operands, the pilot register, the state |
+| the top level's own | 257 | the reader, the packet's state, the FFT's input register |
+| `rx_signal`, `div_serial`, `div_share`, `rx_octets`, `cordic_iter`, `cordic_share` | 599 | |
+
+**What it says**
+- **Area: 3.77 mm² routed, against ADR 0010's estimate of 1.5 to 2.0 mm² (± 40 %).** About
+  14 700 of the 26 493 flip-flops are memories built of flip-flops (`rx_symbol`'s slots,
+  `rx_deint`'s banks, `rx_channel`'s stores): some 0.7 mm² of flip-flops alone at the probe's
+  49 µm², before their write multiplexers and read trees. The ADR left them open ("macros or
+  flip-flops; the macros' sizes not read from the PDK"); this run is the flip-flop end. The
+  next figure to get is the same top with those stores as the PDK's SRAM macros (IHP SG13G2
+  has them; the flow places macros, this probe has not tried).
+- **It does not close 160 MHz: −1.77 ns, about 125 MHz.** The worst path is `rx_track`'s
+  shared 24 × 44 multiplier in one cycle (`ma` → `mp`, 9.38 ns of arrival against 7.60 ns
+  required); in the first run, placed differently, it was `rx_channel`'s 37 × 16 product of
+  the tracker's constants (`pg` → `po`, −1.17 ns). Both are single-cycle products of wide
+  operands in blocks that had not been through the flow on their own (BACKLOG lists them).
+  Both blocks use them once in many cycles: a register in the middle of each product (one
+  edge more in their latency, restated in the schedule) is the obvious fix; not tried.
+- **Power: 405 mW** at the flow's default activity, a ranking only: 57 % flip-flops' internal
+  power, 38 % the clock tree, 5 % combinational. The memories' flip-flops hold most of the
+  time; a switching simulation and clock gating of the stores (the wrapper in `hw/rtl/lib/`)
+  are what would make this figure mean something.
+- One corner, default settings, no sign-off, as before. 34 nets over the flow's fanout limit
+  after repair (no slew or capacitance violations).
+
+**Open**
+- `rx_track`'s and `rx_channel`'s products pipelined, the schedule restated, the gates rerun,
+  then the flow again.
+- The stores as SRAM macros (and the area of the macros themselves from the PDK).
+- `fft64`, `rx_channel`, `rx_symbol`, `rx_track`, `rx_deint` and `rx_signal` through the flow
+  each on its own, to know each one's share (this run counts flip-flops only).
