@@ -264,3 +264,36 @@ products: a stage-specific form saves a few hundred cells, for the run through t
   `radio_phy::rx_data` is restated when the top level of ADR 0010 6.2 is built; its
   `DataTiming::fft` allowance (96) is now 75 after the window's last sample for this block.
 - The bin store (a third slot or T1 + T2 accumulated): the channel's block — T1 + T2 accumulated (the founder, 2026-11-24; `rx_channel.md`).
+
+## 2026-11-25 · G3 · the twiddle registered a stage ahead (the founder's choice)
+
+**Why.** Through the open flow, `rx_data` missed 160 MHz by 0.30 ns. The worst paths were in
+stage 5: the twiddle's index from the token's label, the ROM, then the complex product, all
+in one cycle (`silicon_probe.md`, 2026-11-25). On 2026-11-25 the founder chose to register
+the twiddle one stage ahead, with no change of latency.
+
+**What changed.**
+- Each stage's twiddle is looked up from the label its token will carry: stage 0's from the
+  input counter, stage s + 1's from the label stage s's register takes (plab − D). It is
+  registered on the same edge as the token, one register per stage, wired into `tw_r`/`tw_i`
+  by assigns.
+- The ROM is now off the product's path. Values and latencies are unchanged.
+- The stage-2/3 check `twiddle not in mulc` now waits for reset. Before reset the twiddle
+  register holds a random value, where the old combinational lookup always gave a real
+  twiddle, and the check was firing on it.
+
+| Gate | Command | Result |
+|---|---|---|
+| G3 | `make -C hw fft64` | 236 windows, 57 989 bins, 789 latencies, 0 mismatches |
+| The data path | `make -C hw rx_data` | 57 runs, 0 mismatches |
+| Lint | `make -C hw lint` | clean |
+
+**Mutants**, each in a private copy:
+
+| Mutant | Result |
+|---|---|
+| the next stage's twiddle from `plab` without − D | dies, 43 729 mismatches |
+| the next stage's twiddle with stage s's index | dies, 43 394 |
+| stage s reads stage s − 1's twiddle | dies, 43 005 |
+| stage 0's `wi` with stage 1's index | dies, 50 736 |
+| stage 0's `wr` with stage 1's index | survives: equivalent, because stages 0 and 1 choose 1 or −j by `wi` alone and never read `wr` |

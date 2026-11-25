@@ -28,7 +28,10 @@
 // delay lines left as they are (their contents reach no bin of a later window: G0's test).
 //
 // Pipeline: an input register, then per stage a twiddle register (the product) and a
-// butterfly register. Stages 0 and 1 multiply by 1 and −j only (shifts); stages 2 and 3 by
+// butterfly register. Each stage's twiddle is looked up one register ahead, from the label its
+// token will carry, and travels with the token (tw_r, tw_i): the ROM is off the product's path
+// (the founder's choice of 2026-11-25, docs/gates/silicon_probe.md: the lookup and the product
+// in one cycle were the data path's worst path). Stages 0 and 1 multiply by 1 and −j only (shifts); stages 2 and 3 by
 // constants (products by the ROM's few magnitudes, selected); stages 4 and 5 by the ROM in a
 // general product.
 
@@ -144,6 +147,16 @@ module fft64
     end
 
     tok_t t_in;
+    // tw_r[s], tw_i[s]: stage s's twiddle for the token in st[s], registered with it.
+    // (Each element is driven by one register, through an assign: one process per element.)
+    logic signed [T_BITS-1:0] tw_r[6], tw_i[6];
+    logic signed [T_BITS-1:0] tw0_r, tw0_i;
+    always_ff @(posedge clk) begin
+        tw0_r <= tw_re(tw_index(cnt, 0));
+        tw0_i <= tw_im(tw_index(cnt, 0));
+    end
+    assign tw_r[0] = tw0_r;
+    assign tw_i[0] = tw0_i;
     always_ff @(posedge clk) begin
         if (!rst_n || drop) begin
             cnt       <= '0;
@@ -203,8 +216,8 @@ module fft64
             later = st[s].lab[5-s];
             br    = st[s].re;
             bi    = st[s].im;
-            wr    = tw_re(tw_index(st[s].lab, s));
-            wi    = tw_im(tw_index(st[s].lab, s));
+            wr    = tw_r[s];
+            wi    = tw_i[s];
             if (s < 2) begin
                 // w is 1 or −j (exact in Q(T, T − 2)): w·b by shifts.
                 if (wi == '0) begin
@@ -232,7 +245,7 @@ module fft64
         // multiply by 0 silently.
         if (s == 2 || s == 3) begin : g_check
             always_ff @(posedge clk)
-                if (st[s].v && later &&
+                if (rst_n && st[s].v && later &&
                     (mulc(16'sd1, wr) == '0 && wr != '0 || mulc(16'sd1, wi) == '0 && wi != '0))
                     $error("fft64: stage %0d twiddle (%0d, %0d) not in mulc", s, wr, wi);
         end
@@ -292,6 +305,16 @@ module fft64
             q.im   <= o_im;
         end
         assign st[s+1] = q;
+        if (s < 5) begin : g_next
+            // The next stage's twiddle, from the label q takes on the same edge.
+            logic signed [T_BITS-1:0] nw_r, nw_i;
+            always_ff @(posedge clk) begin
+                nw_r <= tw_re(tw_index(plab - 6'(D), s + 1));
+                nw_i <= tw_im(tw_index(plab - 6'(D), s + 1));
+            end
+            assign tw_r[s+1] = nw_r;
+            assign tw_i[s+1] = nw_i;
+        end
     end
 
     // ---- Output -----------------------------------------------------------------------------
