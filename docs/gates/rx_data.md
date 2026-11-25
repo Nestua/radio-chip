@@ -330,7 +330,12 @@ until the questions below are answered, one at a time, each with a recommendatio
 
 - **The frame's end**, in the stream's samples: `RxDataEvent::Start`'s `frame_end` =
   `symbol_start(0, symbols) + 64` = 144 + 80·symbols + 64, one past the last data symbol's
-  FFT window, counted from T1's first sample; known at the verdict. (Whether "the frame's last
+  FFT window, counted from T1's first window sample; known at the verdict. That stream starts
+  BACKOFF samples inside T1's cyclic prefix, so this is BACKOFF samples (up to 16) earlier than
+  the frame's true last sample at the pins: the age must add BACKOFF, as `rx_handoff`'s own
+  frame end already does (`sig_hend` = `SIGNAL_END` + BACKOFF + 80·symbols,
+  `rx_handoff.sv:237`). (The doc comment of `rx_data_fixed.rs:93`, "at the antenna", has the
+  same slip and is corrected with the model's change.) (Whether "the frame's last
   sample" should be that, or the window's end moved by the tracker's σ, is part of
   question 3's precision: σ is a few samples at most.)
 - **Where the count comes from**: `rx_handoff` writes ADC sample n at history address
@@ -342,9 +347,18 @@ until the questions below are answered, one at a time, each with a recommendatio
   In `rx_data.sv`: an adder at the verdict (the frame's end in samples), a subtractor at the
   end; `rx_handoff`'s count is an input.
 - **Its range for a decoded frame**: the reader is at most a history behind the pins (512
-  samples: further is an overrun, a mark) and decodes a frame's last window within a few µs
-  of reading it (the schedule's 1.74 to 5.95 µs, < 120 samples): the age < 512 + 120 < 2^10.
-  Counted modulo 2^W, the subtraction is exact for any W ≥ 11.
+  samples: further is an overrun, a mark), and `g2_rx_data_schedule` asserts the end within
+  7 µs (140 samples) of the frame's end at the ADC's pins (it prints 1.74 to 5.95 µs, measured
+  from the pins, not from the reader's read): the age < 512 + 140 < 2^10. Counted modulo 2^N,
+  an unsigned age is exact for any N ≥ 10; the signed age of question 1(b) needs N ≥ 11.
+- **What `rx_handoff` keeps already** (the review, 2026-11-25): `wr_cnt`, samples written
+  modulo 512 (`rx_handoff.sv:103`); `wr_off`, a 17-bit count of samples written since T1's
+  window (`:156`); `hend`, one past the frame's last sample (`:159`, `:237`). So an
+  alternative to the plan below is the age as `wr_off − hend` inside `rx_handoff`, with no new
+  `HandoffStart::at` and no `out_first_n`. The catch: `wr_off` belongs to the open packet and
+  restarts when a new acquisition replaces it (an abort does), so it would have to be latched
+  for `rx_end` or `rx_end` read before the restart. The free-running count of the plan below
+  could simply be `wr_cnt` widened. Both bear on questions 2 and 4.
 
 ### The questions for the founder
 
@@ -355,7 +369,7 @@ until the questions below are answered, one at a time, each with a recommendatio
    in the future (an abort mid-frame), so the age would be signed, or clamped at 0.
    (c) Every end, the ends without SIGNAL timed from the stream's last sample taken.
 2. **The width.** *Recommended:* a 16-bit count in `rx_handoff` and a 16-bit age (the bound
-   above needs 11; 16 leaves room for a larger history or a slower reader without a change of
+   above needs 10 unsigned, 11 signed; 16 leaves room for a larger history or a slower reader without a change of
    interface), wrapping, no saturation needed.
 3. **"Now"**: *recommended:* the count of ADC samples written before `rx_end`'s cycle (a
    register in `rx_handoff`, read by `rx_data` combinationally in that cycle); the MAC's
@@ -372,9 +386,9 @@ until the questions below are answered, one at a time, each with a recommendatio
 
 | Where | What |
 |---|---|
-| `radio_phy::rx_front_fixed` | `HandoffStart::at` (10 places build it) |
+| `radio_phy::rx_front_fixed` | `HandoffStart::at` (9 places build it) |
 | `radio_phy::rx_handoff` | `run_handoff` gives the count per cycle |
 | `radio_phy::rx_data` | the age with every end that carries one |
-| `hw/rtl/rx_handoff.sv` | the count (W bits), `out_first_n` |
+| `hw/rtl/rx_handoff.sv` | the count (N bits; `W` is the back-off parameter), `out_first_n` |
 | `hw/rtl/rx_data.sv` | `in_first_n`, `adc_count` in; `rx_age`, `rx_age_valid` out |
-| gates | `handoff`, `handoff_forced`, `rx_data`, `g2_rx_data_schedule` rerun |
+| gates | `handoff`, `handoff_forced`, `rx_data`, `g2_rx_data_schedule`, `g2_rx_handoff`, `g2_rx_handoff_schedule`, `g2_rx_data_stream` rerun; `hw/vectors/handoff.txt` and `rx_data.txt` regenerated |
