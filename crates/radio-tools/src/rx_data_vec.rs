@@ -7,14 +7,20 @@
 //! max(its `avail`, the cycle after beat i − 1 was taken) and held until taken; the schedule's
 //! reader takes it in the cycle the vectors give. Events are what the block's outputs show in
 //! the cycle given; no other cycle shows one.
+//!
+//! The age's inputs (rx_handoff's, here made up): `adc_count` in cycle c is
+//! (`count0` + ⌊c / 8⌋) mod 2^16, a sample every 8 clocks from the run's `count0`; `end_stamp`
+//! the latest stamp line's value from its cycle on. A stamp follows each verdict with a
+//! length, some way behind the count so that the age varies and wraps; rx_end's age is
+//! `rx_end_age` of the end, the count and the stamp in its cycle.
 
 use std::f64::consts::PI;
 use std::io::{self, Write};
 
 use radio_phy::channel::{awgn, frequency_offset, mean_power, resample, Rng};
 use radio_phy::ofdm::IfftConfig;
-use radio_phy::ppdu::{build_ppdu, Rate};
-use radio_phy::rx_data::{DataTiming, RxDataSchedule};
+use radio_phy::ppdu::{build_ppdu, build_ppdu_bits, data_symbols, Rate};
+use radio_phy::rx_data::{rx_end_age, DataTiming, RxDataSchedule};
 use radio_phy::rx_data_fixed::{RxDataEnd, RxDataEvent, RxDataFixed};
 use radio_phy::rx_front::RxConfig;
 use radio_phy::rx_front_fixed::{
@@ -68,6 +74,32 @@ fn adc(rate: Rate, octets: usize, snr: f64, ppm: f64, seed: u64) -> io::Result<V
     let x = if ppm == 0.0 { x } else { resample(&x, ppm) };
     let x = frequency_offset(&x, ppm * 1e-6 * CARRIER_HZ, FS, 2.0 * PI * rng.uniform());
     let x = awgn(&x, snr, p, &mut rng);
+    let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-15.0 / 20.0) / p.sqrt();
+    Ok(to_adc(&x, gain))
+}
+
+/// A frame sent with a seed of 0 (SERVICE and the PSDU clear: the receiver finds no seed),
+/// after 400 samples of silence, at −15 dBFS and 30 dB, through the ADC.
+fn adc_seed_zero(rate: Rate, octets: usize, seed: u64) -> io::Result<Vec<(i16, i16)>> {
+    let cfg = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+    let mut rng = Rng::new(seed);
+    let mut clear = vec![0u8; 16];
+    for _ in 0..octets {
+        let byte = (rng.next_u64() & 0xff) as u8;
+        clear.extend((0..8).map(|i| (byte >> i) & 1));
+    }
+    clear.resize(data_symbols(rate, octets) * rate.data_bits_per_symbol(), 0);
+    let f: Vec<(f64, f64)> = build_ppdu_bits(&clear, rate, octets, &cfg)
+        .map_err(|e| io::Error::other(format!("{e:?}")))?
+        .iter()
+        .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+        .collect();
+    let p = mean_power(&f);
+    let mut x = vec![(0.0, 0.0); 400];
+    x.extend_from_slice(&f);
+    x.extend(vec![(0.0, 0.0); 600]);
+    let x = awgn(&x, 30.0, p, &mut rng);
     let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-15.0 / 20.0) / p.sqrt();
     Ok(to_adc(&x, gain))
 }
@@ -178,6 +210,14 @@ pub struct Cover {
     /// timing; in a run of two packets also the first's against the second's: the search
     /// that needs it counts its own hits).
     theta_before_verdict: usize,
+    /// Ends with an age, and those whose subtraction wraps.
+    ages: usize,
+    age_wraps: usize,
+}
+
+/// `adc_count` in cycle `c` of a run that starts from `count0` (see the module's text).
+fn count_at(count0: u16, c: usize) -> u16 {
+    count0.wrapping_add(u16::try_from((c / 8) & 0xffff).unwrap_or(0))
 }
 
 /// One run: the beats with their availability, through a fresh schedule; written out.
@@ -214,6 +254,13 @@ fn run_split(
     )
     .ok_or_else(|| io::Error::other("schedule"))?;
     writeln!(out, "R {label} {}", ratio.unwrap_or(0))?;
+    // Runs start the count near its wrap, or at 0 (a stamp behind a count of 0 wraps), in turn.
+    let count0 = if cover.runs.is_multiple_of(3) {
+        0
+    } else {
+        u16::try_from((cover.runs * 7919 + 64_900) % 65_536).unwrap_or(0)
+    };
+    writeln!(out, "C {count0}")?;
     let mut clock = 0usize;
     let mut lines = Vec::with_capacity(beats.len());
     for (i, b) in beats.iter().enumerate() {
@@ -312,6 +359,7 @@ fn run_split(
     for l in lines {
         writeln!(out, "{l}")?;
     }
+    let mut stamp = 0u16;
     for &(c, e) in s.events() {
         match e {
             RxDataEvent::Verdict {
@@ -320,6 +368,12 @@ fn run_split(
                 let (fail, sym, pat) =
                     verdict.map_or((1, 0, 0), |v| (0, v.data_symbols, usize::from(v.patient)));
                 writeln!(out, "V {c} {packet:x} {fail} {sym} {pat}")?;
+                if verdict.is_some() {
+                    // rx_handoff takes the stamp at its next tick; any value will do here.
+                    let behind = u16::try_from((c * 31 + 100) % 900).unwrap_or(0);
+                    stamp = count_at(count0, c).wrapping_sub(behind);
+                    writeln!(out, "P {} {stamp}", c + 3)?;
+                }
             }
             RxDataEvent::Start { signal, .. } => {
                 writeln!(out, "T {c} {} {}", rate_code(signal.rate), signal.length)?;
@@ -340,7 +394,11 @@ fn run_split(
                     RxDataEnd::Aborted(k) => (4, kind(k)),
                 };
                 cover.ends[status] += 1;
-                writeln!(out, "E {c} {status} {info}")?;
+                let count = count_at(count0, c);
+                let (valid, age) = rx_end_age(end, count, stamp).map_or((0, 0), |a| (1, a));
+                cover.ages += valid;
+                cover.age_wraps += usize::from(valid == 1 && count < stamp);
+                writeln!(out, "E {c} {status} {info} {valid} {age}")?;
             }
         }
     }
@@ -368,7 +426,11 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
     )?;
     writeln!(
         out,
-        "# O <cycle> <octet> <first> <seed> <service>; E <cycle> <status> <info>; Z <last cycle>"
+        "# O <cycle> <octet> <first> <seed> <service>; E <cycle> <status> <info> <age valid> <age>;"
+    )?;
+    writeln!(
+        out,
+        "# C <count0>: adc_count = count0 + cycle / 8; P <cycle> <end_stamp>: from that cycle; Z <last cycle>"
     )?;
     let mut c = Cover::default();
     let ratio = clock_ratio(FS, CARRIER_HZ);
@@ -390,6 +452,19 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
         }
         let b = stream(rate, 24, 30.0, 20.0)?;
         run(out, &mut c, &format!("r{r}-24-pace8"), ratio, &b, 8, 0)?;
+    }
+    // A seed of 0: the seed-zero end, with its age.
+    for (k, rate) in [Rate::R6, Rate::R54].into_iter().enumerate() {
+        let b = first_stream(&adc_seed_zero(rate, 24, 0x5EED + k as u64)?);
+        run(
+            out,
+            &mut c,
+            &format!("seed0-r{}", rate_code(rate)),
+            ratio,
+            &b,
+            0,
+            0,
+        )?;
     }
     // Long frames with a clock offset either way: the windows move early and late.
     for (rate, ppm) in [
@@ -587,15 +662,12 @@ pub fn write(out: &mut impl Write) -> io::Result<()> {
         || c.late == 0
         || c.window_at_verdict == 0
         || c.theta_before_verdict == 0
+        || c.ages == 0
+        || c.age_wraps == 0
     {
         return Err(io::Error::other(format!("a case not covered: {c:?}")));
     }
-    if c.ends
-        .iter()
-        .take(5)
-        .enumerate()
-        .any(|(i, &n)| n == 0 && i != 1)
-    {
+    if c.ends.contains(&0) {
         return Err(io::Error::other(format!(
             "an end status not covered: {c:?}"
         )));

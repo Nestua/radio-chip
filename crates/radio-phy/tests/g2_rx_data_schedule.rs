@@ -15,7 +15,7 @@
 use radio_phy::channel::{awgn, frequency_offset, mean_power, resample, Rng};
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::IfftConfig;
-use radio_phy::ppdu::{build_ppdu, data_symbols, Rate};
+use radio_phy::ppdu::{build_ppdu, build_ppdu_bits, data_symbols, Rate};
 use radio_phy::rx_data::{rx_end_ages, DataTiming, Division, RxDataSchedule, Window};
 use radio_phy::rx_data_fixed::{RxDataEnd, RxDataEvent, RxDataFixed};
 use radio_phy::rx_front::RxConfig;
@@ -727,4 +727,53 @@ fn a_mark_after_signals_window_waits_for_the_verdict() {
         })
         .collect();
     assert_eq!(got, psdus[0]);
+}
+
+#[test]
+fn a_seed_of_zero_ends_with_the_frames_age() {
+    // A transmitter's seed of 0: SERVICE and the PSDU sent clear, so SERVICE's first seven
+    // bits are all zero and the receiver finds no seed; the seed-zero end comes where the last
+    // octet would have been and carries the age too (the founder, 2026-11-25).
+    let cfg = IfftConfig::tx_default();
+    let scale = 1.0 / f64::from(1u32 << cfg.data.frac_bits());
+    for rate in [Rate::R6, Rate::R54] {
+        let octets = 24;
+        let mut clear = vec![0u8; 16];
+        for _ in 0..octets {
+            clear.extend((0..8).map(|i| (0x5au8 >> i) & 1));
+        }
+        clear.resize(data_symbols(rate, octets) * rate.data_bits_per_symbol(), 0);
+        let f: Vec<(f64, f64)> = build_ppdu_bits(&clear, rate, octets, &cfg)
+            .unwrap()
+            .iter()
+            .map(|s| (s.re as f64 * scale, s.im as f64 * scale))
+            .collect();
+        let p = mean_power(&f);
+        let mut x = vec![(0.0, 0.0); 400];
+        x.extend(f);
+        x.extend(vec![(0.0, 0.0); 600]);
+        let x = awgn(&x, 30.0, p, &mut Rng::new(5));
+        let gain = f64::from(ADC_FULL_SCALE) * 10f64.powf(-15.0 / 20.0) / p.sqrt();
+        let adc = to_adc(&x, gain);
+        let (run, s) = closed_loop(&adc, DataTiming::default());
+        held_to_the_model(&run, &s, "seed 0");
+        let ends: Vec<(usize, RxDataEnd)> = s
+            .events()
+            .iter()
+            .filter_map(|e| match e.1 {
+                RxDataEvent::End(end) => Some((e.0, end)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends.len(), 1, "{rate:?}: {ends:?}");
+        assert_eq!(ends[0].1, RxDataEnd::Seed, "{rate:?}");
+        let written = run
+            .ticks
+            .iter()
+            .filter(|&&t| t - HandoffTiming::default().tick() < ends[0].0)
+            .count();
+        let end = 400 + 400 + 80 * data_symbols(rate, octets);
+        let age = rx_end_ages(&run, &s)[0].1.unwrap();
+        assert_eq!(i64::from(age), written as i64 - end as i64, "{rate:?}");
+    }
 }

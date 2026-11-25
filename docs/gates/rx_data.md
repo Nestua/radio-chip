@@ -443,3 +443,57 @@ dropped.
 | `hw/rtl/rx_handoff.sv` | `adc_count`, `end_stamp` out |
 | `hw/rtl/rx_data.sv` | `adc_count`, `end_stamp` in; `rx_age`, `rx_age_valid` out |
 | gates | `g2_rx_data_schedule` (the age against the truth), `handoff` and `handoff_forced` (the stamp and the count), `rx_data` (the age at the pins); vectors regenerated |
+
+## 2026-11-25 · G3 · the age on `rx_end` (`rx_handoff`'s count and stamp, `rx_data`'s age)
+
+**What was built** (per the decided G0 above):
+- `hw/rtl/rx_handoff.sv`: `adc_count` (16 bits, a step per `in_valid`) and `end_stamp`,
+  registered at the tick where `len` applies a verdict with a length:
+  `adc_count − 1 − wr_off + slot_hend`, mod 2^16. Both reset to 0.
+- `hw/rtl/rx_data.sv`: `adc_count` and `end_stamp` in; `rx_age = adc_count − end_stamp` and
+  `rx_age_valid = rx_end && rx_end_status ≤ 1`, combinational in `rx_end`'s cycle.
+- The model: `HandoffRun::{written, stamps, count_before, stamp_at}` (`rx_handoff.rs`),
+  `rx_end_age` and `rx_end_ages` (`rx_data.rs`); `ppdu::build_ppdu_bits`, a PPDU from DATA
+  bits as sent, for a frame with a seed of 0 (`build_ppdu` refuses one).
+
+**Gates** (branch `r0-09-age-rtl`; the commit of this entry):
+
+| Gate | Command | Result |
+|---|---|---|
+| The age against the frame's true end (model, closed loop) | `cargo test -p radio-phy --test g2_rx_data_schedule` | every rate × 1, 24, 300, 1500 octets × −40, 0, +40 ppm: error 0 samples on all 96; a train of 10 frames at the shortest gap: 0 on each; a seed of 0 at 6 and 54 Mb/s: the seed-zero end with its age, exact; every other end without one |
+| Which ends, the wrap | `cargo test -p radio-phy --lib rx_data` | the decoded and seed-zero ends only; 5 − 65 530 = 11 |
+| `rx_handoff`'s count and stamp | `make -C hw handoff` | 0 mismatches in every configuration (R 8, 11, 16; W 4, 8, 12, 16); at R = 8, W = 12: 180 stamps compared in 4 978 336 cycles, the count past 2^16 in 6 plays (segment `count_wraps`: a stamp of 4164 after the wrap) |
+| The forced declarations | `make -C hw handoff_forced` | 240 cases, 0 differ |
+| `rx_data`'s age at its pins | `make -C hw rx_data` | 57 runs, 570 085 cycles, 58 ages (2 seed-zero, 18 whose subtraction wraps), 0 mismatches |
+| Lint | `make -C hw lint` | clean |
+
+**The tolerance is 0.** At 30 dB the acquisition finds T1's window exactly on every run, so
+the nominal end from SIGNAL is the transmitter's last sample and any difference is a defect.
+The sample clock's drift (up to 1.6 samples over a 1500-octet frame at 6 Mb/s and 40 ppm) is
+not in the age, by decision 4, and not in the gate's truth (the transmitter's samples).
+
+**Mutants** (each in a private copy; the gate named must fail):
+
+| Mutant | Gate | Result |
+|---|---|---|
+| model: stamp one sample early (`hold_end − 1`) | `g2_rx_data_schedule` | dies |
+| model: the count includes the end's own cycle (`w <= clock`) | `g2_rx_data_schedule` | dies |
+| model: stamp registered a cycle later | `g2_rx_data_schedule` | **survives**: rx_end is hundreds of cycles after the stamp; the cycle is bound by `make -C hw handoff` (S lines, every cycle) |
+| model: a truncated end carries an age / the seed end none / saturating subtraction | `--lib` unit test, and the seed-zero closed loop | die |
+| RTL `rx_handoff`: stamp without the − 1 | `handoff` | dies (4 978 336) |
+| RTL: the stamp from the old `hend` instead of `slot_hend` | `handoff` | dies |
+| RTL: the stamp taken at every tick | `handoff` | dies |
+| RTL: the count steps every cycle | `handoff` | dies |
+| RTL: the stamp not reset | `handoff` | dies (84) |
+| RTL `rx_data`: valid on status 0 only / on ≤ 2 / without `rx_end` | `rx_data` | die (2 / 4 / 570 011) |
+| RTL: `end_stamp − adc_count` / one less | `rx_data` | die (58 / 58) |
+| RTL: the stamp ignored (`rx_age = adc_count`) | `rx_data` | dies at lint (`end_stamp` unused, `-Wall`) |
+
+(One more mutant, `wr_off[C_W-2:0]` for `CNT_W'(wr_off)`, is the same 16 bits: equivalent,
+not counted.)
+
+### Open
+
+- The age leaves out the tracker's σ and the sample clock's drift (decision 4). If the MAC's
+  SIFS timing needs better than the ±18 samples of the standard's ±900 ns, σ can be added
+  in `rx_data` later without changing the interface.

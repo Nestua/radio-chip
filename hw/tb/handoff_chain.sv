@@ -34,6 +34,8 @@ module handoff_chain
     output logic signed [P-1:0]           out_cfo,
     output logic [7:0]                    out_tag,
     output logic                          hold,
+    output logic [15:0]                   adc_count,
+    output logic [15:0]                   end_stamp,
     // probe: the offset and whether it is registered
     output logic                          p_dc_v,
     output logic signed [Y_BITS-2:0]      p_dc_re,
@@ -52,7 +54,7 @@ module handoff_chain
         .acq_valid, .acq_fft, .acq_cfo,
         .sig_valid, .sig_tag, .sig_fail, .sig_symbols, .sig_patient,
         .out_ready, .out_valid, .out_end, .out_kind, .out_first, .out_re, .out_im,
-        .out_cfo, .out_tag, .hold
+        .out_cfo, .out_tag, .hold, .adc_count, .end_stamp
     );
 
     assign p_dc_v  = u_handoff.dc_v;

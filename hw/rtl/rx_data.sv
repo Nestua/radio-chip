@@ -35,8 +35,11 @@
 // windows complete have been decoded (their last trellis step + 7 cycles), and never before the
 // verdict when SIGNAL's window was complete. The drop to every block is the end itself.
 //
-// Not here yet: the age on rx_end (the founder's decision of 2026-11-24, with rx_handoff's
-// sample count: the next PR).
+// The age (the founder, 2026-11-25; docs/gates/rx_data.md): rx_age = adc_count − end_stamp
+// modulo 2^16, both from rx_handoff (the samples written before this cycle, and the frame's
+// end in that count, taken when the verdict was applied), with rx_age_valid on the decoded and
+// the seed-zero ends only (status 0 and 1). rx_age means nothing without rx_age_valid. Golden
+// model: radio_phy::rx_data::rx_end_age.
 
 `default_nettype none
 
@@ -60,6 +63,9 @@ module rx_data
     input  wire signed [Y_BITS-1:0]          in_im,
     input  wire signed [NCO_PHASE_BITS-1:0]  in_cfo,
     input  wire        [7:0]                 in_tag,
+    // the age's count and the frame's end in it, from rx_handoff
+    input  wire        [15:0]                adc_count,
+    input  wire        [15:0]                end_stamp,
     // the verdict, to rx_handoff
     output logic                             sig_valid,
     output logic       [7:0]                 sig_tag,
@@ -78,7 +84,9 @@ module rx_data
     output logic       [15:0]                oct_service,
     output logic                             rx_end,
     output logic       [2:0]                 rx_end_status,
-    output logic       [1:0]                 rx_end_info
+    output logic       [1:0]                 rx_end_info,
+    output logic                             rx_age_valid,
+    output logic       [15:0]                rx_age
 );
     localparam int N_W   = 18;   // beats of a packet: 144 + 80·1366 + 64 < 2^17
     localparam int K_W   = 11;   // windows, symbols (≤ 1366)
@@ -219,6 +227,8 @@ module rx_data
             rx_end_info   = kind_q[1] ? kind_q : 2'd0;
         end
     end
+    assign rx_age_valid = rx_end && rx_end_status <= 3'd1;
+    assign rx_age       = adc_count - end_stamp;
 
     // ------------------------------------------------------------------ next state
     logic            open_d, mark_d, ended_d, drain_d, vseen_d, vok_d, sigblk_d, mend_d, ready_d;

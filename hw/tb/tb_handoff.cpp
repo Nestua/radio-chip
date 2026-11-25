@@ -11,7 +11,11 @@
 //   - out_valid and the pins the same whatever out_ready is in that cycle, and no
 //     out_first on a mark;
 //   - the offset (a probe the wrapper brings out of the block): registered in exactly the
-//     cycle the schedule says, not the cycle before, with the model's value.
+//     cycle the schedule says, not the cycle before, with the model's value;
+//   - adc_count in every cycle: the samples played before that cycle since the reset, mod
+//     2^16 (run_handoff's count_before);
+//   - end_stamp in every cycle from the segment's first stamp on: the vectors' latest stamp
+//     (S lines: the cycle it is first seen in, the value), and not seen a cycle early.
 // A segment with a digest lists no beats: their count and a digest over cycle and fields.
 //
 // usage: sim_handoff <vectors.txt> <R> <D> <W>   (segments of other R or W are skipped; D
@@ -96,6 +100,7 @@ struct Segment {
     std::vector<Sample> s;
     std::map<long, Strobe> strobes;
     std::map<long, std::pair<long, long>> offsets;   // the cycle an offset is registered in
+    std::map<long, long> stamps;                      // the cycle a stamp is first seen in
     std::vector<std::pair<long, long>> away;
     std::vector<Beat> beats;
     long end = 0, count = 0;
@@ -105,7 +110,7 @@ struct Segment {
 struct Gate {
     Vhandoff_chain dut;
     long mismatches = 0, beats = 0, marks = 0, firsts = 0, strobes = 0, hold_cycles = 0, cycles = 0;
-    long offsets = 0, away_cycles = 0, valid_waiting = 0;
+    long offsets = 0, away_cycles = 0, valid_waiting = 0, stamps = 0, stamp_cycles = 0, wraps = 0;
     long resets_in_flight = 0, after_reset = 0;
     bool first_done = false;
     const Segment* seg = nullptr;
@@ -145,6 +150,8 @@ struct Gate {
         int hold_next = 0;
         uint64_t h = 0xcbf29ce484222325ull;
         long taken = 0;
+        long played = 0;                  // samples given before this cycle
+        long stamp = -1;                  // the latest stamp seen, -1 before the first
         const long stop = samples == s.s.size() ? s.end : -1;
         long c = 1;
         for (;; ++c) {
@@ -168,6 +175,8 @@ struct Gate {
                 dut.in_im = 0x800;
             }
             if (c == hold_from + 1) hold = hold_next;
+            const auto st = s.stamps.find(c);
+            if (st != s.stamps.end()) stamp = st->second;
             bool ready = !deaf && ready_at(s.pattern, c);
             for (const auto& a : s.away)
                 if (a.first <= c && c <= a.second) {
@@ -207,6 +216,15 @@ struct Gate {
                 ++cycles;
                 hold_cycles += hold;
                 if (dut.hold != hold) fail("hold", c, dut.hold, hold);
+                if (dut.adc_count != (played & 0xffff)) fail("adc_count", c, dut.adc_count, played & 0xffff);
+                if (stamp >= 0) {
+                    ++stamp_cycles;
+                    if (st != s.stamps.end()) ++stamps;
+                    if (dut.end_stamp != stamp) fail("end_stamp", c, dut.end_stamp, stamp);
+                }
+                const auto early = s.stamps.find(c + 1);
+                if (early != s.stamps.end() && dut.end_stamp == early->second && early->second != stamp)
+                    fail("end_stamp registered a cycle early", c, dut.end_stamp, stamp);
                 const auto o = s.offsets.find(c);
                 if (o != s.offsets.end()) {
                     ++offsets;
@@ -253,9 +271,11 @@ struct Gate {
                     ++beat;
                 }
             }
+            played += dut.in_valid;
             edge();
         }
         if (check) {
+            wraps += played > 0xffff;
             if (taken != s.count) fail("beats in the segment", c, taken, s.count);
             if (h != s.hash) fail("digest of the beats", c, static_cast<long long>(h), static_cast<long long>(s.hash));
         }
@@ -357,6 +377,10 @@ int main(int argc, char** argv) {
             long cycle = 0, re = 0, im = 0;
             if (!(f >> cycle >> re >> im)) return bad();
             s.offsets[cycle] = {re, im};
+        } else if (a == "S") {
+            long cycle = 0, v = 0;
+            if (!(f >> cycle >> v)) return bad();
+            s.stamps[cycle] = v;
         } else if (a == "V") {
             long cycle = 0;
             Strobe v;
@@ -389,11 +413,14 @@ int main(int argc, char** argv) {
     // A run of one segment has had no reset in flight: the segment again, with them.
     if (run_segments == 1) g.run(*only, index + 3);
     std::printf("handoff G3 (R = %d, D = %d, W = %d): %ld segments, %ld samples, %ld cycles, %ld beats "
-                "(%ld streams, %ld marks), %ld offsets, %ld verdict strobes, hold up in %ld cycles, the reader "
+                "(%ld streams, %ld marks), %ld offsets, %ld verdict strobes, %ld stamps (compared in %ld cycles), "
+                "the count wrapped %ld times, hold up in %ld cycles, the reader "
                 "away in %ld, a beat waiting for the reader in %ld, %ld resets in flight, %ld mismatches\n",
                 r, d, w, run_segments, samples, g.cycles, g.beats, g.firsts, g.marks, g.offsets, g.strobes,
-                g.hold_cycles, g.away_cycles, g.valid_waiting, g.resets_in_flight, g.mismatches);
-    if (run_segments == 0 || g.beats == 0 || g.firsts == 0 || g.marks == 0 || g.hold_cycles == 0 || g.offsets == 0) {
+                g.stamps, g.stamp_cycles, g.wraps, g.hold_cycles, g.away_cycles, g.valid_waiting,
+                g.resets_in_flight, g.mismatches);
+    if (run_segments == 0 || g.beats == 0 || g.firsts == 0 || g.marks == 0 || g.hold_cycles == 0 || g.offsets == 0 ||
+        g.stamps == 0) {
         std::cerr << "nothing compared — refusing to pass an empty gate\n";
         return 1;
     }

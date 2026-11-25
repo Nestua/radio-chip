@@ -45,7 +45,15 @@
 // not wait for out_ready. A beat that is not taken may be replaced at a tick: a sample by
 // the mark of its stream's end, and the pins go quiet until the next stream's first cycle.
 //
-// After a reset nothing of a packet is left: no beat, no hold, the tag 0.
+// The age's count and stamp (the founder, 2026-11-25; docs/gates/rx_data.md): adc_count, the
+// ADC samples written since reset, modulo 2^16 (a register: in cycle c, the samples whose
+// cycle is before c); end_stamp, the frame's end in that count, registered at the tick that
+// applies a verdict with a length: the count of T1's first window sample (adc_count − 1 −
+// wr_off, fixed for the packet) plus the frame's end from it (hend1 = SIGNAL_END + BACKOFF +
+// 80 per data symbol, the model's packet_end). rx_data gives rx_age = adc_count − end_stamp.
+//
+// After a reset nothing of a packet is left: no beat, no hold, the tag 0, the count and the
+// stamp 0.
 
 `default_nettype none
 
@@ -57,7 +65,8 @@ module rx_handoff
     localparam int P           = NCO_PHASE_BITS,
     localparam int L           = NCO_LUT_BITS,
     localparam int Q           = NCO_AMP_BITS,
-    localparam int X_W         = Y_BITS - 1     // the ADC's 12 bits
+    localparam int X_W         = Y_BITS - 1,    // the ADC's 12 bits
+    localparam int CNT_W       = 16             // the age's count (rx_handoff.rs: COUNT_BITS)
 ) (
     input  wire logic                     clk,
     input  wire logic                     rst_n,     // synchronous, active low
@@ -81,7 +90,9 @@ module rx_handoff
     output logic signed [Y_BITS-1:0]      out_im,
     output logic signed [P-1:0]           out_cfo,
     output logic [7:0]                    out_tag,
-    output logic                          hold
+    output logic                          hold,
+    output logic [CNT_W-1:0]              adc_count,
+    output logic [CNT_W-1:0]              end_stamp
 );
     // The model's constants (rx_front_fixed.rs: HandoffConfig::default, HANDOFF_TAIL,
     // MAX_DATA_SYMBOLS; IEEE 802.11-2020 §17.3.5.4 for the longest PPDU).
@@ -107,6 +118,10 @@ module rx_handoff
     always_ff @(posedge clk) begin
         if (!rst_n)        wr_cnt <= '0;
         else if (in_valid) wr_cnt <= wr_cnt + 1'b1;
+    end
+    always_ff @(posedge clk) begin
+        if (!rst_n)        adc_count <= '0;
+        else if (in_valid) adc_count <= adc_count + 1'b1;
     end
     ram_1w1r #(.W(2 * X_W), .DEPTH(HISTORY)) u_hist (
         .clk, .we(in_valid), .waddr(wr_cnt), .wdata({in_re, in_im}),
@@ -256,6 +271,7 @@ module rx_handoff
             tag       <= '0;
             rails     <= '0;
             c32       <= '0;
+            end_stamp <= '0;
         end else begin
             // Between ticks only the taking of beats moves the packet's state.
             if (x_mark) mark_v <= 1'b0;
@@ -293,6 +309,9 @@ module rx_handoff
                 open    <= open1 && !overrun;
                 hend    <= hend1;
                 lastr   <= lastr1;
+                // No sample is written in a tick's cycle (R ≥ 8 > 6), so adc_count and
+                // wr_off stand for the same samples here.
+                if (len) end_stamp <= adc_count - CNT_W'(1) - CNT_W'(wr_off) + CNT_W'(slot_hend);
                 patient <= pat_now;
                 vd      <= vd || len;
                 hold_q  <= hold2 && !give_up && !overrun;
