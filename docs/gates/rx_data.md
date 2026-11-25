@@ -314,7 +314,7 @@ One more was a dead branch, removed (`start` of SIGNAL in the ready rule).
 
 ### Open
 
-- The age on `rx_end`: a G0 proposal below (2026-11-25), waiting for the founder's answers.
+- The age on `rx_end`: decided 2026-11-25 (below); being built.
 - `rx_data` through the open ASIC flow (area and timing of the whole data path against ADR
   0010's 1.5 to 2.0 mm²).
 
@@ -392,3 +392,149 @@ until the questions below are answered, one at a time, each with a recommendatio
 | `hw/rtl/rx_handoff.sv` | the count (N bits; `W` is the back-off parameter), `out_first_n` |
 | `hw/rtl/rx_data.sv` | `in_first_n`, `adc_count` in; `rx_age`, `rx_age_valid` out |
 | gates | `handoff`, `handoff_forced`, `rx_data`, `g2_rx_data_schedule`, `g2_rx_handoff`, `g2_rx_handoff_schedule`, `g2_rx_data_stream` rerun; `hw/vectors/handoff.txt` and `rx_data.txt` regenerated |
+
+## 2026-11-25 · G0 (decided) · the age on `rx_end`: the founder's answers
+
+The founder answered the four questions above on 2026-11-25, each with the recommendation, and
+on question 2 chose the stamp in `rx_handoff` that the review had opened up over the plan's
+`out_first_n`.
+
+1. **Which ends.** Only the decoded end (status 0) and the seed-zero end (status 1) carry an
+   age; every other end gives `rx_age_valid` = 0.
+2. **Where, and how wide.** `rx_handoff` keeps a free-running 16-bit count of the ADC samples
+   written (`adc_count`) and a 16-bit **stamp** of the frame's end in that count
+   (`end_stamp`). `rx_data` gives `rx_age` = `adc_count` − `end_stamp`, modulo 2^16.
+3. **"Now".** The count of samples written before `rx_end`'s cycle: `adc_count` as a
+   register's output in that cycle, read combinationally. No second register.
+4. **The model.** The frame's nominal end, from SIGNAL, without the tracker's σ.
+   `run_handoff` gives the count and the stamp; the age is a function of the end, the count
+   and the stamp; `g2_rx_data_schedule` holds the age of every decoded frame to the frame's
+   true end at the antenna (`train`'s starts), within the timing estimate and the drift.
+
+**The stamp, as built.** The frame's end is known from the verdict on, and at the verdict it
+may already be in the past: a one-symbol frame ends 80 samples after SIGNAL, the verdict comes
+about 7 µs (140 samples) after SIGNAL. So the stamp is not taken when the frame's last sample
+is written. It is taken on the edge of the verdict strobe that `rx_handoff` keeps with a length
+(`accept && !sig_fail`: the tag of the packet declared last):
+
+    end_stamp ← (adc_count − 1 − wr_off) + sig_hend        (mod 2^16)
+
+(`age0` for `wr_off` in a declaration's own cycle.) `adc_count − 1 − wr_off` is the count of
+T1's first window sample of the packet declared last: both registers step on `in_valid` and
+`wr_off` counts the newest sample from that one, so their difference is fixed for the packet.
+`sig_hend` is `SIGNAL_END` + BACKOFF + 80·symbols, the model's `packet_end`, so BACKOFF is in
+(the slip the review found in the proposal). In the model the stamp is `packet_end` of the
+packet declared last, in ADC samples, mod 2^16, a register's output from the cycle after the
+strobe; the count in cycle c is the number of samples n with X(n) < c. A frame's last sample
+just written gives an age of 0.
+
+A first version took the stamp at the tick that applies the verdict. The independent review
+(below) showed that with the ADC paused after a frame no tick comes, while `rx_data` decodes
+the frame from the history and ends it: the age was the previous frame's (800 samples off in
+the review's case). The strobe always comes before its own frame's end, so the stamp is now
+fresh by construction.
+
+**Why a later packet cannot move the stamp first.** The stamp changes only on a verdict
+strobe, and strobes come from `rx_data`, which takes nothing after a mark until the present
+packet's end is out (ADR 0010, Context 3 rule 5): the next packet's strobe comes after the
+present packet's `rx_end`. The gates check both halves: the age of every decoded frame against
+its true end, in trains and with the ADC paused.
+
+The plan's `HandoffStart::at`, `out_first_n` and the adder of `frame_end` in `rx_data` are
+dropped.
+
+| Where | What |
+|---|---|
+| `radio_phy::rx_handoff` | `HandoffRun`: the count per cycle, the stamps |
+| `radio_phy::rx_data` | the age of an end from the count and the stamp; the ages of a closed-loop run |
+| `hw/rtl/rx_handoff.sv` | `adc_count`, `end_stamp` out (the stamp on the kept strobe) |
+| `hw/rtl/rx_data.sv` | `adc_count`, `end_stamp` in; `rx_age`, `rx_age_valid` out |
+| gates | `g2_rx_data_schedule` (the age against the truth), `handoff` and `handoff_forced` (the stamp and the count), `rx_data` (the age at the pins); vectors regenerated |
+
+## 2026-11-25 · G3 · the age on `rx_end` (`rx_handoff`'s count and stamp, `rx_data`'s age)
+
+**What was built** (per the decided G0 above):
+- `hw/rtl/rx_handoff.sv`: `adc_count` (16 bits, a step per `in_valid`) and `end_stamp`,
+  registered on the edge of a verdict strobe kept with a length:
+  `adc_count − 1 − wr_off + sig_hend`, mod 2^16 (`age0` for `wr_off` in a declaration's
+  cycle). Both reset to 0.
+- `hw/rtl/rx_data.sv`: `adc_count` and `end_stamp` in; `rx_age = adc_count − end_stamp` and
+  `rx_age_valid = rx_end && rx_end_status ≤ 1`, combinational in `rx_end`'s cycle.
+- The model: `HandoffRun::{written, stamps, count_before, stamp_at}` (`rx_handoff.rs`),
+  `rx_end_age` and `rx_end_ages` (`rx_data.rs`); `ppdu::build_ppdu_bits`, a PPDU from DATA
+  bits as sent, for a frame with a seed of 0 (`build_ppdu` refuses one).
+
+**Gates** (branch `r0-09-age-rtl`; the commit of this entry):
+
+| Gate | Command | Result |
+|---|---|---|
+| The age against the frame's true end (model, closed loop) | `cargo test -p radio-phy --test g2_rx_data_schedule` | every rate × 1, 24, 300, 1500 octets × −40, 0, +40 ppm: error 0 samples on all 96; a train of 10 frames at the shortest gap: 0 on each; the ADC paused 3000 clocks 1, 6, 20, 60, 120 samples after a frame: 0 on both frames; a seed of 0 at 6 and 54 Mb/s: the seed-zero end with its age, exact; every other end without one |
+| Which ends, the wrap | `cargo test -p radio-phy --lib rx_data` | the decoded and seed-zero ends only; 5 − 65 530 = 11 |
+| `rx_handoff`'s count and stamp | `make -C hw handoff` | 0 mismatches in every configuration (R 8, 11, 16; W 4, 8, 12, 16); at R = 8, W = 12: 186 stamps compared in 4 979 005 cycles, the count past 2^16 in 6 plays (segment `count_wraps`: a stamp of 4164 after the wrap) |
+| The forced declarations | `make -C hw handoff_forced` | 240 cases, 0 differ |
+| `rx_data`'s age at its pins | `make -C hw rx_data` | 57 runs, 570 085 cycles, 58 ages (2 seed-zero, 18 whose subtraction wraps), 0 mismatches |
+| Lint | `make -C hw lint` | clean |
+
+**The tolerance is 0.** At 30 dB the acquisition finds T1's window exactly on every run, so
+the nominal end from SIGNAL is the transmitter's last sample and any difference is a defect.
+The sample clock's drift (up to 1.6 samples over a 1500-octet frame at 6 Mb/s and 40 ppm) is
+not in the age, by decision 4, and not in the gate's truth (the transmitter's samples).
+
+**Mutants** (each in a private copy; the gate named must fail):
+
+| Mutant | Gate | Result |
+|---|---|---|
+| model: stamp one sample early (`hold_end − 1`) | `g2_rx_data_schedule` | dies |
+| model: the count includes the end's own cycle (`w <= clock`) | `g2_rx_data_schedule` | dies |
+| model: stamp registered a cycle later | `g2_rx_data_schedule` | **survives**: rx_end is hundreds of cycles after the stamp; the cycle is bound by `make -C hw handoff` (S lines, every cycle) |
+| model: the stamp at the tick that applies the verdict (the first version) | `g2_rx_data_schedule` (the ADC paused) | dies: 800 samples off |
+| model: a truncated end carries an age / the seed end none / saturating subtraction | `--lib` unit test, and the seed-zero closed loop | die |
+| RTL `rx_handoff`: stamp without the − 1 | `handoff` | dies (4 979 005) |
+| RTL: the stamp from `slot_hend` instead of `sig_hend` | `handoff` | dies |
+| RTL: the stamp on a failed verdict too | `handoff` | dies (41 826) |
+| RTL: `wr_off` for `age0` in a declaration's cycle | `handoff` | **survives**: a strobe with the new packet's tag in its own declaration's cycle; no reader can send one (the tag comes with the stream's first beat, 20 ticks later at the earliest); kept so that the block does what the model does |
+| RTL: the count steps every cycle | `handoff` | dies |
+| RTL: the stamp not reset | `handoff` | dies (84) |
+| RTL `rx_data`: valid on status 0 only / on ≤ 2 / without `rx_end` | `rx_data` | die (2 / 4 / 570 011) |
+| RTL: `end_stamp − adc_count` / one less | `rx_data` | die (58 / 58) |
+| RTL: the stamp ignored (`rx_age = adc_count`) | `rx_data` | dies at lint (`end_stamp` unused, `-Wall`) |
+
+(One more mutant, `wr_off[C_W-2:0]` for `CNT_W'(wr_off)`, is the same 16 bits: equivalent,
+not counted.)
+
+### Review (independent, 2026-11-25)
+
+- **Found:** the stamp at the tick that applies the verdict was stale when the ADC pauses
+  after a frame (no tick, the frame ended from the history): the previous frame's age, with
+  `rx_age_valid`. Reproduced in the model (a 3000-clock pause 6 to 60 samples after a frame:
+  806 against a true 6). Fixed: the stamp on the strobe's edge; gate
+  `a_pause_of_the_adc_after_a_frame_does_not_take_the_last_frames_stamp` (failed with 800,
+  passes).
+- **Found, low:** the `rx_data` bench's stamps are made up and the generator takes the latest
+  whatever its cycle; harmless (every early end has status 3 or 4), and the two blocks' order
+  is now held in the model's closed loop. The first packet after a reset: its strobe now
+  always stamps before its end.
+- **Confirmed sound:** a verdict and a declaration in one tick, overrun and watchdog ends,
+  `wr_off`'s 17 bits to 16, close declarations, resets in flight; no later packet can stamp
+  first (rule 5, a stronger reason than the first G0 gave); overlapping frames at 0 to 15 dB
+  gave no decoded end without its stamp; the gate numbers reproduce.
+
+- **Recheck of the fix (same reviewer):** the pause swept from 150 samples before to 120 after
+  the frame's end, four frames, 200 and 3000 clocks: every age exact, no stale stamp. Two low
+  findings: a strobe with tag 0 after a reset and before any declaration stamped from
+  `wr_off`, which has no reset, where the model stamped from sample 0 (fixed: no stamp in
+  either before the first declaration since reset); and the negative age below (open).
+
+### Open
+
+- **A negative age wraps** (the recheck): with the ADC paused within the frame's last few
+  samples (inside BACKOFF), `rx_data` can end the frame before its nominal end is written;
+  `rx_age_valid` with `rx_age` = 65 533 for −3, which the MAC cannot tell from about 3.3 ms.
+  A real ADC does not pause mid-frame; the founder's decision 2 says wrapping, no saturation.
+  For the founder: keep, or saturate a "negative" age (above, say, 2^15) to 0.
+- The RTL benches pause the ADC for 1 or 2 clocks only (`tb_idle`); the long pause is held
+  in the model's closed loop, and `handoff` binds the RTL's stamp to the model's cycle by
+  cycle.
+- The age leaves out the tracker's σ and the sample clock's drift (decision 4). If the MAC's
+  SIFS timing needs better than the ±18 samples of the standard's ±900 ns, σ can be added
+  in `rx_data` later without changing the interface.

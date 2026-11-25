@@ -3053,6 +3053,8 @@ struct HandoffCover {
     buffered: usize,
     /// Streams whose reader caught up with the antenna, and periods with more than 8 beats.
     long_periods: usize,
+    /// Stamps of the frame's end (verdicts applied with a length).
+    stamps: usize,
 }
 
 /// The reader of the hand-off's vectors: ready by a pattern of the cycle, and for the k-th
@@ -3288,6 +3290,10 @@ fn handoff_segment(
     for e in &run.estimates {
         writeln!(out, "D {} {} {}", e.done, e.dc.0, e.dc.1)?;
     }
+    for (cycle, stamp) in &run.stamps {
+        writeln!(out, "S {cycle} {stamp}")?;
+    }
+    c.stamps += run.stamps.len();
     for strobe in &run.verdicts {
         let (failed, symbols, patient) = match strobe.verdict {
             Some(verdict) => (0, verdict.data_symbols.min(2047), u8::from(verdict.patient)),
@@ -3931,7 +3937,7 @@ fn handoff_vectors(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "# A <from> <to>; D <cycle> <dc re> <dc im>; V <cycle> <tag> <failed> <symbols> <patient>;"
+        "# A <from> <to>; D <cycle> <dc re> <dc im>; S <cycle> <end_stamp>; V <cycle> <tag> <failed> <symbols> <patient>;"
     )?;
     writeln!(
         out,
@@ -4042,7 +4048,30 @@ fn handoff_vectors(out: &mut impl Write) -> io::Result<()> {
         )));
     }
 
+    // The age's count past 2^16: silence for 66 000 samples, then a frame told its length,
+    // so the stamp is taken after the count has wrapped (the founder, 2026-11-25).
+    let mut x = vec![(0, 0); 66_000];
+    x.extend(handoff_scene(&[100], 500, 700, 0x4A0D_4000)?);
+    let mut reader = by_number(0, 35, 7);
+    let stamps = c.stamps;
+    handoff_segment(
+        Some(out),
+        "count_wraps",
+        &x,
+        12,
+        8,
+        0,
+        &[],
+        &mut reader,
+        true,
+        &mut c,
+    )?;
+    if c.stamps == stamps {
+        return Err(io::Error::other("the count's segment has no stamp"));
+    }
+
     if c.marks.contains(&0)
+        || c.stamps == 0
         || c.lengths == 0
         || c.failures == 0
         || c.patient == 0

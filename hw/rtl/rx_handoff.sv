@@ -45,7 +45,15 @@
 // not wait for out_ready. A beat that is not taken may be replaced at a tick: a sample by
 // the mark of its stream's end, and the pins go quiet until the next stream's first cycle.
 //
-// After a reset nothing of a packet is left: no beat, no hold, the tag 0.
+// The age's count and stamp (the founder, 2026-11-25; docs/gates/rx_data.md): adc_count, the
+// ADC samples written since reset, modulo 2^16 (a register: in cycle c, the samples whose
+// cycle is before c); end_stamp, the frame's end in that count, registered on the edge of a
+// verdict strobe that is kept with a length (the tag of the packet declared last): the count of T1's first window sample (adc_count − 1 −
+// wr_off, fixed for the packet) plus the frame's end from it (SIGNAL_END + BACKOFF + 80 per data
+// symbol, the model's packet_end). rx_data gives rx_age = adc_count − end_stamp.
+//
+// After a reset nothing of a packet is left: no beat, no hold, the tag 0, the count and the
+// stamp 0.
 
 `default_nettype none
 
@@ -57,7 +65,8 @@ module rx_handoff
     localparam int P           = NCO_PHASE_BITS,
     localparam int L           = NCO_LUT_BITS,
     localparam int Q           = NCO_AMP_BITS,
-    localparam int X_W         = Y_BITS - 1     // the ADC's 12 bits
+    localparam int X_W         = Y_BITS - 1,    // the ADC's 12 bits
+    localparam int CNT_W       = 16             // the age's count (rx_handoff.rs: COUNT_BITS)
 ) (
     input  wire logic                     clk,
     input  wire logic                     rst_n,     // synchronous, active low
@@ -81,7 +90,9 @@ module rx_handoff
     output logic signed [Y_BITS-1:0]      out_im,
     output logic signed [P-1:0]           out_cfo,
     output logic [7:0]                    out_tag,
-    output logic                          hold
+    output logic                          hold,
+    output logic [CNT_W-1:0]              adc_count,
+    output logic [CNT_W-1:0]              end_stamp
 );
     // The model's constants (rx_front_fixed.rs: HandoffConfig::default, HANDOFF_TAIL,
     // MAX_DATA_SYMBOLS; IEEE 802.11-2020 §17.3.5.4 for the longest PPDU).
@@ -107,6 +118,10 @@ module rx_handoff
     always_ff @(posedge clk) begin
         if (!rst_n)        wr_cnt <= '0;
         else if (in_valid) wr_cnt <= wr_cnt + 1'b1;
+    end
+    always_ff @(posedge clk) begin
+        if (!rst_n)        adc_count <= '0;
+        else if (in_valid) adc_count <= adc_count + 1'b1;
     end
     ram_1w1r #(.W(2 * X_W), .DEPTH(HISTORY)) u_hist (
         .clk, .we(in_valid), .waddr(wr_cnt), .wdata({in_re, in_im}),
@@ -154,6 +169,7 @@ module rx_handoff
     // overrun): below WATCHDOG + TAIL + HISTORY = 110 008 + BACKOFF, inside C_W bits. Past
     // that it may wrap: nothing compares it once the last sample is taken.
     logic [C_W-1:0]       wr_off;
+    logic                 declared;     // a packet declared since reset (the stamp needs one)
     logic [C_W-1:0]       tkn;          // samples the reader has taken
     logic [C_W-1:0]       ft;           // samples read from the history
     logic [C_W-1:0]       hend;         // the hold's end: the frame's last sample and one
@@ -256,7 +272,10 @@ module rx_handoff
             tag       <= '0;
             rails     <= '0;
             c32       <= '0;
+            end_stamp <= '0;
+            declared  <= 1'b0;
         end else begin
+            if (declare) declared <= 1'b1;
             // Between ticks only the taking of beats moves the packet's state.
             if (x_mark) mark_v <= 1'b0;
             if (x_end)  open   <= 1'b0;
@@ -278,6 +297,12 @@ module rx_handoff
                     rd_ptr <= fft_q;
                 end
             end
+            if (accept && !sig_fail && (declared || declare))
+                // The stamp on the strobe's own edge, from the packet declared last (the one
+                // whose tag it carries): its window's count is adc_count − 1 − wr_off, or, in
+                // a declaration's cycle, − age0. Not at the tick that applies the verdict: a
+                // paused ADC gives no tick (the review of 2026-11-25).
+                end_stamp <= adc_count - CNT_W'(1) - CNT_W'(declare ? age0 : wr_off) + CNT_W'(sig_hend);
             if (accept) begin
                 slot_v    <= 1'b1;
                 slot_fail <= sig_fail;

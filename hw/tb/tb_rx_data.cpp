@@ -3,7 +3,9 @@
 // pins a cycle at a time. Each run: reset, then beat i offered from max(its avail, the cycle
 // after beat i − 1 was taken) until taken; it must be taken in the vectors' cycle. Every
 // verdict strobe, rx_start, octet and rx_end must be out in its cycle with its fields, and no
-// other cycle may show one. Exit code 0 = gate passed.
+// other cycle may show one. The age's inputs as the vectors give them (adc_count = count0 +
+// cycle / 8 mod 2^16; end_stamp from each P line's cycle on): rx_age_valid exactly with the
+// ends that carry an age, rx_age with its value. Exit code 0 = gate passed.
 
 #include <cstdint>
 #include <cstdio>
@@ -26,11 +28,13 @@ struct Beat {
 struct Verdict { unsigned tag, fail, symbols, patient; };
 struct Start { unsigned rate, length; };
 struct Octet { unsigned data, first, seed, service; };
-struct End { unsigned status, info; };
+struct End { unsigned status, info, age_valid, age; };
 struct Run {
     std::string label;
     unsigned ratio = 0;
     long last = 0;
+    unsigned count0 = 0;
+    std::map<long, unsigned> stamps;
     std::vector<Beat> beats;
     std::map<long, Verdict> verdicts;
     std::map<long, Start> starts;
@@ -108,8 +112,14 @@ int main(int argc, char** argv) {
             r.octets[c] = o;
         } else if (t == "E") {
             End e;
-            f >> c >> e.status >> e.info;
+            f >> c >> e.status >> e.info >> e.age_valid >> e.age;
             r.ends[c] = e;
+        } else if (t == "C") {
+            f >> r.count0;
+        } else if (t == "P") {
+            unsigned v;
+            f >> c >> v;
+            r.stamps[c] = v;
         } else if (t == "Z") {
             f >> r.last;
         } else {
@@ -123,7 +133,7 @@ int main(int argc, char** argv) {
     }
 
     Vrx_data dut;
-    long total_cycles = 0, total_beats = 0, events = 0, mismatches = 0, ran = 0;
+    long total_cycles = 0, total_beats = 0, events = 0, mismatches = 0, ran = 0, ages = 0;
     for (const Run& r : runs) {
         if (!only.empty() && r.label != only) continue;
         ++ran;
@@ -146,7 +156,12 @@ int main(int argc, char** argv) {
         };
         size_t bi = 0;
         long prev_taken = -1;
+        unsigned stamp = 0x5a5a;   // garbage before the first stamp
         for (long c = 0; c <= r.last; ++c) {
+            const auto p = r.stamps.find(c);
+            if (p != r.stamps.end()) stamp = p->second;
+            dut.adc_count = (r.count0 + static_cast<unsigned>(c / 8)) & 0xffff;
+            dut.end_stamp = stamp;
             // The beat offered in this cycle.
             bool offer = false;
             if (bi < r.beats.size()) {
@@ -223,6 +238,12 @@ int main(int argc, char** argv) {
                         bad(c, "oct_service", dut.oct_service, o->second.service);
                 }
             }
+            const unsigned age_valid = e != r.ends.end() && e->second.age_valid;
+            if (dut.rx_age_valid != age_valid) bad(c, "rx_age_valid", dut.rx_age_valid, age_valid);
+            if (age_valid) {
+                ++ages;
+                if (dut.rx_age != e->second.age) bad(c, "rx_age", dut.rx_age, e->second.age);
+            }
             if (e == r.ends.end()) {
                 if (dut.rx_end) bad(c, "rx_end", 1, 0);
             } else {
@@ -243,9 +264,9 @@ int main(int argc, char** argv) {
     }
     dut.final();
 
-    std::printf("rx_data G3: %ld runs, %ld cycles, %ld beats, %ld events, %ld mismatches\n", ran,
-                total_cycles, total_beats, events, mismatches);
-    if (ran == 0 || events == 0) {
+    std::printf("rx_data G3: %ld runs, %ld cycles, %ld beats, %ld events, %ld ages, %ld mismatches\n", ran,
+                total_cycles, total_beats, events, ages, mismatches);
+    if (ran == 0 || events == 0 || (only.empty() && ages == 0)) {
         std::cerr << "nothing checked — refusing to pass an empty gate\n";
         return 1;
     }

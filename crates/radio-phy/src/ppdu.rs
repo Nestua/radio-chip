@@ -299,6 +299,27 @@ pub fn build_ppdu(
     Ok(frame)
 }
 
+/// A PPDU with DATA bits given as they are sent (already scrambled, or not), for frames
+/// [`build_ppdu`] will not make: a transmitter's seed of 0 is SERVICE and PSDU sent clear,
+/// which a receiver must end with no scrambler seed (IEEE 802.11-2020 §17.3.5.5: the seed is
+/// non-zero). `data` must be N_SYM · N_DBPS bits for `length` octets at `rate`.
+pub fn build_ppdu_bits(
+    data: &[u8],
+    rate: Rate,
+    length: usize,
+    config: &IfftConfig,
+) -> Result<Vec<Iq>, PpduError> {
+    let signal = signal_bits(rate, length)?;
+    if data.len() != data_symbols(rate, length) * rate.data_bits_per_symbol() {
+        return Err(PpduError::PsduLength(length));
+    }
+    let mut frame = short_training_field(config)?;
+    frame.extend(long_training_field(config)?);
+    frame.extend(modulate_bits(&signal, Rate::R6, 0, config)?);
+    frame.extend(modulate_bits(data, rate, 1, config)?);
+    Ok(frame)
+}
+
 /// FNV-1a 64-bit hash of a frame's raw samples (re then im, little-endian `i64`): lets a test
 /// pin a recorded frame without committing every sample.
 pub fn frame_hash(frame: &[Iq]) -> u64 {
@@ -310,4 +331,23 @@ pub fn frame_hash(frame: &[Iq]) -> u64 {
         }
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ppdu_from_its_own_data_bits_is_the_same_ppdu() {
+        let cfg = IfftConfig::tx_default();
+        let psdu: Vec<u8> = (0..57u8).map(|i| i.wrapping_mul(37)).collect();
+        for rate in [Rate::R6, Rate::R36, Rate::R54] {
+            let bits = data_bits(&psdu, rate, 0x5d).unwrap();
+            assert_eq!(
+                build_ppdu_bits(&bits, rate, psdu.len(), &cfg).unwrap(),
+                build_ppdu(&psdu, rate, 0x5d, &cfg).unwrap()
+            );
+            assert!(build_ppdu_bits(&bits[1..], rate, psdu.len(), &cfg).is_err());
+        }
+    }
 }
