@@ -7,8 +7,8 @@
 // (G0), tests/g0_rx_track.rs.
 //
 // One shared multiplier (the founder's choice, 2026-11-24): MA × MB bits signed, operands
-// registered on the edge that issues; the two halves of MA times MB on the next edge, their sum
-// on the one after (pipelined, the founder's choice of 2026-11-25: the single-cycle product
+// registered on the edge that issues; the four products of the halves of MA and MB (12 × 22
+// bits) on the next edge, their sum on the one after (pipelined, the founder's choice of 2026-11-25: the single-cycle product
 // was the data path's worst path through the open flow, docs/gates/silicon_probe.md). A
 // sequencer issues at most one product a clock and reads it three edges later. Every product
 // of the block goes through it.
