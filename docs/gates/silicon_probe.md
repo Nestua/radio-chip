@@ -275,3 +275,58 @@ Reports and logs are kept on the server in `/data/radio-chip/asic-pipe-keep` and
   the product (one edge more)?
 - The stores: change `rx_symbol`, `rx_deint` and `rx_channel` to single-port access so they
   can be IHP macros, or keep flip-flops and accept the area?
+
+
+## 2026-11-25 · probe · `rx_data` at 160 MHz, and with the PDK's two-port SRAM macros
+
+These are two more runs with the same flow, image, platform, corner, clock (6.25 ns) and
+settings as above, by hand on the build server. Reports are kept in
+`/data/radio-chip/asic-fft-keep` and `asic-sram-keep`.
+
+| `rx_data` | Flip-flops | Design area, routed | Worst slack at 6.25 ns | TNS | Power (flow's estimate) | Worst path |
+|---|---|---|---|---|---|---|
+| 5687060 (#92: `fft64`'s twiddle a stage ahead), stores as flip-flops | 26 891 | 3.74 mm² | **+0.16 ns** | **0** | 437 mW | `rx_symbol` `p1_slot` → `p2_ii` |
+| 5687060, stores as SRAM macros (9 macros) | 14 712 | **3.00 mm²** (macros 0.41) | −3.29 ns | −171 ns | **237 mW** | an SRAM macro's read (`rx_symbol`'s slot) into the products in the same cycle |
+
+**What it says**
+- **The data path closes 160 MHz at 130 nm** with its stores as flip-flops. This is one
+  corner (typical), default settings and no sign-off, as before. It took three changes, all
+  without changing a value:
+  - `rx_track`'s product in two stages of four 12 × 22 products (#90, #91);
+  - `rx_channel`'s product in three stages (#90);
+  - `fft64`'s twiddle registered a stage ahead (#92).
+- **The PDK has two-port macros, and the stores fit them with no change of architecture.**
+  The open PDK (IHP-Open-PDK at e73adb4, Apache-2.0, `ihp-sg13g2/libs.ref/sg13g2_sram`) has
+  `RM_IHPSG13_2P_*` with one port per side and one clock on both. That is exactly
+  `ram_1w1r`'s contract (`memory.md`, 2026-11-19). The flow's image ships only the
+  single-port set, so the entry above wrongly concluded that a change of architecture was
+  needed; with the two-port macros none is.
+- **How the macros were used.** `tools/syn/ihp_sg13g2/ram_1w1r.sv` gives `ram_1w1r` a body
+  for this flow alone: macros of 64 × 32 and 64 × 22 side by side, the cheapest mix for the
+  width, with port A writing and port B reading. The macros' LEF, Liberty (typ/slow/fast)
+  and GDS are passed as `ADDITIONAL_LEFS`, `ADDITIONAL_TYP_LIBS` (and slow, fast) and
+  `ADDITIONAL_GDS` in the run's `config.mk`. The IHP platform reads macro libraries from the
+  per-corner variables, not `ADDITIONAL_LIBS`; the first attempt failed in synthesis for
+  that reason. RTL and gates are unchanged.
+- **What the macros buy:**
+  - 0.74 mm² of area (−20 %);
+  - 12 200 flip-flops fewer;
+  - about 200 mW at the flow's default activity (a ranking only, as before).
+- **What they cost.** The macro's read takes 3.22 ns from its clock to `B_DOUT` (typical
+  corner). `rx_symbol` multiplies the words it reads from its slots and from `rx_channel`'s
+  `Hs` in the next cycle, as `ram_1w1r`'s latency of 1 allows, so that path misses by
+  3.29 ns. The other consumers register what they read at once (`rx_symbol`'s gains read,
+  `r2_g`; `rx_deint`'s banks behind a lane multiplexer), so they are not in this miss. The
+  review of this entry pointed that out.
+- **The way out** is a register between those reads and `rx_symbol`'s products: one more
+  edge in `rx_symbol`'s latencies, with the schedule restated. A read latency of 2 for every
+  store would also do it, but it is more than this run shows to be needed. Whether the
+  registered reads then close 160 MHz is a further run.
+- **The run.** The configuration is committed as `tools/syn/ihp_sg13g2/rx_data_sram.mk`,
+  with the steps to repeat it. The script exited 1 at its very end, after the final report
+  `6_report` and the merged GDS were written; the figures are from that report.
+
+**Open, for the founder**
+- The stores as macros at 160 MHz: register `rx_symbol`'s slot and `Hs` reads (one more
+  edge in `rx_symbol`, the schedule restated, then a run with macros) for 0.74 mm² and about
+  200 mW, or keep flip-flops?
