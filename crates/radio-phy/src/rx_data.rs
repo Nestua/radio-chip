@@ -71,13 +71,15 @@
 //!   9; its φ request on max(pilots + 48, θ, the last first soft value + 41) + 10; φ 18 after
 //!   the CORDIC took it; the first soft value on F = max(φ, the scale's take, for data the
 //!   verdict's take V + 1) + 8, then one a clock, 48.
-//! - **`rx_track`**: start taken on c₀ + 1 (registered from the first beat); SIGNAL's θ on
-//!   start + 5 (+ 3 without a ratio). A step: T = max(pilots + 1, the last step's end) + 1;
-//!   outer request T + 6, inner max(T + 10, the outer's take); λ at C = max(T + 14, the
-//!   variance's take + 1); G₀ = max(C + 7, outer angle + 2), G₁ = max(G₀ + 1, inner angle + 2).
-//!   SIGNAL's step ends on G₁ + 10 (G₁ + 2 when the packet measures nothing). A data symbol:
-//!   its division asked on G₁ + 10 (26 quotient bits), θ 5 after its done; with nothing
-//!   measured θ on G₁ + 3. The end of a data step is its θ.
+//! - **`rx_track`** (its multiplier pipelined, the founder's choice of 2026-11-25: a product
+//!   read three edges after its issue): start taken on c₀ + 1 (registered from the first
+//!   beat); SIGNAL's θ on start + 7 (+ 4 without a ratio). A step: T = max(pilots + 1, the last
+//!   step's end) + 1; outer request T + 7, inner max(T + 11, the outer's take); λ at C =
+//!   max(T + 15, the variance's take + 1); G₀ = max(C + 9, outer angle + 2), G₁ = max(G₀ + 1,
+//!   inner angle + 2). SIGNAL's step ends on G₁ + 13 (G₁ + 3 when the packet measures nothing).
+//!   A data symbol: its division asked on G₁ + 13 (26 quotient bits), θ 6 after its done; with
+//!   nothing measured θ on G₁ + 4. The end of a data step is its θ. (`rx_channel`'s multiplier,
+//!   pipelined the same day, moves none of its latencies.)
 //! - **`rx_deint`**: SIGNAL's block taken c₀ + 1, the data's V + 1; a symbol's first step
 //!   v_valid on max(its last soft value + 1, the block's take, the last step − 1) + 2, then a
 //!   step an edge.
@@ -108,18 +110,18 @@
 //! | T1, T2, SIGNAL taken in cycles | 0 … 63, 64 … 127, 144 … 207 |
 //! | T2's last bin taken (with SIGNAL's sample 62); chan_valid | 220; 283 |
 //! | quotients: BPSK's scale, outer, inner, variance | 304, 320, 336, 350 |
-//! | SIGNAL: its bins taken; pilots; θ₀ | 221 … 284; 293; 6 |
-//! | its step: T; outer taken, inner taken; G₁; end | 295; 302, 320; 360; 370 |
+//! | SIGNAL: its bins taken; pilots; θ₀ | 221 … 284; 293; 8 |
+//! | its step: T; outer taken, inner taken; G₁; end | 295; 303, 321; 362; 375 |
 //! | its φ asked, taken, out; first soft value | 351, 352, 370; 378 |
 //! | its 24 steps; **the verdict** (seen in cycle 482) | 428 … 451; **481** |
 //! | data window (waits for the flush: 207 + 65) | 272 … 335 |
 //! | its bins taken; pilots; T | 349 … 412; 421; 423 |
-//! | outer taken, inner taken; G₁; the fit taken, done; θ | 430, 448; 467; 478, 504; 509 |
-//! | the data's scale taken (after the fit), q_valid | 505; 526 |
-//! | φ asked, out; first soft value | 519, 538; 546 |
-//! | 214 steps | 596 … 809 |
-//! | bit 0 (step 95), bit 117; the flush's 96 bits | 696, 813; 814 … 909 |
-//! | octet 0 (bit 23), 11 (bit 111), 12 (bit 119), **23, the end** | 720, 808, 816, **904** |
+//! | outer taken, inner taken; G₁; the fit taken, done; θ | 431, 449; 468; 482, 508; 514 |
+//! | the data's scale taken (after the fit), q_valid | 509; 530 |
+//! | φ asked, out; first soft value | 524, 543; 551 |
+//! | 214 steps | 601 … 814 |
+//! | bit 0 (step 95), bit 117; the flush's 96 bits | 701, 818; 819 … 914 |
+//! | octet 0 (bit 23), 11 (bit 111), 12 (bit 119), **23, the end** | 725, 813, 821, **909** |
 //!
 //! [`RxDataFixed`]: crate::rx_data_fixed::RxDataFixed
 
@@ -170,20 +172,20 @@ const SOFT_READ: usize = 41;
 /// `cordic_iter`: the angle after its take; the next take after the angle.
 const ANGLE: usize = 17;
 /// `rx_track`: SIGNAL's θ after start (with a ratio, without).
-const TH0: usize = 5;
-const TH0_NONE: usize = 3;
+const TH0: usize = 7;
+const TH0_NONE: usize = 4;
 /// `rx_track`: the outer and inner requests, λ, the angles' products, from T.
-const REQ_OUTER: usize = 6;
-const REQ_INNER: usize = 10;
-const LAMBDA: usize = 14;
-const G0: usize = 7;
+const REQ_OUTER: usize = 7;
+const REQ_INNER: usize = 11;
+const LAMBDA: usize = 15;
+const G0: usize = 9;
 /// `rx_track`: SIGNAL's end after G₁ (measured, not), a data symbol's division asked after
 /// G₁, θ after the division's done, θ without a measurement after G₁.
-const SIG_END: usize = 10;
-const SIG_END_NONE: usize = 2;
-const FIT_ASK: usize = 10;
-const TH_FIT: usize = 5;
-const TH_NONE: usize = 3;
+const SIG_END: usize = 13;
+const SIG_END_NONE: usize = 3;
+const FIT_ASK: usize = 13;
+const TH_FIT: usize = 6;
+const TH_NONE: usize = 4;
 /// `rx_track`: the fit's quotient bits (`rx_track.md`, G0: |δ| < 2^26 on every frame).
 const FIT_QBITS: usize = 26;
 /// `rx_deint`: the first step after its triggers.

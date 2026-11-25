@@ -191,3 +191,25 @@ D = 0) through the bench: 0 mismatches. No arithmetic defect. It found, and this
 - The receiver's packet error figures with the variance saturated in the model: not rerun; the
   saturation changes only values above 3 nominal ones, which `usable` rejects either way, so no
   decision of `decode_ppdu_fixed` can change (`g2_rx_ofdm`, `g2_rx_data_stream` green).
+
+## 2026-11-25 · G3 · the multiplier pipelined (the founder's choice)
+
+The whole data path through the open flow (`silicon_probe.md`, 2026-11-25) missed 160 MHz by
+1.77 ns. Its worst path was a single-cycle product in this block. The founder chose on
+2026-11-25 to pipeline both products, accepting the extra latency and a restated schedule.
+
+**What changed.** The multiplier now has three stages:
+1. the operands chosen by the step, registered;
+2. the products of mb's two bytes;
+3. their sum.
+
+A product issued in step k is captured in step k + 3. To fit that, the issue order is now pg0·pg3, pg1·pg2, Σg·a, then po·b, pi·a and sa·b. The tracker's constants are ready in step 13 where they were ready in step 9, so `cr` is registered on CH + 14. The first division that needs `cr` is the outer coefficient, which is asked on CH + 21. **No latency of the block moves**, and the header and the bench are unchanged.
+
+| Gate | Command | Result |
+|---|---|---|
+| G3 | `make -C hw rx_channel` | 338 packets × 3 passes, 8293 quotients, 0 mismatches |
+
+**Mutants**, each in a private copy, all killed:
+- po captured a step early: 2794 mismatches;
+- mph shifted by 7;
+- sa captured a step late.
