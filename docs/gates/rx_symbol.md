@@ -186,3 +186,32 @@ of its own. **No defect in the RTL.** It found, and this entry fixed:
 - `SOFT_BITS` and `SQ_BITS` were written as numbers in the generator: now derived (soft_max,
   2·A); the input ranges (`chan_shift` ≤ 19, n in 1 … 21) are asserted; the header says the
   CORDIC's answer must be routed by the arbiter (it carries no tag).
+
+## 2026-11-25 · G3 · the slot's and Hs's reads registered (the founder's choice)
+
+**Why.** With the stores built as the PDK's two-port SRAM macros (`silicon_probe.md`,
+2026-11-25), a macro's read takes 3.22 ns. This block multiplied the slot's and `Hs`'s words
+in the cycle after the read, as `ram_1w1r`'s latency of 1 allows, and that path missed
+160 MHz by 3.29 ns. The founder chose on 2026-11-25 to register those two reads here,
+rather than lengthen every store's read.
+
+**What changed.** A stage `pq` holds Z and Hs between the read and the four products. The
+products pipeline is one edge longer, so **pil_valid comes 10 edges after its triggers**
+(it was 9). Every other latency in the header is counted from pil_valid or from the last
+product written, so it moves with it. Values are unchanged.
+
+| Gate | Command | Result |
+|---|---|---|
+| G3 | `make -C hw rx_symbol` (`kPil` 10) | 127 packets × 2 passes, 821 symbols, 40 462 soft subcarriers, 0 mismatches |
+| The data path | `make -C hw rx_data` on regenerated vectors | 58 runs, 0 mismatches |
+
+**Mutants**, each in a private copy:
+- The first three made a signal unused and died only at lint (`-Wall`): pq bypassed in the
+  valid chain, bypassed in the index chain, and `hs_rdata_re` replaced by `_im`.
+- With `UNUSEDSIGNAL` off in that copy, the gate itself kills each of these:
+
+| Mutant | Mismatches |
+|---|---|
+| `pq_v` from the issue (data a cycle late) | 1 |
+| `pq_k` from the issue counter | 4108 |
+| Z's I and Q swapped into `pq` | 72 382 |

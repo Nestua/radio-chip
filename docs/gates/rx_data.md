@@ -564,3 +564,17 @@ level follows θ by its signals, so it needed no change.
 path of both FSMs, proved the half-product split exact mod 2^68, recomputed the hand table
 from the module's rules (all entries agree), and found the bench checks each edge exactly.
 Docs only: the old latencies in the G0 tables and the BACKLOG marked superseded.
+
+## 2026-11-25 · the schedule restated for `rx_symbol`'s registered reads
+
+`rx_symbol`'s pil_valid is now 10 edges after its triggers (`PIL` = 10 in `radio_phy::rx_data`;
+`rx_symbol.md`, same date). The hand table of ADR 0010's case was re-derived by hand before
+the model was changed:
+- SIGNAL's pilots 294, T 296, φ 352 to 371, the first soft value 379, the steps 429 to 452;
+- **the verdict is registered on 482** (seen in 483; it was 481);
+- the data symbol: pilots 422, G1 469, the fit 483 to 509, θ 515, the scale 510 to 530, φ 525
+  to 544, the first soft value 552;
+- **the last octet and the end on 910** (seen in 911).
+
+The cadence is **246 clocks a symbol** (the pilots one edge later). `make -C hw rx_data`:
+0 mismatches.
