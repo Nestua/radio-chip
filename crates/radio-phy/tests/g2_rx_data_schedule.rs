@@ -306,6 +306,15 @@ fn a_long_frame_runs_at_one_symbol_in_240_clocks_whatever_the_rate() {
 
 /// The run with the schedule as the hand-off's reader, and what it gave.
 fn closed_loop(adc: &[(i16, i16)], t: DataTiming) -> (HandoffRun, RxDataSchedule) {
+    closed_loop_idle(adc, t, &|_| 0)
+}
+
+/// [`closed_loop`] with `idle(n)` idle clocks before sample n.
+fn closed_loop_idle(
+    adc: &[(i16, i16)],
+    t: DataTiming,
+    idle: &dyn Fn(usize) -> usize,
+) -> (HandoffRun, RxDataSchedule) {
     let mut s = schedule(t);
     let run = run_handoff(
         adc,
@@ -313,7 +322,7 @@ fn closed_loop(adc: &[(i16, i16)], t: DataTiming) -> (HandoffRun, RxDataSchedule
         &FixedRxConfig::default(),
         &HandoffConfig::default(),
         &HandoffTiming::default(),
-        &|_| 0,
+        idle,
         &mut s,
     )
     .unwrap();
@@ -776,4 +785,39 @@ fn a_seed_of_zero_ends_with_the_frames_age() {
         let age = rx_end_ages(&run, &s)[0].1.unwrap();
         assert_eq!(i64::from(age), written as i64 - end as i64, "{rate:?}");
     }
+}
+
+#[test]
+fn a_pause_of_the_adc_after_a_frame_does_not_take_the_last_frames_stamp() {
+    // The ADC stops for 3000 clocks a few samples after the second frame's end: no tick comes,
+    // while the data path decodes the frame from the history and ends it. Its age must be its
+    // own frame's (the independent review of 2026-11-25: a stamp taken at the tick that
+    // applies the verdict was the first frame's here).
+    let frames = [(Rate::R6, 24, 30.0, 0.0), (Rate::R54, 1, 30.0, 0.0)];
+    let (adc, _, starts) = train(&frames, 320, 4);
+    let ends: Vec<usize> = frames
+        .iter()
+        .zip(&starts)
+        .map(|(f, st)| st + 400 + 80 * data_symbols(f.0, f.1))
+        .collect();
+    let mut worst = 0i64;
+    for after in [1usize, 6, 20, 60, 120] {
+        let gap_at = ends[1] + after;
+        let (run, s) = closed_loop_idle(&adc, DataTiming::default(), &|n| {
+            if n == gap_at {
+                3000
+            } else {
+                0
+            }
+        });
+        let what = format!("a pause {after} samples after the frame");
+        held_to_the_model(&run, &s, &what);
+        let err = age_errors(&run, &s, &ends, &what);
+        worst = worst.max(err.iter().map(|e| e.abs()).max().unwrap());
+        assert!(
+            err.iter().all(|e| e.abs() <= AGE_TOLERANCE),
+            "{what}: {err:?}"
+        );
+    }
+    println!("pauses: the worst age error {worst}");
 }

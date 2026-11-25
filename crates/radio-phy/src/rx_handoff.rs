@@ -251,8 +251,9 @@ pub struct HandoffRun {
     /// X(n) of every sample: the cycle it was at the ADC's pins and written.
     pub written: Vec<usize>,
     /// The frame's end in the count of samples written (`end_stamp`, mod 2^[`COUNT_BITS`]),
-    /// with the first cycle it is a register's output in: one for every verdict applied with
-    /// a length (the founder, 2026-11-25; `docs/gates/rx_data.md`).
+    /// with the first cycle it is a register's output in: one for every verdict strobe kept
+    /// with a length, from the packet declared last (the founder, 2026-11-25;
+    /// `docs/gates/rx_data.md`).
     pub stamps: Vec<(usize, u16)>,
 }
 
@@ -432,6 +433,8 @@ struct Machine {
     /// The verdict kept for the next tick, and whether one was kept since the last.
     slot: Option<Option<SignalVerdict>>,
     kept: bool,
+    /// The window's first sample of the packet declared last (open or not).
+    fft: usize,
 }
 
 impl Machine {
@@ -510,6 +513,7 @@ pub fn run_handoff(
         opened: 0,
         slot: None,
         kept: false,
+        fft: 0,
     };
     let mut run = HandoffRun {
         ticks: ticks[..x.len()].to_vec(),
@@ -653,9 +657,6 @@ pub fn run_handoff(
                         o.hold_end = packet_end(o.fft_start, v.data_symbols, backoff);
                         o.last = o.hold_end.saturating_add(HANDOFF_TAIL);
                         m.patient = v.patient;
-                        // The stamp: the frame's last sample and one, in samples written;
-                        // registered on this tick's edge.
-                        run.stamps.push((c + 1, wrap_count(o.hold_end)));
                     }
                     (Some(_), None) => m.close(HandoffEnd::Stopped),
                     (None, _) => {}
@@ -676,6 +677,7 @@ pub fn run_handoff(
                     });
                 }
                 m.opened = m.opened.wrapping_add(1);
+                m.fft = a.fft_start;
                 let hold_end = packet_end(a.fft_start, MAX_DATA_SYMBOLS, backoff);
                 m.open = Some(Open {
                     packet: m.opened,
@@ -740,6 +742,14 @@ pub fn run_handoff(
             if !m.kept && packet == m.opened {
                 m.slot = Some(verdict);
                 m.kept = true;
+                // The stamp: the frame's last sample and one, in samples written, registered on
+                // the strobe's own edge. Not at the tick that applies the verdict: with the ADC
+                // paused no tick comes, and the data path may end the frame first (the review
+                // of 2026-11-25).
+                if let Some(v) = verdict {
+                    let end = packet_end(m.fft, v.data_symbols, backoff);
+                    run.stamps.push((c + 1, wrap_count(end)));
+                }
             }
         }
     }

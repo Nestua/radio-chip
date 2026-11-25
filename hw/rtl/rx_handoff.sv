@@ -47,10 +47,10 @@
 //
 // The age's count and stamp (the founder, 2026-11-25; docs/gates/rx_data.md): adc_count, the
 // ADC samples written since reset, modulo 2^16 (a register: in cycle c, the samples whose
-// cycle is before c); end_stamp, the frame's end in that count, registered at the tick that
-// applies a verdict with a length: the count of T1's first window sample (adc_count − 1 −
-// wr_off, fixed for the packet) plus the frame's end from it (hend1 = SIGNAL_END + BACKOFF +
-// 80 per data symbol, the model's packet_end). rx_data gives rx_age = adc_count − end_stamp.
+// cycle is before c); end_stamp, the frame's end in that count, registered on the edge of a
+// verdict strobe that is kept with a length (the tag of the packet declared last): the count of T1's first window sample (adc_count − 1 −
+// wr_off, fixed for the packet) plus the frame's end from it (SIGNAL_END + BACKOFF + 80 per data
+// symbol, the model's packet_end). rx_data gives rx_age = adc_count − end_stamp.
 //
 // After a reset nothing of a packet is left: no beat, no hold, the tag 0, the count and the
 // stamp 0.
@@ -294,6 +294,12 @@ module rx_handoff
                     rd_ptr <= fft_q;
                 end
             end
+            if (accept && !sig_fail)
+                // The stamp on the strobe's own edge, from the packet declared last (the one
+                // whose tag it carries): its window's count is adc_count − 1 − wr_off, or, in
+                // a declaration's cycle, − age0. Not at the tick that applies the verdict: a
+                // paused ADC gives no tick (the review of 2026-11-25).
+                end_stamp <= adc_count - CNT_W'(1) - CNT_W'(declare ? age0 : wr_off) + CNT_W'(sig_hend);
             if (accept) begin
                 slot_v    <= 1'b1;
                 slot_fail <= sig_fail;
@@ -309,9 +315,6 @@ module rx_handoff
                 open    <= open1 && !overrun;
                 hend    <= hend1;
                 lastr   <= lastr1;
-                // No sample is written in a tick's cycle (R ≥ 8 > 6), so adc_count and
-                // wr_off stand for the same samples here.
-                if (len) end_stamp <= adc_count - CNT_W'(1) - CNT_W'(wr_off) + CNT_W'(slot_hend);
                 patient <= pat_now;
                 vd      <= vd || len;
                 hold_q  <= hold2 && !give_up && !overrun;
