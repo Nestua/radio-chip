@@ -68,8 +68,9 @@
 //!   take. In a packet the requests come in the order SIGNAL's outer, inner, its φ, then per
 //!   data symbol outer, inner, φ (each is checked; a break is a violation).
 //! - **`rx_symbol`**, symbol s: pil_valid on max(its last bin, CH + 1, the last pilots + 48) +
-//!   10 (its slot's and Hs's reads registered before the products, 2026-11-25); its φ request on max(pilots + 48, θ, the last first soft value + 41) + 10; φ 18 after
-//!   the CORDIC took it; the first soft value on F = max(φ, the scale's take, for data the
+//!   10 (its slot's and Hs's reads registered before the products, 2026-11-25); its φ request
+//!   on max(pilots + 48, θ, the last first soft value + 41) + 10; φ 18 after the CORDIC took
+//!   it; the first soft value on F = max(φ, the scale's take, for data the
 //!   verdict's take V + 1) + 8, then one a clock, 48.
 //! - **`rx_track`** (its multiplier pipelined, the founder's choice of 2026-11-25: a product
 //!   read three edges after its issue): start taken on c₀ + 1 (registered from the first

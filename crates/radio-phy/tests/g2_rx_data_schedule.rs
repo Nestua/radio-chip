@@ -226,7 +226,7 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
     let (a, b) = data.steps.unwrap();
     assert_eq!((rel(a), rel(b)), (602, 815));
 
-    // The events (in the cycle after their register): the verdict and the start at 482, the
+    // The events (in the cycle after their register): the verdict and the start at 483, the
     // octets, the end with the last.
     let ev = s.events();
     assert!(matches!(ev[0].1, RxDataEvent::Verdict { .. }));
