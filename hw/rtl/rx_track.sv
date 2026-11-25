@@ -146,13 +146,23 @@ module rx_track
     logic signed [MA-1:0] ma;
     logic signed [MB-1:0] mb;
     logic signed [MP-1:0] mp;
-    // ma = hi·2^MAL + lo, lo unsigned: the products of the halves, then their sum.
+    // ma = ah·2^MAL + al, mb = bh·2^MBL + bl, the low halves unsigned: the four products of
+    // the halves (12 × 22 bits) on the first edge, their sum on the second. (Halves of ma
+    // alone left a 12 × 44 product per edge, still the data path's worst path at 160 MHz:
+    // docs/gates/silicon_probe.md, 2026-11-25.)
     localparam int MAL = MA / 2;
-    logic signed [MP-1:0] mph, mpl;
+    localparam int MBL = MB / 2;
+    wire signed [MA-MAL-1:0] ah = $signed(ma[MA-1:MAL]);
+    wire signed [MAL:0]    al = $signed({1'b0, ma[MAL-1:0]});
+    wire signed [MB-MBL-1:0] bh = $signed(mb[MB-1:MBL]);
+    wire signed [MBL:0]    bl = $signed({1'b0, mb[MBL-1:0]});
+    logic signed [MP-1:0] mhh, mhl, mlh, mll;
     always_ff @(posedge clk) begin
-        mph <= MP'($signed(ma[MA-1:MAL])) * MP'(mb);
-        mpl <= MP'($signed({1'b0, ma[MAL-1:0]})) * MP'(mb);
-        mp  <= (mph <<< MAL) + mpl;
+        mhh <= MP'(ah) * MP'(bh);
+        mhl <= MP'(ah) * MP'(bl);
+        mlh <= MP'(al) * MP'(bh);
+        mll <= MP'(al) * MP'(bl);
+        mp  <= (mhh <<< (MAL + MBL)) + (mhl <<< MAL) + (mlh <<< MBL) + mll;
     end
 
     // ---- packet state --------------------------------------------------------------------
