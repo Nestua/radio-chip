@@ -538,3 +538,24 @@ not counted.)
 - The age leaves out the tracker's σ and the sample clock's drift (decision 4). If the MAC's
   SIFS timing needs better than the ±18 samples of the standard's ±900 ns, σ can be added
   in `rx_data` later without changing the interface.
+
+## 2026-11-25 · the schedule restated for the pipelined tracker
+
+The founder's choice of 2026-11-25 (`rx_track.md`, `rx_channel.md`) pipelined two products:
+- `rx_track`'s multiplier now reads a product three edges after issue. Its constants in
+  `radio_phy::rx_data` move: θ0 7 / 4, the requests T + 7 / T + 11, λ T + 15, G0 C + 9,
+  SIGNAL's end G1 + 13 / + 3, the fit G1 + 13, θ 6 after the fit's done / G1 + 4.
+- `rx_channel`'s pipelining moves nothing.
+
+**The hand table** (ADR 0010's case, `g2_rx_data_schedule`) was re-derived by hand before the
+model was changed, and the gate failed until the model matched:
+- SIGNAL's verdict is unchanged (481): it waits for the soft values, not for the step.
+- The data symbol: T 423, outer taken 431, inner 449, G1 468, the fit 482 to 508, θ 514;
+  the data's scale 509 to 529; φ 524 to 543; the first soft value 551.
+- The last octet and the end come at **910** (was 905), so the latency is +5 clocks.
+
+**Cadence.** 245 clocks a symbol at every rate (was 240). The step with its division takes 91
+clocks (was 86). That is still 2.6 times real time.
+
+**The RTL**, `make -C hw rx_data` on the regenerated vectors: 57 runs, 0 mismatches. The top
+level follows θ by its signals, so it needed no change.

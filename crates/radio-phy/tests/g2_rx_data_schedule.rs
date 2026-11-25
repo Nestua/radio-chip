@@ -187,8 +187,8 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
             (Division::Outer, 305, 305, 319),
             (Division::Inner, 321, 321, 335),
             (Division::Variance, 337, 337, 349),
-            (Division::Fit(1), 478, 478, 504),
-            (Division::Scale(Modulation::Qam64), 484, 505, 525),
+            (Division::Fit(1), 482, 482, 508),
+            (Division::Scale(Modulation::Qam64), 484, 509, 529),
         ]
     );
     let sig = s.symbols()[0];
@@ -196,9 +196,9 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
         (rel(sig.bins), rel(sig.pilots), rel(sig.step)),
         (284, 293, 295)
     );
-    assert_eq!((rel(sig.outer.0), rel(sig.outer.1)), (301, 302));
-    assert_eq!((rel(sig.inner.0), rel(sig.inner.1)), (305, 320));
-    assert_eq!((rel(sig.g1), rel(sig.end), rel(sig.theta)), (360, 370, 6));
+    assert_eq!((rel(sig.outer.0), rel(sig.outer.1)), (302, 303));
+    assert_eq!((rel(sig.inner.0), rel(sig.inner.1)), (306, 321));
+    assert_eq!((rel(sig.g1), rel(sig.end), rel(sig.theta)), (362, 375, 8));
     assert_eq!(
         (rel(sig.phi.0), rel(sig.phi.1), rel(sig.phi.2)),
         (351, 352, 370)
@@ -212,19 +212,19 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
         (rel(data.bins), rel(data.pilots), rel(data.step)),
         (412, 421, 423)
     );
-    assert_eq!((rel(data.outer.0), rel(data.outer.1)), (429, 430));
-    assert_eq!((rel(data.inner.0), rel(data.inner.1)), (433, 448));
-    assert_eq!(rel(data.g1), 467);
+    assert_eq!((rel(data.outer.0), rel(data.outer.1)), (430, 431));
+    assert_eq!((rel(data.inner.0), rel(data.inner.1)), (434, 449));
+    assert_eq!(rel(data.g1), 468);
     let (ft, fd) = data.fit.unwrap();
-    assert_eq!((rel(ft), rel(fd), rel(data.theta)), (478, 504, 509));
+    assert_eq!((rel(ft), rel(fd), rel(data.theta)), (482, 508, 514));
     assert_eq!(
         (rel(data.phi.0), rel(data.phi.1), rel(data.phi.2)),
-        (519, 520, 538)
+        (524, 525, 543)
     );
-    assert_eq!(rel(data.scale), 527);
-    assert_eq!((rel(data.soft.0), rel(data.soft.1)), (546, 593));
+    assert_eq!(rel(data.scale), 531);
+    assert_eq!((rel(data.soft.0), rel(data.soft.1)), (551, 598));
     let (a, b) = data.steps.unwrap();
-    assert_eq!((rel(a), rel(b)), (596, 809));
+    assert_eq!((rel(a), rel(b)), (601, 814));
 
     // The events (in the cycle after their register): the verdict and the start at 482, the
     // octets, the end with the last.
@@ -241,10 +241,10 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
         })
         .collect();
     assert_eq!(octets.iter().map(|o| o.1).collect::<Vec<_>>(), psdus[0]);
-    assert_eq!(octets[0].0, 721);
-    assert_eq!(octets[11].0, 809);
-    assert_eq!(octets[12].0, 817);
-    assert_eq!(octets[23].0, 905);
+    assert_eq!(octets[0].0, 726);
+    assert_eq!(octets[11].0, 814);
+    assert_eq!(octets[12].0, 822);
+    assert_eq!(octets[23].0, 910);
     // Bits 0 … 117 a step apart, the flush's 96 bits from the edge after the last regular
     // one: octets eight clocks apart throughout.
     for j in 1..24 {
@@ -254,14 +254,17 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
         .iter()
         .find(|e| e.1 == RxDataEvent::End(RxDataEnd::Decoded))
         .unwrap();
-    assert_eq!(rel(end.0), 905);
+    assert_eq!(rel(end.0), 910);
 }
 
 #[test]
-fn a_long_frame_runs_at_one_symbol_in_240_clocks_whatever_the_rate() {
+fn a_long_frame_runs_at_one_symbol_in_245_clocks_whatever_the_rate() {
     // Beats offered every cycle (the reader behind the antenna): from one θ to the next the
     // sample before the window (θ + 2) and the window (1 + 63), the transform's last bin
-    // (77), the pilots (9), the step's start (2), the step with its division (86): 240.
+    // (77), the pilots (9), the step's start (2), the step with its division (91: the outer
+    // request T + 7, taken T + 8; the inner taken at the CORDIC's next free edge T + 26, its
+    // angle T + 43; G₁ = T + 45; the fit asked G₁ + 13, taken T + 59, done T + 85, θ T + 91;
+    // 86 before the tracker's multiplier was pipelined, 2026-11-25): 245.
     for rate in RATES {
         let (adc, _, _) = train(&[(rate, 1500, 30.0, 0.0)], 0, 2);
         let beats = first_stream(&adc);
@@ -271,7 +274,7 @@ fn a_long_frame_runs_at_one_symbol_in_240_clocks_whatever_the_rate() {
         let thetas: Vec<usize> = s.symbols().iter().skip(1).map(|r| r.theta).collect();
         assert!(thetas.len() > 50, "{rate:?}");
         for (i, w) in thetas.windows(2).enumerate().skip(1) {
-            assert_eq!(w[1] - w[0], 240, "{rate:?}, data symbol {}", i + 2);
+            assert_eq!(w[1] - w[0], 245, "{rate:?}, data symbol {}", i + 2);
         }
         // Each data window's first sample waits for the last θ (+ 2) and the FFT's flush.
         let wins: Vec<_> = s

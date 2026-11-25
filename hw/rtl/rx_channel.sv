@@ -11,7 +11,9 @@
 // and its |Hs|² goes into the running largest (the first pass, at the bins' pace). Then the
 // shift; a second pass reads the 52 words again, squares, rounds half to even, saturates to
 // 2^15 − 1, writes g(k), sums Σg and keeps the pilots' four gains. One multiplier, six times,
-// makes the tracker's products; the divisions in a fixed order: BPSK's scale, outer, inner,
+// makes the tracker's products (pipelined, the founder's choice of 2026-11-25: operands, then the
+// two halves' products, then their sum, read three edges after the issue; the single-cycle
+// product was a worst path through the open flow, docs/gates/silicon_probe.md); the divisions in a fixed order: BPSK's scale, outer, inner,
 // variance (12 bits, saturating), then a data scale per request.
 //
 // Bins: bin_valid with bin_t2 (0: T1's window, 1: T2's), the index, the value, at most one a
@@ -193,21 +195,31 @@ module rx_channel
     logic [NUM_W-1:0] num_o, num_i, num_v;
     logic [DEN_W-1:0] den28, den52;
 
-    // One multiplier, 37 × 16 bits.
-    logic [36:0] ma;
-    logic [15:0] mb;
+    // One multiplier, 37 × 16 bits, in three stages: the operands chosen by the step are
+    // registered, then the products of mb's two bytes, then their sum (mp: the product of the
+    // step three before). The order puts each product three steps ahead of its use.
+    logic [36:0] ma, mqa;
+    logic [15:0] mb, mqb;
+    logic [44:0] mph, mpl;
+    logic [52:0] mp;
     always_comb begin
         unique case (mstep)
             4'd0:    begin ma = 37'(pg[0]); mb = 16'(pg[3]); end
             4'd1:    begin ma = 37'(pg[1]); mb = 16'(pg[2]); end
-            4'd2:    begin ma = 37'(po);    mb = 16'(b_op);  end
-            4'd3:    begin ma = 37'(pi);    mb = 16'(a_op);  end
-            4'd4:    begin ma = 37'(gsum);  mb = 16'(a_op);  end
-            4'd5:    begin ma = sa;         mb = 16'(b_op);  end
+            4'd2:    begin ma = 37'(gsum);  mb = 16'(a_op);  end
+            4'd4:    begin ma = 37'(po);    mb = 16'(b_op);  end
+            4'd5:    begin ma = 37'(pi);    mb = 16'(a_op);  end
+            4'd6:    begin ma = sa;         mb = 16'(b_op);  end
             default: begin ma = '0;         mb = '0;         end
         endcase
     end
-    wire [52:0] mp = 53'(ma) * 53'(mb);
+    always_ff @(posedge clk) begin
+        mqa <= ma;
+        mqb <= mb;
+        mph <= 45'(mqa) * 45'(mqb[15:8]);
+        mpl <= 45'(mqa) * 45'(mqb[7:0]);
+        mp  <= {mph, 8'b0} + 53'(mpl);
+    end
 
     wire [55:0] x5   = {sps, 2'b00} + 56'(sps);      // 5·(spread >> s)
     wire [23:0] y208 = 24'(dn) * 24'd208;            // 52·dn·2^(12 − 10)
@@ -310,22 +322,22 @@ module rx_channel
             if (state == QUOT && !cr) begin
                 mstep <= mstep + 4'd1;
                 unique case (mstep)
-                    4'd0: po <= mp[29:0];
-                    4'd1: pi <= mp[29:0];
-                    4'd2: no <= mp[45:0];
-                    4'd3: ni <= mp[45:0];
-                    4'd4: sa <= mp[36:0];
-                    4'd5: spread <= mp;
-                    4'd6: d <= {no, 3'b000} + 50'(no) + 50'(ni);
-                    4'd7: s <= bitlen64(64'(d)) > 6'(M_BITS) ? bitlen64(64'(d)) - 6'(M_BITS) : 6'd0;
-                    4'd8: begin
+                    4'd3: po <= mp[29:0];
+                    4'd4: pi <= mp[29:0];
+                    4'd5: sa <= mp[36:0];
+                    4'd7: no <= mp[45:0];
+                    4'd8: ni <= mp[45:0];
+                    4'd9: spread <= mp;
+                    4'd10: d <= {no, 3'b000} + 50'(no) + 50'(ni);
+                    4'd11: s <= bitlen64(64'(d)) > 6'(M_BITS) ? bitlen64(64'(d)) - 6'(M_BITS) : 6'd0;
+                    4'd12: begin
                         dn  <= 16'(d >> s);
                         nos <= 16'(no >> s);
                         nis <= 16'(ni >> s);
                         sps <= spread >> s;
                         dz  <= d == '0;
                     end
-                    4'd9: begin
+                    4'd13: begin
                         // (3·no' << (K + 1)) + 14·dn over 28·dn: the coefficient rounded half up.
                         num_o <= (NUM_W'(nos) * NUM_W'(3) << (K_FRAC + 1)) + NUM_W'(dn) * NUM_W'(14);
                         num_i <= (NUM_W'(nis) << (K_FRAC + 1)) + NUM_W'(dn) * NUM_W'(14);

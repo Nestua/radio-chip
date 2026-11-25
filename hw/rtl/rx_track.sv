@@ -7,8 +7,11 @@
 // (G0), tests/g0_rx_track.rs.
 //
 // One shared multiplier (the founder's choice, 2026-11-24): MA × MB bits signed, operands
-// registered on the edge that issues, the product on the next; a sequencer issues at most one
-// product a clock and reads it two edges later. Every product of the block goes through it.
+// registered on the edge that issues; the two halves of MA times MB on the next edge, their sum
+// on the one after (pipelined, the founder's choice of 2026-11-25: the single-cycle product
+// was the data path's worst path through the open flow, docs/gates/silicon_probe.md). A
+// sequencer issues at most one product a clock and reads it three edges later. Every product
+// of the block goes through it.
 //
 // Packet: start with the CFO word and the fs/fc register (ratio; 0: none written, the prior
 // of an unknown offset). rate0 = word·ratio rounded half to even by RATIO_SHIFT (it always fits
@@ -17,8 +20,8 @@
 // coefficient, 2 the inner, 3 the variance; the others are ignored).
 //
 // Symbol: pilots on pil_valid into one register, free once the step has made its pair products
-// (8 edges after it starts). One set suffices: SIGNAL's register is free at most 14 edges after
-// its pilots (the start's 5 edges, then the step's 9) and the symbol block's pilots are at least
+// (8 edges after it starts). One set suffices: SIGNAL's register is free at most 16 edges after
+// its pilots (the start's 7 edges, then the step's 9) and the symbol block's pilots are at least
 // 48 clocks apart; every later symbol's come only after the last θ, as its window is placed by
 // that θ. A
 // step: the pair products p3·conj(p0) and p2·conj(p1) (eight products), each pair's CORDIC
@@ -33,13 +36,13 @@
 // nothing gives θ from the predicted drift.
 //
 // Latencies, in edges after the edge that takes (or brings) the trigger; the bench checks every
-// one. θ0: 5 after start (3 without a ratio). A step starts on edge T = max(its pilots' edge,
-// the last step's end) + 1; its outer request is up on T + 6 (the inner on T + 10). λ is asked on
-// C = max(T + 14, the last quotient's edge + 1) and the determinant follows; the angles' products
-// go on G0 = max(C + 7, the outer angle's edge + 1) and G1 = max(G0 + 1, the inner's + 1). Then
-// without a division: SIGNAL's step ends on G1 + 2 (its packet measures nothing) or G1 + 10; a
-// data symbol of a packet that measures nothing has θ on G1 + 3. A data symbol that measures:
-// dv_req on G1 + 10, held until dv_gnt; θ on the 5th edge after the one that brings dv_done
+// one. θ0: 7 after start (4 without a ratio). A step starts on edge T = max(its pilots' edge,
+// the last step's end) + 1; its outer request is up on T + 7 (the inner on T + 11). λ is asked on
+// C = max(T + 15, the last quotient's edge + 1) and the determinant follows; the angles' products
+// go on G0 = max(C + 9, the outer angle's edge + 1) and G1 = max(G0 + 1, the inner's + 1). Then
+// without a division: SIGNAL's step ends on G1 + 3 (its packet measures nothing) or G1 + 13; a
+// data symbol of a packet that measures nothing has θ on G1 + 4. A data symbol that measures:
+// dv_req on G1 + 13, held until dv_gnt; θ on the 6th edge after the one that brings dv_done
 // (div_serial: FIT_QBITS + 1 edges after its grant). The end of a data step is its θ's edge.
 //
 // Outputs: theta_valid for one cycle with theta (P + 1 bits) and move_early (the window a
@@ -143,7 +146,14 @@ module rx_track
     logic signed [MA-1:0] ma;
     logic signed [MB-1:0] mb;
     logic signed [MP-1:0] mp;
-    always_ff @(posedge clk) mp <= MP'(ma) * MP'(mb);
+    // ma = hi·2^MAL + lo, lo unsigned: the products of the halves, then their sum.
+    localparam int MAL = MA / 2;
+    logic signed [MP-1:0] mph, mpl;
+    always_ff @(posedge clk) begin
+        mph <= MP'($signed(ma[MA-1:MAL])) * MP'(mb);
+        mpl <= MP'($signed({1'b0, ma[MAL-1:0]})) * MP'(mb);
+        mp  <= (mph <<< MAL) + mpl;
+    end
 
     // ---- packet state --------------------------------------------------------------------
     logic signed [RB0-1:0]  rate0;
@@ -208,12 +218,12 @@ module rx_track
 
     typedef enum logic [5:0] {
         IDLE,
-        K1, K2, K3, K4, K5,                             // the packet's start
-        A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12,
-        C0, C1, C2, C3, C4, C5, C6,                     // λ, the sums, the determinant
-        G0, G1, G2, G3,                                 // the angles' products, e
-        F0, F1, F2, F3, F4, F5, F6, F7,                 // z, Στz, the numerator
-        D0, D1, D2, D3, D4,                             // the division, the drift
+        K1, K1W, K2, K3, K4, K4W, K5,                   // the packet's start
+        A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13,
+        C0, C1, C2, C3, C4, C5, C6, C7, C8,             // λ, the sums, the determinant
+        G0, G1, G2, G3, G4,                             // the angles' products, e
+        F0, F1, F2, F3, F4, F5, F6, F7, F8, F9,         // z, Στz, the numerator
+        D0, D1, D2, D3, D4, D5,                         // the division, the drift
         TH_OUT
     } st_t;
     st_t st;
@@ -272,7 +282,8 @@ module rx_track
                 IDLE: if (pq_full) st <= A0;
 
                 // ---- the packet: rate0 (word·ratio issued with start), SIGNAL's θ
-                K1: st <= K2;
+                K1: st <= K1W;
+                K1W: st <= K2;
                 K2: begin
                     // rate0 = word·ratio >> RATIO_SHIFT, half to even: a P-bit word times a
                     // 16-bit ratio stays below 2^(RATE0_BITS - 1) (the model's saturation never
@@ -285,7 +296,8 @@ module rx_track
                     mb <= MB'(rate0);
                     st <= K4;
                 end
-                K4: st <= K5;
+                K4: st <= K4W;
+                K4W: st <= K5;
                 K5: begin
                     drift       <= sat_th(p_rsh_r);
                     theta       <= sat_th(p_rsh_r);
@@ -298,28 +310,29 @@ module rx_track
                 end
 
                 // ---- a step: the pair products
+                // (A product issued in state S is read in S + 3.)
                 A0:  begin ma <= MA'(p3r); mb <= MB'(p0r); got_o <= 1'b0; got_i <= 1'b0; st <= A1; end
                 A1:  begin ma <= MA'(p3i); mb <= MB'(p0i); st <= A2; end
-                A2:  begin ma <= MA'(p3i); mb <= MB'(p0r); ta <= mp; st <= A3; end
-                A3:  begin ma <= MA'(p3r); mb <= MB'(p0i); o_re <= CI'(ta + mp); st <= A4; end
-                A4:  begin ma <= MA'(p2r); mb <= MB'(p1r); ta <= mp; st <= A5; end
-                A5:  begin ma <= MA'(p2i); mb <= MB'(p1i); o_im <= CI'(ta - mp); req_o <= 1'b1;
-                           st <= A6; end
-                A6:  begin ma <= MA'(p2i); mb <= MB'(p1r); ta <= mp; st <= A7; end
-                A7:  begin ma <= MA'(p2r); mb <= MB'(p1i); i_re <= CI'(ta + mp); st <= A8; end
+                A2:  begin ma <= MA'(p3i); mb <= MB'(p0r); st <= A3; end
+                A3:  begin ma <= MA'(p3r); mb <= MB'(p0i); ta <= mp; st <= A4; end
+                A4:  begin ma <= MA'(p2r); mb <= MB'(p1r); o_re <= CI'(ta + mp); st <= A5; end
+                A5:  begin ma <= MA'(p2i); mb <= MB'(p1i); ta <= mp; st <= A6; end
+                A6:  begin ma <= MA'(p2i); mb <= MB'(p1r); o_im <= CI'(ta - mp); req_o <= 1'b1;
+                           st <= A7; end
+                A7:  begin ma <= MA'(p2r); mb <= MB'(p1i); ta <= mp; st <= A8; end
                 // the predicted drift, δ·τ, τ²
-                A8:  begin ma <= MA'(tau); mb <= MB'(RB'(rate0) + RB'(delta)); ta <= mp; st <= A9; end
-                A9:  begin ma <= MA'(tau); mb <= MB'(delta); i_im <= CI'(ta - mp); req_i <= 1'b1;
-                           st <= A10; end
-                A10: begin
-                    ma    <= MA'(tau);
-                    mb    <= MB'(tau);
+                A8:  begin ma <= MA'(tau); mb <= MB'(RB'(rate0) + RB'(delta)); i_re <= CI'(ta + mp);
+                           st <= A9; end
+                A9:  begin ma <= MA'(tau); mb <= MB'(delta); ta <= mp; st <= A10; end
+                A10: begin ma <= MA'(tau); mb <= MB'(tau); i_im <= CI'(ta - mp); req_i <= 1'b1;
+                           st <= A11; end
+                A11: begin
                     drift <= sat_th(p_rsh_r);
                     pm    <= P'(sat_th(p_rsh_r)) + P'(moved);
-                    st    <= A11;
+                    st    <= A12;
                 end
-                A11: begin back <= BK'(p_rsh_r); st <= A12; end
-                A12: begin tt <= (2*TAUB)'(mp); st <= C0; end
+                A12: begin back <= BK'(p_rsh_r); st <= A13; end
+                A13: begin tt <= (2*TAUB)'(mp); st <= C0; end
 
                 // ---- λ, the sums, the determinant
                 C0: if (co_ok && ci_ok && v_ok) begin
@@ -335,17 +348,20 @@ module rx_track
                     end
                     st <= C2;
                 end
-                C2: begin lam <= LAMB'(rsh_even(mp, V_FRAC)); st <= C3; end
-                C3: begin ma <= MA'(n); mb <= MB'(s2 + S2B'(lam)); st <= C4; end
-                C4: begin ma <= MA'(s1); mb <= MB'(s1); st <= C5; end
-                C5: begin ta <= mp; st <= C6; end
-                C6: begin det <= DETB'(ta - mp); st <= G0; end
+                C2: st <= C3;
+                C3: begin lam <= LAMB'(rsh_even(mp, V_FRAC)); st <= C4; end
+                C4: begin ma <= MA'(n); mb <= MB'(s2 + S2B'(lam)); st <= C5; end
+                C5: begin ma <= MA'(s1); mb <= MB'(s1); st <= C6; end
+                C6: st <= C7;
+                C7: begin ta <= mp; st <= C8; end
+                C8: begin det <= DETB'(ta - mp); st <= G0; end
 
                 // ---- the angles' products, e
                 G0: if (got_o) begin ma <= MA'(co); mb <= MB'(ang_o); st <= G1; end
                 G1: if (got_i) begin ma <= MA'(ci); mb <= MB'(ang_i); st <= G2; end
-                G2: begin ta <= mp; st <= G3; end
-                G3: begin
+                G2: st <= G3;
+                G3: begin ta <= mp; st <= G4; end
+                G4: begin
                     err <= P'(rsh_even(ta + mp, K_FRAC));
                     if (usable)            st <= F0;
                     else if (sym == '0)    st <= IDLE;
@@ -355,12 +371,14 @@ module rx_track
                 // ---- z, Στz, the numerator
                 F0: begin ma <= MA'(tau); mb <= MB'(z); y0 <= y0 + Y0B'(z); st <= F1; end
                 F1: st <= F2;
-                F2: begin y1 <= y1 + Y1B'(mp); st <= F3; end
-                F3: begin ma <= MA'(n); mb <= MB'(y1); st <= F4; end
-                F4: begin ma <= MA'(s1); mb <= MB'(y0); st <= F5; end
-                F5: begin ta <= mp; st <= F6; end
-                F6: begin num <= NUMB'(ta - mp); st <= F7; end
-                F7: begin
+                F2: st <= F3;
+                F3: begin y1 <= y1 + Y1B'(mp); st <= F4; end
+                F4: begin ma <= MA'(n); mb <= MB'(y1); st <= F5; end
+                F5: begin ma <= MA'(s1); mb <= MB'(y0); st <= F6; end
+                F6: st <= F7;
+                F7: begin ta <= mp; st <= F8; end
+                F8: begin num <= NUMB'(ta - mp); st <= F9; end
+                F9: begin
                     if (sym == '0) st <= IDLE;              // SIGNAL: its quotient is 0
                     else begin                              // det > 0: λ > 0 (G0)
                         dv_req <= 1'b1;
@@ -379,7 +397,8 @@ module rx_track
                 end
                 D2: begin ma <= MA'(tau); mb <= MB'(RB'(rate0) + RB'(delta)); st <= D3; end
                 D3: st <= D4;
-                D4: begin drift <= sat_th(p_rsh_r); st <= TH_OUT; end
+                D4: st <= D5;
+                D5: begin drift <= sat_th(p_rsh_r); st <= TH_OUT; end
 
                 // ---- θ and the move
                 TH_OUT: begin
@@ -397,7 +416,7 @@ module rx_track
             endcase
 
             // A step ends: the next symbol.
-            if ((st == G3 && !usable && sym == '0) || (st == F7 && sym == '0) || st == TH_OUT) begin
+            if ((st == G4 && !usable && sym == '0) || (st == F9 && sym == '0) || st == TH_OUT) begin
                 sym <= sym + NB'(1);
                 tau <= tau + TAUB'(5);
             end
@@ -432,7 +451,7 @@ module rx_track
             if (start && !quiet) $error("rx_track: start while busy");
             if (start && q_valid) $error("rx_track: a quotient with start");
             if (pil_valid && pq_full && st != A8) $error("rx_track: pilots while a set is held");
-            if (st == F7 && sym != '0 && usable && det == '0) $error("rx_track: det 0");
+            if (st == F9 && sym != '0 && usable && det == '0) $error("rx_track: det 0");
             if (pil_valid && start) $error("rx_track: pilots with start");
             if (st == A0 && int'(sym) > LAST_SYMBOL) $error("rx_track: symbol %0d", sym);
             if (ca_valid && got_i) $error("rx_track: a third angle");

@@ -18,11 +18,12 @@
 // Edges are the edge after which a signal is seen (inputs set in the cycle after edge k are
 // taken on edge k + 1). Per the header: θ0 kTh0 (kTh0u without a ratio) after the edge that
 // takes start; a step starts T = max(its pilots' edge, the last step's end) + 1; its outer
-// request is seen at T + 6; an angle is seen 18 edges after its take is seen; C = max(T + 14,
-// the last quotient's edge + 1), G0x = max(C + 7, outer + 1), G1x = max(G0x + 1, inner + 1)
-// (outer, inner: the edges the angles are seen, + 1); then SIGNAL's step ends at G1x + 2 (no
-// measurement) or G1x + 10, a data symbol's θ is seen at G1x + 3 (no measurement) or its
-// dv_req at G1x + 10, its quotient 27 edges after its grant is seen, θ 5 edges after that.
+// request is seen at T + 7; an angle is seen 18 edges after its take is seen; C = max(T + 15,
+// the last quotient's edge + 1), G0x = max(C + 9, outer + 1), G1x = max(G0x + 1, inner + 1)
+// (outer, inner: the edges the angles are seen, + 1); then SIGNAL's step ends at G1x + 3 (no
+// measurement) or G1x + 13, a data symbol's θ is seen at G1x + 4 (no measurement) or its
+// dv_req at G1x + 13, its quotient 27 edges after its grant is seen, θ 6 edges after that.
+// (The multiplier pipelined, 2026-11-25: every rule a product feeds one edge later.)
 // Exit code 0 = gate passed.
 
 #include <algorithm>
@@ -40,12 +41,12 @@
 
 namespace {
 
-constexpr long kTh0 = 5;
-constexpr long kTh0u = 3;
-constexpr long kReqO = 6;
+constexpr long kTh0 = 7;
+constexpr long kTh0u = 4;
+constexpr long kReqO = 7;
 constexpr long kAngle = 18;
 constexpr long kDiv = 27;
-constexpr long kThFit = 5;
+constexpr long kThFit = 6;
 
 long long sext(uint64_t v, int bits) {
     const uint64_t m = 1ull << (bits - 1);
@@ -281,11 +282,11 @@ struct Gate {
                 }
             }
             if (trv && takes % 2 == 1 && inner_seen < takes) {
-                // the step's inner request after its outer was taken: raised on T + 10, so seen
+                // the step's inner request after its outer was taken: raised on T + 11, so seen
                 // there or, if the outer was taken later, in the cycle after its take
                 const int s = takes / 2;
                 inner_seen = takes;
-                const long want = std::max(T[s] + 10, take_seen[takes - 1] + 1);
+                const long want = std::max(T[s] + 11, take_seen[takes - 1] + 1);
                 if (s < ns && (T[s] < 0 || now != want)) error("inner request's edge", now, want);
             }
             if (trt) {
@@ -330,8 +331,8 @@ struct Gate {
             if (dut.tr_dv_req && dv_req_seen < 0) {
                 dv_req_seen = now;
                 div_sym = th_count;  // the data symbol whose θ comes next
-                if (div_sym < ns && g1x[div_sym] >= 0 && now != g1x[div_sym] + 10)
-                    error("dv_req's edge", now, g1x[div_sym] + 10);
+                if (div_sym < ns && g1x[div_sym] >= 0 && now != g1x[div_sym] + 13)
+                    error("dv_req's edge", now, g1x[div_sym] + 13);
             }
             if (dut.tr_dv_gnt) {
                 if (dv_req_seen < 0) error("a grant with no request");
@@ -365,7 +366,7 @@ struct Gate {
                         want = done_seen + kThFit;
                         ++fits;
                     } else {
-                        want = g1x[s] + 3;
+                        want = g1x[s] + 4;
                         ++unmeasured;
                     }
                     if (now != want) error("theta's edge", now, want);
@@ -381,14 +382,14 @@ struct Gate {
                 const long prev = s == 0 ? th0_seen : end[s - 1];
                 if (T[s] < 0 && ep[s] >= 0 && prev >= 0) T[s] = std::max(ep[s], prev) + 1;
                 if (T[s] >= 0 && C[s] < 0 && q_last >= 0 && q_sent[1] && q_sent[2] && q_sent[3]) {
-                    C[s] = std::max(T[s] + 14, q_last + 1);
-                    if (C[s] > T[s] + 14) ++late_q;
+                    C[s] = std::max(T[s] + 15, q_last + 1);
+                    if (C[s] > T[s] + 15) ++late_q;
                 }
                 if (C[s] >= 0 && g1x[s] < 0 && ao[s] >= 0 && ai[s] >= 0) {
-                    const long g0x = std::max(C[s] + 7, ao[s] + 1);
+                    const long g0x = std::max(C[s] + 9, ao[s] + 1);
                     g1x[s] = std::max(g0x + 1, ai[s] + 1);
                     if (s == 0) {
-                        end[0] = g1x[0] + (p.usable() ? 10 : 2);
+                        end[0] = g1x[0] + (p.usable() ? 13 : 3);
                         if (!p.usable()) ++sig_unusable;
                     }
                 }

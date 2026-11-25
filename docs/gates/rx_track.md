@@ -290,3 +290,46 @@ never granted) fail.
   (asserted).
 - `rx_track`, `cordic_share`, `div_share` and the widened divider through the open flow. The
   24 × 44 multiplier between two registers is the path to watch at 160 MHz.
+
+## 2026-11-25 · G3 · the multiplier pipelined (the founder's choice)
+
+The whole data path through the open flow (`silicon_probe.md`, 2026-11-25) missed 160 MHz by
+1.77 ns. Its worst path was a single-cycle product in this block. The founder chose on
+2026-11-25 to pipeline both products, accepting the extra latency and a restated schedule.
+
+**What changed.** The operands are still registered on the issue edge. The next edge
+registers the two halves of MA times MB: ma = hi·2^12 + lo, with lo unsigned. The edge after
+that registers their sum. Every read of `mp` moves one state later, so a product is read three
+states after its issue, where it used to be read two after. The new states are K1W, K4W, A13,
+C7, C8, G4, F8, F9 and D5, plus waits where a product feeds the next operand.
+
+The latencies, from the header and the bench (`tb_rx_track.cpp`):
+
+| Edge | Before | After |
+|---|---|---|
+| θ0 | 5 | 7 |
+| θ0 with no ratio | 3 | 4 |
+| outer request | T + 6 | T + 7 |
+| inner request | T + 10 | T + 11 |
+| λ at C | T + 14 | T + 15 |
+| G0 | C + 7 | C + 9 |
+| SIGNAL's step ends | G1 + 2 / + 10 | G1 + 3 / + 13 |
+| θ with nothing measured | G1 + 3 | G1 + 4 |
+| dv_req | G1 + 10 | G1 + 13 |
+| θ after dv_done | 5 | 6 |
+
+The values are unchanged.
+
+| Gate | Command | Result |
+|---|---|---|
+| G3 | `make -C hw rx_track` | 157 packets × 2 passes, 21 024 θ, 0 mismatches |
+| Lint | `make -C hw lint` | clean |
+
+**Mutants**, each in a private copy, all killed:
+- skip D4's wait: 62 843 mismatches;
+- the high half shifted by MAL − 1;
+- the low half signed;
+- skip K1W;
+- skip C6's wait.
+
+The schedule restated: `rx_data.md`, same date.
