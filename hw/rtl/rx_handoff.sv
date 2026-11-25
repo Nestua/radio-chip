@@ -169,6 +169,7 @@ module rx_handoff
     // overrun): below WATCHDOG + TAIL + HISTORY = 110 008 + BACKOFF, inside C_W bits. Past
     // that it may wrap: nothing compares it once the last sample is taken.
     logic [C_W-1:0]       wr_off;
+    logic                 declared;     // a packet declared since reset (the stamp needs one)
     logic [C_W-1:0]       tkn;          // samples the reader has taken
     logic [C_W-1:0]       ft;           // samples read from the history
     logic [C_W-1:0]       hend;         // the hold's end: the frame's last sample and one
@@ -272,7 +273,9 @@ module rx_handoff
             rails     <= '0;
             c32       <= '0;
             end_stamp <= '0;
+            declared  <= 1'b0;
         end else begin
+            if (declare) declared <= 1'b1;
             // Between ticks only the taking of beats moves the packet's state.
             if (x_mark) mark_v <= 1'b0;
             if (x_end)  open   <= 1'b0;
@@ -294,7 +297,7 @@ module rx_handoff
                     rd_ptr <= fft_q;
                 end
             end
-            if (accept && !sig_fail)
+            if (accept && !sig_fail && (declared || declare))
                 // The stamp on the strobe's own edge, from the packet declared last (the one
                 // whose tag it carries): its window's count is adc_count − 1 − wr_off, or, in
                 // a declaration's cycle, − age0. Not at the tick that applies the verdict: a

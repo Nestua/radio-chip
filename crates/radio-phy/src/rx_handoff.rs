@@ -433,8 +433,9 @@ struct Machine {
     /// The verdict kept for the next tick, and whether one was kept since the last.
     slot: Option<Option<SignalVerdict>>,
     kept: bool,
-    /// The window's first sample of the packet declared last (open or not).
-    fft: usize,
+    /// The window's first sample of the packet declared last (open or not); `None` before
+    /// the first declaration since reset (no stamp then).
+    fft: Option<usize>,
 }
 
 impl Machine {
@@ -513,7 +514,7 @@ pub fn run_handoff(
         opened: 0,
         slot: None,
         kept: false,
-        fft: 0,
+        fft: None,
     };
     let mut run = HandoffRun {
         ticks: ticks[..x.len()].to_vec(),
@@ -677,7 +678,7 @@ pub fn run_handoff(
                     });
                 }
                 m.opened = m.opened.wrapping_add(1);
-                m.fft = a.fft_start;
+                m.fft = Some(a.fft_start);
                 let hold_end = packet_end(a.fft_start, MAX_DATA_SYMBOLS, backoff);
                 m.open = Some(Open {
                     packet: m.opened,
@@ -746,8 +747,8 @@ pub fn run_handoff(
                 // the strobe's own edge. Not at the tick that applies the verdict: with the ADC
                 // paused no tick comes, and the data path may end the frame first (the review
                 // of 2026-11-25).
-                if let Some(v) = verdict {
-                    let end = packet_end(m.fft, v.data_symbols, backoff);
+                if let (Some(v), Some(fft)) = (verdict, m.fft) {
+                    let end = packet_end(fft, v.data_symbols, backoff);
                     run.stamps.push((c + 1, wrap_count(end)));
                 }
             }

@@ -519,8 +519,19 @@ not counted.)
   first (rule 5, a stronger reason than the first G0 gave); overlapping frames at 0 to 15 dB
   gave no decoded end without its stamp; the gate numbers reproduce.
 
+- **Recheck of the fix (same reviewer):** the pause swept from 150 samples before to 120 after
+  the frame's end, four frames, 200 and 3000 clocks: every age exact, no stale stamp. Two low
+  findings: a strobe with tag 0 after a reset and before any declaration stamped from
+  `wr_off`, which has no reset, where the model stamped from sample 0 (fixed: no stamp in
+  either before the first declaration since reset); and the negative age below (open).
+
 ### Open
 
+- **A negative age wraps** (the recheck): with the ADC paused within the frame's last few
+  samples (inside BACKOFF), `rx_data` can end the frame before its nominal end is written;
+  `rx_age_valid` with `rx_age` = 65 533 for −3, which the MAC cannot tell from about 3.3 ms.
+  A real ADC does not pause mid-frame; the founder's decision 2 says wrapping, no saturation.
+  For the founder: keep, or saturate a "negative" age (above, say, 2^15) to 0.
 - The RTL benches pause the ADC for 1 or 2 clocks only (`tb_idle`); the long pause is held
   in the model's closed loop, and `handoff` binds the RTL's stamp to the model's cycle by
   cycle.
