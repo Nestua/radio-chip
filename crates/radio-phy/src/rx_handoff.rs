@@ -248,6 +248,38 @@ pub struct HandoffRun {
     pub reads: usize,
     /// The most beats the buffer and the rotator's pipeline held together.
     pub buffered: usize,
+    /// X(n) of every sample: the cycle it was at the ADC's pins and written.
+    pub written: Vec<usize>,
+    /// The frame's end in the count of samples written (`end_stamp`, mod 2^[`COUNT_BITS`]),
+    /// with the first cycle it is a register's output in: one for every verdict applied with
+    /// a length (the founder, 2026-11-25; `docs/gates/rx_data.md`).
+    pub stamps: Vec<(usize, u16)>,
+}
+
+/// Bits of the free-running count of samples written (`adc_count`) and of the stamp.
+pub const COUNT_BITS: u32 = 16;
+
+/// A count of samples modulo 2^[`COUNT_BITS`].
+fn wrap_count(n: usize) -> u16 {
+    u16::try_from(n & 0xffff).unwrap_or(0)
+}
+
+impl HandoffRun {
+    /// `adc_count` in cycle `clock`: the samples written before it (X(n) < `clock`), mod
+    /// 2^[`COUNT_BITS`].
+    pub fn count_before(&self, clock: usize) -> u16 {
+        wrap_count(self.written.partition_point(|&w| w < clock))
+    }
+
+    /// `end_stamp` in cycle `clock`: the last stamp registered before it (`None`: no verdict
+    /// with a length has been applied yet).
+    pub fn stamp_at(&self, clock: usize) -> Option<u16> {
+        self.stamps
+            .iter()
+            .take_while(|s| s.0 <= clock)
+            .last()
+            .map(|s| s.1)
+    }
 }
 
 /// The DC offset of [`ltf_dc_offset_fixed`] from the 128 samples `field` of the two long
@@ -484,6 +516,7 @@ pub fn run_handoff(
         end,
         room: vec![0; x.len()],
         history_spare: t.history_depth,
+        written: x_clock[..x.len()].to_vec(),
         ..HandoffRun::default()
     };
     // The sample of the next tick; the period a cycle is in is the one before it.
@@ -620,6 +653,9 @@ pub fn run_handoff(
                         o.hold_end = packet_end(o.fft_start, v.data_symbols, backoff);
                         o.last = o.hold_end.saturating_add(HANDOFF_TAIL);
                         m.patient = v.patient;
+                        // The stamp: the frame's last sample and one, in samples written;
+                        // registered on this tick's edge.
+                        run.stamps.push((c + 1, wrap_count(o.hold_end)));
                     }
                     (Some(_), None) => m.close(HandoffEnd::Stopped),
                     (None, _) => {}

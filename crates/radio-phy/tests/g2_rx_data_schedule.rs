@@ -16,7 +16,7 @@ use radio_phy::channel::{awgn, frequency_offset, mean_power, resample, Rng};
 use radio_phy::modulation::Modulation;
 use radio_phy::ofdm::IfftConfig;
 use radio_phy::ppdu::{build_ppdu, data_symbols, Rate};
-use radio_phy::rx_data::{DataTiming, Division, RxDataSchedule, Window};
+use radio_phy::rx_data::{rx_end_ages, DataTiming, Division, RxDataSchedule, Window};
 use radio_phy::rx_data_fixed::{RxDataEnd, RxDataEvent, RxDataFixed};
 use radio_phy::rx_front::RxConfig;
 use radio_phy::rx_front_fixed::{
@@ -357,6 +357,102 @@ fn held_to_the_model(run: &HandoffRun, s: &RxDataSchedule, what: &str) {
             .any(|b| b.1 == HandoffBeat::End(HandoffEnd::Overrun)),
         "{what}: an overrun"
     );
+    // The age: on the decoded and the seed-zero ends only (the founder, 2026-11-25), one
+    // for every end.
+    let ends: Vec<(usize, RxDataEnd)> = s
+        .events()
+        .iter()
+        .filter_map(|e| match e.1 {
+            RxDataEvent::End(end) => Some((e.0, end)),
+            _ => None,
+        })
+        .collect();
+    let ages = rx_end_ages(run, s);
+    assert_eq!(ages.len(), ends.len(), "{what}: an age for every end");
+    for ((c, end), (ca, age)) in ends.iter().zip(&ages) {
+        assert_eq!(c, ca, "{what}: the age's cycle");
+        let carries = matches!(end, RxDataEnd::Decoded | RxDataEnd::Seed);
+        assert_eq!(age.is_some(), carries, "{what}: {end:?} at {c}");
+    }
+}
+
+/// The ages of the decoded ends against the frames' true ends at the antenna (sample
+/// `frame_ends[k]` is the first after frame k), in samples: (age − true age) for each.
+fn age_errors(run: &HandoffRun, s: &RxDataSchedule, frame_ends: &[usize], what: &str) -> Vec<i64> {
+    let decoded: Vec<(usize, u16)> = s
+        .events()
+        .iter()
+        .filter_map(|e| match e.1 {
+            RxDataEvent::End(end) => Some(end),
+            _ => None,
+        })
+        .zip(rx_end_ages(run, s))
+        .filter(|(end, _)| *end == RxDataEnd::Decoded)
+        .map(|(_, (c, age))| (c, age.unwrap()))
+        .collect();
+    assert_eq!(decoded.len(), frame_ends.len(), "{what}: decoded frames");
+    decoded
+        .iter()
+        .zip(frame_ends)
+        .map(|(&(c, age), &end)| {
+            // The truth: samples at the ADC's pins before rx_end's cycle, less the frame's.
+            let written = run
+                .ticks
+                .iter()
+                .filter(|&&t| t - HandoffTiming::default().tick() < c)
+                .count();
+            i64::from(age) - (written as i64 - end as i64)
+        })
+        .collect()
+}
+
+/// The largest error of an age against the frame's true end, in samples. The true end is the
+/// transmitter's (`train`'s start + 400 + 80 per data symbol, in its samples): at 30 dB the
+/// acquisition finds T1's window exactly on every run here, so the nominal end from SIGNAL
+/// (the founder, 2026-11-25: the tracker's σ left out) is that sample, and any error is a
+/// defect. The drift of the sample clock moves the end at the ADC by up to 40 ppm of the
+/// frame (1.6 samples for 40 000) and is not in the age, by that decision.
+const AGE_TOLERANCE: i64 = 0;
+
+#[test]
+fn the_age_of_every_decoded_frame_is_its_true_end_at_the_antenna() {
+    let mut worst = 0i64;
+    for (k, rate) in RATES.iter().enumerate() {
+        for octets in [1usize, 24, 300, 1500] {
+            for ppm in [-40.0, 0.0, 40.0] {
+                let what = format!("{rate:?} {octets} {ppm}");
+                let (adc, _, starts) = train(&[(*rate, octets, 30.0, ppm)], 0, 20 + k as u64);
+                let (run, s) = closed_loop(&adc, DataTiming::default());
+                held_to_the_model(&run, &s, &what);
+                let end = starts[0] + 400 + 80 * data_symbols(*rate, octets);
+                let err = age_errors(&run, &s, &[end], &what);
+                worst = worst.max(err[0].abs());
+                assert!(err[0].abs() <= AGE_TOLERANCE, "{what}: {err:?}");
+            }
+        }
+    }
+    println!("the worst age against the frame's true end: {worst} samples");
+}
+
+#[test]
+fn in_a_train_each_frame_has_its_own_age() {
+    // Frames behind each other at the shortest gap: a later packet's stamp must not reach an
+    // earlier one's end.
+    let mut frames = vec![(Rate::R54, 1500, 30.0, 0.0), (Rate::R6, 1, 30.0, 0.0)];
+    for rate in RATES {
+        frames.push((rate, 24, 30.0, 0.0));
+    }
+    let (adc, _, starts) = train(&frames, 320, 4);
+    let (run, s) = closed_loop(&adc, DataTiming::default());
+    held_to_the_model(&run, &s, "a train");
+    let ends: Vec<usize> = frames
+        .iter()
+        .zip(&starts)
+        .map(|(f, st)| st + 400 + 80 * data_symbols(f.0, f.1))
+        .collect();
+    let err = age_errors(&run, &s, &ends, "a train");
+    println!("a train: the ages against the true ends {err:?}");
+    assert!(err.iter().all(|e| e.abs() <= AGE_TOLERANCE), "{err:?}");
 }
 
 /// The cycle sample n of the run was at the ADC's pins (X(n) = T(n) − 6).

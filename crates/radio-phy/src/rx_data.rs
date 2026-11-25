@@ -127,7 +127,7 @@ use crate::modulation::Modulation;
 use crate::ppdu::Rate;
 use crate::rx_data_fixed::{RxDataEnd, RxDataEvent, RxDataFixed};
 use crate::rx_front_fixed::{HandoffBeat, HandoffConfig, SignalVerdict};
-use crate::rx_handoff::HandoffReader;
+use crate::rx_handoff::{HandoffReader, HandoffRun};
 use crate::rx_ofdm::RxOfdmConfig;
 use crate::rx_ofdm_fixed::{scale_constant, FixedOfdmConfig};
 use std::collections::VecDeque;
@@ -1042,6 +1042,31 @@ impl RxDataSchedule {
 /// From a symbol's first soft value to its last.
 const DATA_LAST: usize = 47;
 
+/// The age `rx_end` carries (the founder, 2026-11-25; `docs/gates/rx_data.md`): the samples
+/// written since the frame's last one, `adc_count` − `end_stamp` modulo 2^16, on the decoded
+/// and the seed-zero ends only (`rx_age_valid`). The frame's end is the nominal one from
+/// SIGNAL, without the tracker's σ.
+pub fn rx_end_age(end: RxDataEnd, adc_count: u16, end_stamp: u16) -> Option<u16> {
+    matches!(end, RxDataEnd::Decoded | RxDataEnd::Seed).then(|| adc_count.wrapping_sub(end_stamp))
+}
+
+/// Every end of a run of the hand-off with this schedule as its reader, with its cycle and
+/// its age: `run`'s count and stamp as they stand in the end's cycle. An end that carries an
+/// age with no stamp yet gives `None` (the gates require one).
+pub fn rx_end_ages(run: &HandoffRun, s: &RxDataSchedule) -> Vec<(usize, Option<u16>)> {
+    s.events()
+        .iter()
+        .filter_map(|&(c, e)| match e {
+            RxDataEvent::End(end) => Some((
+                c,
+                run.stamp_at(c)
+                    .and_then(|stamp| rx_end_age(end, run.count_before(c), stamp)),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 impl HandoffReader for RxDataSchedule {
     fn ready(&mut self, clock: usize) -> bool {
         self.ready_at(clock)
@@ -1071,5 +1096,27 @@ fn bit_len(v: i64) -> usize {
         0
     } else {
         (64 - v.leading_zeros()) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rx_front_fixed::HandoffEnd;
+    use crate::rx_ofdm::RxOfdmError;
+
+    #[test]
+    fn only_the_decoded_and_the_seed_zero_ends_carry_an_age_and_it_wraps() {
+        // The founder's decisions of 2026-11-25: which ends, 16 bits wrapping.
+        assert_eq!(rx_end_age(RxDataEnd::Decoded, 900, 300), Some(600));
+        assert_eq!(rx_end_age(RxDataEnd::Seed, 5, 65_530), Some(11));
+        for end in [
+            RxDataEnd::Signal(RxOfdmError::SignalParity),
+            RxDataEnd::Truncated,
+            RxDataEnd::Aborted(HandoffEnd::Acquisition),
+            RxDataEnd::Aborted(HandoffEnd::Overrun),
+        ] {
+            assert_eq!(rx_end_age(end, 900, 300), None, "{end:?}");
+        }
     }
 }

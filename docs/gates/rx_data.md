@@ -314,7 +314,7 @@ One more was a dead branch, removed (`start` of SIGNAL in the ready rule).
 
 ### Open
 
-- The age on `rx_end`: a G0 proposal below (2026-11-25), waiting for the founder's answers.
+- The age on `rx_end`: decided 2026-11-25 (below); being built.
 - `rx_data` through the open ASIC flow (area and timing of the whole data path against ADR
   0010's 1.5 to 2.0 mm²).
 
@@ -392,3 +392,54 @@ until the questions below are answered, one at a time, each with a recommendatio
 | `hw/rtl/rx_handoff.sv` | the count (N bits; `W` is the back-off parameter), `out_first_n` |
 | `hw/rtl/rx_data.sv` | `in_first_n`, `adc_count` in; `rx_age`, `rx_age_valid` out |
 | gates | `handoff`, `handoff_forced`, `rx_data`, `g2_rx_data_schedule`, `g2_rx_handoff`, `g2_rx_handoff_schedule`, `g2_rx_data_stream` rerun; `hw/vectors/handoff.txt` and `rx_data.txt` regenerated |
+
+## 2026-11-25 · G0 (decided) · the age on `rx_end`: the founder's answers
+
+The founder answered the four questions above on 2026-11-25, each with the recommendation, and
+on question 2 chose the stamp in `rx_handoff` that the review had opened up over the plan's
+`out_first_n`.
+
+1. **Which ends.** Only the decoded end (status 0) and the seed-zero end (status 1) carry an
+   age; every other end gives `rx_age_valid` = 0.
+2. **Where, and how wide.** `rx_handoff` keeps a free-running 16-bit count of the ADC samples
+   written (`adc_count`) and a 16-bit **stamp** of the frame's end in that count
+   (`end_stamp`). `rx_data` gives `rx_age` = `adc_count` − `end_stamp`, modulo 2^16.
+3. **"Now".** The count of samples written before `rx_end`'s cycle: `adc_count` as a
+   register's output in that cycle, read combinationally. No second register.
+4. **The model.** The frame's nominal end, from SIGNAL, without the tracker's σ.
+   `run_handoff` gives the count and the stamp; the age is a function of the end, the count
+   and the stamp; `g2_rx_data_schedule` holds the age of every decoded frame to the frame's
+   true end at the antenna (`train`'s starts), within the timing estimate and the drift.
+
+**The stamp, as built.** The frame's end is known from the verdict on, and at the verdict it
+may already be in the past: a one-symbol frame ends 80 samples after SIGNAL, the verdict comes
+about 7 µs (140 samples) after SIGNAL. So the stamp is not taken when the frame's last sample
+is written. It is computed when the verdict is applied, at the tick where `hend` takes the
+frame's end (`len`):
+
+    end_stamp ← (adc_count − 1 − wr_off) + hend1        (mod 2^16)
+
+`adc_count − 1 − wr_off` is the count of T1's first window sample: both registers step on
+`in_valid` and `wr_off` counts the newest sample from that one, so their difference is fixed
+for the packet. `hend1` is `SIGNAL_END` + BACKOFF + 80·symbols, the model's `packet_end`, so
+BACKOFF is in (the slip the review found in the proposal). In the model the stamp is
+`packet_end(fft_start, symbols, backoff)` in ADC samples, mod 2^16, a register's output from
+the cycle after that tick; the count in cycle c is the number of samples n with X(n) < c. A
+frame's last sample just written gives an age of 0.
+
+**Why a later packet cannot move the stamp first.** The stamp changes only when a verdict is
+applied, and verdicts come from `rx_data`, which decodes one packet after another: the next
+packet's verdict leaves `rx_data` after the present packet's `rx_end` (the Viterbi decoder
+is shared and in order), and is applied at a tick after that. The gate checks it: the age of
+every decoded frame against its true end.
+
+The plan's `HandoffStart::at`, `out_first_n` and the adder of `frame_end` in `rx_data` are
+dropped.
+
+| Where | What |
+|---|---|
+| `radio_phy::rx_handoff` | `HandoffRun`: the count per cycle, the stamps |
+| `radio_phy::rx_data` | the age of an end from the count and the stamp; the ages of a closed-loop run |
+| `hw/rtl/rx_handoff.sv` | `adc_count`, `end_stamp` out |
+| `hw/rtl/rx_data.sv` | `adc_count`, `end_stamp` in; `rx_age`, `rx_age_valid` out |
+| gates | `g2_rx_data_schedule` (the age against the truth), `handoff` and `handoff_forced` (the stamp and the count), `rx_data` (the age at the pins); vectors regenerated |
