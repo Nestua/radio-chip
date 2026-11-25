@@ -107,6 +107,9 @@ to at most 65 (the longest frame at 1200 ppm reaches 64).
 
 All counts are in edges.
 - **θ0**: 5 after start (3 without a ratio).
+(Superseded 2026-11-25 by the pipelined multiplier: the latencies below are those before it;
+the current ones are in the last section.)
+
 - **A step** starts on T = max(its pilots' edge, the last step's end) + 1. Its outer request is
   up on T + 6 and its inner on T + 10.
 - **λ** is asked on C = max(T + 14, the last quotient's edge + 1).

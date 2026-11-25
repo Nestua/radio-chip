@@ -13,8 +13,9 @@
 // 2^15 − 1, writes g(k), sums Σg and keeps the pilots' four gains. One multiplier, six times,
 // makes the tracker's products (pipelined, the founder's choice of 2026-11-25: operands, then the
 // two halves' products, then their sum, read three edges after the issue; the single-cycle
-// product was a worst path through the open flow, docs/gates/silicon_probe.md); the divisions in a fixed order: BPSK's scale, outer, inner,
-// variance (12 bits, saturating), then a data scale per request.
+// product was a worst path through the open flow, docs/gates/silicon_probe.md); the divisions
+// in a fixed order: BPSK's scale, outer, inner, variance (12 bits, saturating), then a data
+// scale per request.
 //
 // Bins: bin_valid with bin_t2 (0: T1's window, 1: T2's), the index, the value, at most one a
 // clock, in any order within a window; the unused bins are ignored. All of T1's bins come

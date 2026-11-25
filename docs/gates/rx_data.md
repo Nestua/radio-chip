@@ -75,7 +75,7 @@ counts here are cycle to cycle, as the old allowances were):
 | divisions | the quotient bits + 2, from the channel | `rx_channel`'s own: 21, 37, 53, 67 after chan_valid; a request 3 + q; the tracker's 27 | `rx_channel.md`, `rx_track.md` |
 | `product` (pilots, pair products) | 3, the pair products on the products unit | pil_valid 9 + 1 after the last of its triggers; the pair products are the tracker's | `rx_symbol.md`, `rx_track.md` |
 | `cordic` | 18 | 18 a take, the angle 17 + 1 after | `cordic_iter` |
-| `fit_in`, `after_fit` | 5, 2 | the tracker's timeline (T, λ, G₀, G₁; the division asked on G₁ + 10, θ 5 + 1 after its done): θ 87 after the pilots with every unit free | `rx_track.md` |
+| `fit_in`, `after_fit` | 5, 2 | the tracker's timeline (T, λ, G₀, G₁; the division asked on G₁ + 10, θ 5 + 1 after its done): θ 87 after the pilots with every unit free (superseded 2026-11-25 by the pipelined multiplier: G₁ + 13, 6 + 1, θ 92; see the last section) | `rx_track.md` |
 | `rotator` + 1 (φ asked) | 4 + 1 | 10 + 1 after the last of: the products written, θ, the last soft pass read | `rx_symbol.md` |
 | `demap` | 9 | the first soft value 8 + 1 after the last of: φ, the scale, the data's modulation | `rx_symbol.md` |
 | `soft_products`, `soft_symbols` | 6 a clock, 2 | a subcarrier a clock; `rx_deint`'s two banks | `rx_symbol.md`, `rx_deint.md` |
@@ -559,3 +559,8 @@ clocks (was 86). That is still 2.6 times real time.
 
 **The RTL**, `make -C hw rx_data` on the regenerated vectors: 57 runs, 0 mismatches. The top
 level follows θ by its signals, so it needed no change.
+
+**Review** (independent, 2026-11-25): no defect. The reviewer traced every stall, drop and
+path of both FSMs, proved the half-product split exact mod 2^68, recomputed the hand table
+from the module's rules (all entries agree), and found the bench checks each edge exactly.
+Docs only: the old latencies in the G0 tables and the BACKLOG marked superseded.
