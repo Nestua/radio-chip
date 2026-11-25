@@ -147,7 +147,11 @@ rules that never act at these latencies, each by a margin the rules themselves g
   way the data's soft pass waits for φ, 29 clocks after θ, while the scale is taken at most 18
   after θ; `div_share`'s priority is gated by its own bench;
 - the verdict before data symbol 2's window (removed): θ of data symbol 1 comes 28
-  clocks after the verdict in the table's case (its window waits for SIGNAL's flush, 65 + 63 + 77 + 9 + 2 + 86 after SIGNAL's last sample against the verdict's 274);
+  clocks after the verdict in the table's case (its window waits for SIGNAL's flush, 65 + 63 + 77 + 9 + 2 + 86 after SIGNAL's last sample against the verdict's 274).
+  **Corrected 2026-11-25** (PR C's review): only for a frame that measures its timing; one
+  that does not has θ on G₁ + 3, before the verdict, and data window 2 then waits for the
+  verdict itself. The schedule's gate has no such frame; `make -C hw rx_data` does
+  (`no-measure-*`), and there the rule binds;
 - `rx_deint`'s "previous step" (removed): two symbols' first steps are at least 240 clocks
   apart, a symbol at most 216 steps.
 PR C's RTL is to keep every one of these rules; the margins are restated if a block's
@@ -311,7 +315,5 @@ One more was a dead branch, removed (`start` of SIGNAL in the ready rule).
 ### Open
 
 - The age on `rx_end` (next PR): `rx_handoff`'s sample count and the model's side.
-- The G0's list of the schedule's non-binding rules says "θ of data symbol 1 comes after the
-  verdict": true only for a frame that measures; see the review above.
 - `rx_data` through the open ASIC flow (area and timing of the whole data path against ADR
   0010's 1.5 to 2.0 mm²).

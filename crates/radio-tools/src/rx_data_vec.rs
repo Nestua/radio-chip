@@ -174,7 +174,9 @@ pub struct Cover {
     drop_takes: usize,
     /// Data window 1 complete in the verdict's own cycle.
     window_at_verdict: usize,
-    /// θ of data symbol 1 before the verdict (a frame that does not measure its timing).
+    /// θ of data symbol 1 before a verdict of the run (a frame that does not measure its
+    /// timing; in a run of two packets also the first's against the second's: the search
+    /// that needs it counts its own hits).
     theta_before_verdict: usize,
 }
 
@@ -420,6 +422,12 @@ pub fn vectors(out: &mut impl Write) -> io::Result<Cover> {
                 break;
             }
         }
+    }
+    // Counted by this search alone (the cover's count also sees other packets' verdicts).
+    if found == 0 {
+        return Err(io::Error::other(
+            "no frame that does not measure its timing",
+        ));
     }
     // No ratio written.
     let b = stream(Rate::R12, 50, 30.0, 0.0)?;
