@@ -1,7 +1,9 @@
 // ram_1w1r for the open ASIC flow on IHP SG13G2: the body hw/rtl/lib/ram_1w1r.sv leaves to "an
 // ASIC flow replaces the body with a macro of the same ports and timing". Used only by the
-// silicon probe (tools/syn/orfs_block.sh with this file in place of hw/rtl/lib/ram_1w1r.sv,
-// docs/gates/silicon_probe.md); not RTL of the chip, and not simulated by the gates.
+// silicon probe (tools/syn/orfs_block.sh with the config tools/syn/ihp_sg13g2/rx_data_sram.mk,
+// which lists this file in place of hw/rtl/lib/ram_1w1r.sv; docs/gates/silicon_probe.md); not
+// RTL of the chip, and not simulated by the gates. A_DLY/B_DLY are tied to 1, not checked
+// against the macros' datasheet.
 //
 // The macros are the PDK's two-port SRAMs (IHP-Open-PDK, Apache-2.0,
 // ihp-sg13g2/libs.ref/sg13g2_sram: RM_IHPSG13_2P_64x32_c2 and RM_IHPSG13_2P_64x22_c2_bm_bist),
