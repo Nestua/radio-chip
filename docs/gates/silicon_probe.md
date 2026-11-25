@@ -163,8 +163,9 @@ RTL as committed after its review) through the same flow, image (1671deadac53), 
 corner, clock (6.25 ns, 160 MHz) and settings as the entries above (`tools/syn/orfs_block.sh`,
 40 % utilisation at the floorplan, memories as flip-flops). By hand on the build server
 (`/data/radio-chip/asic-top2`; its reports and logs kept in `asic-top2-keep`), about 2.5 hours; nothing else ran there but a first run of the
-same top on the RTL before its review (σ 4 bits, the verdict's gate; 8 flip-flops and a gate
-apart), used here only as a second placement: 3.77 mm², worst slack −1.17 ns.
+same top on the RTL before its review (ab2c1fa: σ 4 bits, the verdict's gate; 8 flip-flops and
+a gate apart), used here only as a second placement: worst slack −1.17 ns. Its reports were not
+kept, so its area is not quoted.
 
 | `rx_data` | Cells | Flip-flops | Area after synthesis | Design area, routed | Worst slack at 6.25 ns | TNS | Power (flow's estimate) |
 |---|---|---|---|---|---|---|---|
@@ -183,11 +184,14 @@ Flip-flops by block (the final netlist's instance names):
 | the top level's own | 257 | the reader, the packet's state, the FFT's input register |
 | `rx_signal`, `div_serial`, `div_share`, `rx_octets`, `cordic_iter`, `cordic_share` | 599 | |
 
+The rows add up to 26 432; the other 61 flip-flops were not attributed (not looked up).
+
 **What it says**
 - **Area: 3.77 mm² routed, against ADR 0010's estimate of 1.5 to 2.0 mm² (± 40 %).** About
-  14 700 of the 26 493 flip-flops are memories built of flip-flops (`rx_symbol`'s slots,
-  `rx_deint`'s banks, `rx_channel`'s stores): some 0.7 mm² of flip-flops alone at the probe's
-  49 µm², before their write multiplexers and read trees. The ADR left them open ("macros or
+  12 000 of the 26 493 flip-flops are memories built of flip-flops (`rx_symbol`'s slots,
+  2 × 64 × 32; `rx_deint`'s banks, 2 × 48 × 48; `rx_channel`'s stores, 64 × 36 + 64 × 15;
+  plus `ram_1w1r`'s registered read words, about 210), out of the three blocks' 14 717: some
+  0.6 mm² of flip-flops alone at the probe's 49 µm², before their write multiplexers and read trees. The ADR left them open ("macros or
   flip-flops; the macros' sizes not read from the PDK"); this run is the flip-flop end. The
   next figure to get is the same top with those stores as the PDK's SRAM macros (IHP SG13G2
   has them; the flow places macros, this probe has not tried).
@@ -196,8 +200,9 @@ Flip-flops by block (the final netlist's instance names):
   required); in the first run, placed differently, it was `rx_channel`'s 37 × 16 product of
   the tracker's constants (`pg` → `po`, −1.17 ns). Both are single-cycle products of wide
   operands in blocks that had not been through the flow on their own (BACKLOG lists them).
-  Both blocks use them once in many cycles: a register in the middle of each product (one
-  edge more in their latency, restated in the schedule) is the obvious fix; not tried.
+  A register in the middle of each product is the obvious fix: one edge more on every step
+  that waits for the product (`rx_track` uses its multiplier on consecutive cycles in A0–A7),
+  restated in the schedule; not tried.
 - **Power: 405 mW** at the flow's default activity, a ranking only: 57 % flip-flops' internal
   power, 38 % the clock tree, 5 % combinational. The memories' flip-flops hold most of the
   time; a switching simulation and clock gating of the stores (the wrapper in `hw/rtl/lib/`)
