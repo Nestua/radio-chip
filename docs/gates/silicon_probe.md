@@ -330,3 +330,64 @@ settings as above, by hand on the build server. Reports are kept in
 - The stores as macros at 160 MHz: register `rx_symbol`'s slot and `Hs` reads (one more
   edge in `rx_symbol`, the schedule restated, then a run with macros) for 0.74 mm² and about
   200 mW, or keep flip-flops?
+
+
+## 2026-11-26 · probe · `rx_data` with the SRAM macros and `rx_symbol`'s reads registered
+
+This is the same flow, image, platform, corner, clock (6.25 ns), settings and macro
+configuration (`tools/syn/ihp_sg13g2/rx_data_sram.mk`) as the entry above, at 1dd55ed (#94:
+`rx_symbol`'s slot and `Hs` reads registered; `hw/rtl` is the same on main at 486311b). The
+run was by hand on the build server. Its reports, the final database and the list of failing
+endpoints (`failing_endpoints.txt`, from `report_checks -format end -slack_max 0` on
+`6_final.odb`) are kept in `/data/radio-chip/asic-sram2-keep`.
+
+| `rx_data`, stores as SRAM macros (9 macros) | Flip-flops | Design area, routed | Worst slack at 6.25 ns | TNS | Failing endpoints | Power (flow's estimate) |
+|---|---|---|---|---|---|---|
+| 5687060, before #94 (entry above) | 14 712 | 3.00 mm² (macros 0.41) | −3.29 ns | −171 ns | | 237 mW |
+| 1dd55ed, `rx_symbol`'s reads registered | 14 794 | **3.05 mm²** (macros 0.41) | **−1.19 ns** (about 134 MHz) | −25.2 ns | 68 | 441 mW |
+| 5687060, stores as flip-flops (entry above) | 26 891 | 3.74 mm² | +0.16 ns | 0 | 0 | 437 mW |
+
+**What it says**
+- **#94 did what it was for.** `rx_symbol`'s slot and `Hs` reads no longer appear among the
+  failing paths. The worst slack goes from −3.29 to −1.19 ns.
+- **It still misses 160 MHz with the macros.** The 68 failing endpoints are in three groups,
+  all in `rx_channel`, `rx_symbol` and `rx_track`:
+  1. **`rx_channel`'s first pass, a read, an add and a write in one cycle** (worst −1.19 ns):
+     `Hs`'s macro answers 3.00 ns after its clock. `hs1 = word + L·T2` then goes back into the
+     same store (`A_DIN`, 0.35 ns setup) and into `s2_re`/`s2_im`. With flip-flops this read
+     was nearly free; with the macro, 2.9 ns are left for the add, the write multiplexer and
+     the wires.
+  2. **`rx_channel`'s multiplier, the 37 × 8 products `mph`/`mpl`** (to −0.80 ns), and `d`
+     (to −0.11 ns).
+  3. **`rx_symbol`'s `r6_mag`** (to −0.58 ns), `soft_v` (−0.03 ns), and `rx_track`'s `mlh`
+     (−0.01 ns).
+
+  Groups 2 and 3 are logic between flip-flops. They passed in the run with flip-flops (worst
+  +0.16 ns), so the placement around the macros costs them up to about 1 ns. That is one
+  placement on one seed, and it may move from run to run.
+- **Area:** 3.05 mm² against 3.74 with flip-flops (−18 %). The 82 flip-flops more than the
+  previous macro run are #94's registers.
+- **Power:** the flow's estimate is 441 mW, against 237 mW for the previous macro run and
+  437 mW with flip-flops. The switching part is 141 mW against 40. #94 adds 82 flip-flops,
+  which does not explain it. Until a run with real activity (a VCD from the gate's stimulus),
+  this estimate should not be used to compare the runs, even as a ranking.
+- **The run.** The script exited 1 at its very end, after `6_report` and the merged GDS were
+  written, as before; the figures are from that report.
+
+**Open, for the founder.** With the macros, 160 MHz needs at least the following. All of
+these are proposals, and none has been decided:
+- **Group 1 (−1.19 ns):** register `Hs`'s read before the first pass's add. That is one more
+  edge between a T2 bin and its write. Two bins in a row have different addresses, so there
+  is no read-after-write hazard. Whether `chan_valid` moves depends on the slack between the
+  first pass's last write and the second pass's first read, which needs checking against the
+  gate. The alternative is to keep `Hs` as flip-flops: one store of 64 × 44 bits, about
+  2 800 flip-flops.
+- **Groups 2 and 3 (to −0.80 ns):** a fourth stage in `rx_channel`'s multiplier (its
+  latencies restated or absorbed), and the same question for `rx_symbol`'s `r6_mag`. Or
+  first try floorplanning: place the macros at the edge or near their users, by hand
+  (`MACRO_PLACEMENT`). That changes no RTL, and it may be enough for the logic paths.
+- **Or the stores stay flip-flops for now.** 160 MHz is not a margin: it is R = 8 clocks a
+  sample at 20 MS/s (ADR 0006, 0008), and the front's folding and schedules are built on it.
+  A slower clock would be an architecture change, not a setting. The flip-flop build closes
+  160 MHz today. The macros can be taken up again with the ASIC stage's floorplan, so the
+  0.7 mm² is deferred rather than given up.
