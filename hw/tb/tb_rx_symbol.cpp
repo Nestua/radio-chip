@@ -36,7 +36,7 @@
 
 namespace {
 
-constexpr long kPil = 9;
+constexpr long kPil = 10;  // 9 before the reads were registered (2026-11-25)
 constexpr long kCr = 10;
 constexpr long kPhi = 18;
 constexpr long kSoft = 8;

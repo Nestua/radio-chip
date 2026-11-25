@@ -153,9 +153,9 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
     assert!(s.violations().is_empty(), "{:?}", s.violations());
     let rel = |c: usize| c - c0;
     // The tail: up to the next window's old place less one (302) at once, the rest from the
-    // cycle after the reader has seen the verdict (481 + 2), the frame's last window known.
+    // cycle after the reader has seen the verdict (482 + 2), the frame's last window known.
     assert_eq!((rel(taken[288]), rel(taken[302])), (336, 350));
-    assert_eq!(rel(taken[303]), 483);
+    assert_eq!(rel(taken[303]), 484);
 
     // T1 and T2 chained (their bins pushed out by the next window's samples), SIGNAL and the
     // data symbol flushed; the data window waits for SIGNAL's flush (207 + 65).
@@ -187,52 +187,52 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
             (Division::Outer, 305, 305, 319),
             (Division::Inner, 321, 321, 335),
             (Division::Variance, 337, 337, 349),
-            (Division::Fit(1), 482, 482, 508),
-            (Division::Scale(Modulation::Qam64), 484, 509, 529),
+            (Division::Fit(1), 483, 483, 509),
+            (Division::Scale(Modulation::Qam64), 485, 510, 530),
         ]
     );
     let sig = s.symbols()[0];
     assert_eq!(
         (rel(sig.bins), rel(sig.pilots), rel(sig.step)),
-        (284, 293, 295)
+        (284, 294, 296)
     );
-    assert_eq!((rel(sig.outer.0), rel(sig.outer.1)), (302, 303));
-    assert_eq!((rel(sig.inner.0), rel(sig.inner.1)), (306, 321));
+    assert_eq!((rel(sig.outer.0), rel(sig.outer.1)), (303, 304));
+    assert_eq!((rel(sig.inner.0), rel(sig.inner.1)), (307, 322));
     assert_eq!((rel(sig.g1), rel(sig.end), rel(sig.theta)), (362, 375, 8));
     assert_eq!(
         (rel(sig.phi.0), rel(sig.phi.1), rel(sig.phi.2)),
-        (351, 352, 370)
+        (352, 353, 371)
     );
     assert_eq!(rel(sig.scale), 305);
-    assert_eq!((rel(sig.soft.0), rel(sig.soft.1)), (378, 425));
+    assert_eq!((rel(sig.soft.0), rel(sig.soft.1)), (379, 426));
     let (a, b) = sig.steps.unwrap();
-    assert_eq!((rel(a), rel(b)), (428, 451));
+    assert_eq!((rel(a), rel(b)), (429, 452));
     let data = s.symbols()[1];
     assert_eq!(
         (rel(data.bins), rel(data.pilots), rel(data.step)),
-        (412, 421, 423)
+        (412, 422, 424)
     );
-    assert_eq!((rel(data.outer.0), rel(data.outer.1)), (430, 431));
-    assert_eq!((rel(data.inner.0), rel(data.inner.1)), (434, 449));
-    assert_eq!(rel(data.g1), 468);
+    assert_eq!((rel(data.outer.0), rel(data.outer.1)), (431, 432));
+    assert_eq!((rel(data.inner.0), rel(data.inner.1)), (435, 450));
+    assert_eq!(rel(data.g1), 469);
     let (ft, fd) = data.fit.unwrap();
-    assert_eq!((rel(ft), rel(fd), rel(data.theta)), (482, 508, 514));
+    assert_eq!((rel(ft), rel(fd), rel(data.theta)), (483, 509, 515));
     assert_eq!(
         (rel(data.phi.0), rel(data.phi.1), rel(data.phi.2)),
-        (524, 525, 543)
+        (525, 526, 544)
     );
-    assert_eq!(rel(data.scale), 531);
-    assert_eq!((rel(data.soft.0), rel(data.soft.1)), (551, 598));
+    assert_eq!(rel(data.scale), 532);
+    assert_eq!((rel(data.soft.0), rel(data.soft.1)), (552, 599));
     let (a, b) = data.steps.unwrap();
-    assert_eq!((rel(a), rel(b)), (601, 814));
+    assert_eq!((rel(a), rel(b)), (602, 815));
 
-    // The events (in the cycle after their register): the verdict and the start at 482, the
+    // The events (in the cycle after their register): the verdict and the start at 483, the
     // octets, the end with the last.
     let ev = s.events();
     assert!(matches!(ev[0].1, RxDataEvent::Verdict { .. }));
-    assert_eq!(rel(ev[0].0), 482);
+    assert_eq!(rel(ev[0].0), 483);
     assert!(matches!(ev[1].1, RxDataEvent::Start { .. }));
-    assert_eq!(rel(ev[1].0), 482);
+    assert_eq!(rel(ev[1].0), 483);
     let octets: Vec<(usize, u8)> = ev
         .iter()
         .filter_map(|e| match e.1 {
@@ -241,10 +241,10 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
         })
         .collect();
     assert_eq!(octets.iter().map(|o| o.1).collect::<Vec<_>>(), psdus[0]);
-    assert_eq!(octets[0].0, 726);
-    assert_eq!(octets[11].0, 814);
-    assert_eq!(octets[12].0, 822);
-    assert_eq!(octets[23].0, 910);
+    assert_eq!(octets[0].0, 727);
+    assert_eq!(octets[11].0, 815);
+    assert_eq!(octets[12].0, 823);
+    assert_eq!(octets[23].0, 911);
     // Bits 0 … 117 a step apart, the flush's 96 bits from the edge after the last regular
     // one: octets eight clocks apart throughout.
     for j in 1..24 {
@@ -254,17 +254,18 @@ fn the_table_of_one_symbol_at_54_mbps_worked_by_hand() {
         .iter()
         .find(|e| e.1 == RxDataEvent::End(RxDataEnd::Decoded))
         .unwrap();
-    assert_eq!(rel(end.0), 910);
+    assert_eq!(rel(end.0), 911);
 }
 
 #[test]
-fn a_long_frame_runs_at_one_symbol_in_245_clocks_whatever_the_rate() {
+fn a_long_frame_runs_at_one_symbol_in_246_clocks_whatever_the_rate() {
     // Beats offered every cycle (the reader behind the antenna): from one θ to the next the
     // sample before the window (θ + 2) and the window (1 + 63), the transform's last bin
-    // (77), the pilots (9), the step's start (2), the step with its division (91: the outer
+    // (77), the pilots (10; 9 before rx_symbol's reads were registered, 2026-11-25), the step's
+    // start (2), the step with its division (91: the outer
     // request T + 7, taken T + 8; the inner taken at the CORDIC's next free edge T + 26, its
     // angle T + 43; G₁ = T + 45; the fit asked G₁ + 13, taken T + 59, done T + 85, θ T + 91;
-    // 86 before the tracker's multiplier was pipelined, 2026-11-25): 245.
+    // 86 before the tracker's multiplier was pipelined, 2026-11-25): 246.
     for rate in RATES {
         let (adc, _, _) = train(&[(rate, 1500, 30.0, 0.0)], 0, 2);
         let beats = first_stream(&adc);
@@ -274,7 +275,7 @@ fn a_long_frame_runs_at_one_symbol_in_245_clocks_whatever_the_rate() {
         let thetas: Vec<usize> = s.symbols().iter().skip(1).map(|r| r.theta).collect();
         assert!(thetas.len() > 50, "{rate:?}");
         for (i, w) in thetas.windows(2).enumerate().skip(1) {
-            assert_eq!(w[1] - w[0], 245, "{rate:?}, data symbol {}", i + 2);
+            assert_eq!(w[1] - w[0], 246, "{rate:?}, data symbol {}", i + 2);
         }
         // Each data window's first sample waits for the last θ (+ 2) and the FFT's flush.
         let wins: Vec<_> = s

@@ -73,7 +73,7 @@ counts here are cycle to cycle, as the old allowances were):
 | `fft`, `fft_read`, `window_stores` | 96, 64, 2 stores | a streaming transform: bin j of a flushed window 14 + j after its 64th sample (77 for the last), of a chained one 14 after the next window's sample j − 1; the next window 65 after a flush; no store | `fft64.md` (75 edges) |
 | `channel` | 110 | 63 + 1 after T2's last bin | `rx_channel.md` |
 | divisions | the quotient bits + 2, from the channel | `rx_channel`'s own: 21, 37, 53, 67 after chan_valid; a request 3 + q; the tracker's 27 | `rx_channel.md`, `rx_track.md` |
-| `product` (pilots, pair products) | 3, the pair products on the products unit | pil_valid 9 + 1 after the last of its triggers; the pair products are the tracker's | `rx_symbol.md`, `rx_track.md` |
+| `product` (pilots, pair products) | 3, the pair products on the products unit | pil_valid 9 + 1 after the last of its triggers (10 + 1 since 2026-11-25, the reads registered: see the last sections); the pair products are the tracker's | `rx_symbol.md`, `rx_track.md` |
 | `cordic` | 18 | 18 a take, the angle 17 + 1 after | `cordic_iter` |
 | `fit_in`, `after_fit` | 5, 2 | the tracker's timeline (T, λ, G₀, G₁; the division asked on G₁ + 10, θ 5 + 1 after its done): θ 87 after the pilots with every unit free (superseded 2026-11-25 by the pipelined multiplier: G₁ + 13, 6 + 1, θ 92; see the last section) | `rx_track.md` |
 | `rotator` + 1 (φ asked) | 4 + 1 | 10 + 1 after the last of: the products written, θ, the last soft pass read | `rx_symbol.md` |
@@ -564,3 +564,19 @@ level follows θ by its signals, so it needed no change.
 path of both FSMs, proved the half-product split exact mod 2^68, recomputed the hand table
 from the module's rules (all entries agree), and found the bench checks each edge exactly.
 Docs only: the old latencies in the G0 tables and the BACKLOG marked superseded.
+
+## 2026-11-25 · the schedule restated for `rx_symbol`'s registered reads
+
+`rx_symbol`'s pil_valid is now 10 edges after its triggers (`PIL` = 10 in `radio_phy::rx_data`;
+`rx_symbol.md`, same date). The hand table of ADR 0010's case was re-derived by hand before
+the model was changed:
+- SIGNAL's pilots 294, T 296, φ 352 to 371, the first soft value 379, the steps 429 to 452;
+- **the verdict is registered on 482** (seen in 483; it was 481);
+- the data symbol: pilots 422, G1 469, the fit 483 to 509, θ 515, the scale 510 to 530, φ 525
+  to 544, the first soft value 552;
+- **the last octet and the end on 910** (seen in 911).
+
+The cadence is **246 clocks a symbol** (the pilots one edge later). At 1dd55ed:
+`cargo test -p radio-phy --test g2_rx_data_schedule` 11 of 11; `make -C hw rx_data` on the
+regenerated vectors 58 runs, 590 038 cycles, 0 mismatches; `scripts/check.sh` green. The
+independent review recomputed every row of the hand table and the cadence: all agree.

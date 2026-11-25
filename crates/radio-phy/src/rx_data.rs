@@ -68,8 +68,9 @@
 //!   take. In a packet the requests come in the order SIGNAL's outer, inner, its φ, then per
 //!   data symbol outer, inner, φ (each is checked; a break is a violation).
 //! - **`rx_symbol`**, symbol s: pil_valid on max(its last bin, CH + 1, the last pilots + 48) +
-//!   9; its φ request on max(pilots + 48, θ, the last first soft value + 41) + 10; φ 18 after
-//!   the CORDIC took it; the first soft value on F = max(φ, the scale's take, for data the
+//!   10 (its slot's and Hs's reads registered before the products, 2026-11-25); its φ request
+//!   on max(pilots + 48, θ, the last first soft value + 41) + 10; φ 18 after the CORDIC took
+//!   it; the first soft value on F = max(φ, the scale's take, for data the
 //!   verdict's take V + 1) + 8, then one a clock, 48.
 //! - **`rx_track`** (its multiplier pipelined, the founder's choice of 2026-11-25: a product
 //!   read three edges after its issue): start taken on c₀ + 1 (registered from the first
@@ -110,18 +111,18 @@
 //! | T1, T2, SIGNAL taken in cycles | 0 … 63, 64 … 127, 144 … 207 |
 //! | T2's last bin taken (with SIGNAL's sample 62); chan_valid | 220; 283 |
 //! | quotients: BPSK's scale, outer, inner, variance | 304, 320, 336, 350 |
-//! | SIGNAL: its bins taken; pilots; θ₀ | 221 … 284; 293; 8 |
-//! | its step: T; outer taken, inner taken; G₁; end | 295; 303, 321; 362; 375 |
-//! | its φ asked, taken, out; first soft value | 351, 352, 370; 378 |
-//! | its 24 steps; **the verdict** (seen in cycle 482) | 428 … 451; **481** |
+//! | SIGNAL: its bins taken; pilots; θ₀ | 221 … 284; 294; 8 |
+//! | its step: T; outer taken, inner taken; G₁; end | 296; 304, 322; 362; 375 |
+//! | its φ asked, taken, out; first soft value | 352, 353, 371; 379 |
+//! | its 24 steps; **the verdict** (seen in cycle 483) | 429 … 452; **482** |
 //! | data window (waits for the flush: 207 + 65) | 272 … 335 |
-//! | its bins taken; pilots; T | 349 … 412; 421; 423 |
-//! | outer taken, inner taken; G₁; the fit taken, done; θ | 431, 449; 468; 482, 508; 514 |
-//! | the data's scale taken (after the fit), q_valid | 509; 530 |
-//! | φ asked, out; first soft value | 524, 543; 551 |
-//! | 214 steps | 601 … 814 |
-//! | bit 0 (step 95), bit 117; the flush's 96 bits | 701, 818; 819 … 914 |
-//! | octet 0 (bit 23), 11 (bit 111), 12 (bit 119), **23, the end** | 725, 813, 821, **909** |
+//! | its bins taken; pilots; T | 349 … 412; 422; 424 |
+//! | outer taken, inner taken; G₁; the fit taken, done; θ | 432, 450; 469; 483, 509; 515 |
+//! | the data's scale taken (after the fit), q_valid | 510; 531 |
+//! | φ asked, out; first soft value | 525, 544; 552 |
+//! | 214 steps | 602 … 815 |
+//! | bit 0 (step 95), bit 117; the flush's 96 bits | 702, 819; 820 … 915 |
+//! | octet 0 (bit 23), 11 (bit 111), 12 (bit 119), **23, the end** | 726, 814, 822, **910** |
 //!
 //! [`RxDataFixed`]: crate::rx_data_fixed::RxDataFixed
 
@@ -158,7 +159,7 @@ const CHAN_NEXT: usize = 1;
 /// The data scale's request (taken with the verdict) to the divider's earliest take.
 const SCALE_ASK: usize = 2;
 /// `rx_symbol`: pil_valid after its triggers.
-const PIL: usize = 9;
+const PIL: usize = 10;
 /// `rx_symbol`: the products pass, from pil_valid to its last product written.
 const PRODUCTS: usize = 48;
 /// `rx_symbol`: the CORDIC request after its triggers.

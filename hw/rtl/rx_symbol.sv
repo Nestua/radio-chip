@@ -40,8 +40,9 @@
 //
 // Latencies, in clock edges after the edge that takes the last of the triggers (tb_rx_symbol
 // checks every one):
-//   pil_valid   9 after: the symbol's 52nd used bin, chan_valid, the previous symbol's last
-//               product written (48 edges after its pil_valid);
+//   pil_valid  10 after: the symbol's 52nd used bin, chan_valid, the previous symbol's last
+//               product written (48 edges after its pil_valid). (9 before the slot's and Hs's
+//               reads were registered before the products, 2026-11-25.)
 //   cr_valid   10 after: the symbol's last product written, the edge before θ's (θ is used
 //               in the cycle it comes), the previous soft pass's last read (41 edges after
 //               its first soft_valid);
@@ -255,6 +256,12 @@ module rx_symbol
     // ---- the products pipeline ----------------------------------------------------------
     logic                 p1_v, p1_slot;
     logic [5:0]           p1_k, p1_addr;
+    // pq: the two reads registered before the products (the founder's choice of 2026-11-25:
+    // an SRAM macro's read takes 3.22 ns at 130 nm, docs/gates/silicon_probe.md).
+    logic                 pq_v, pq_slot;
+    logic [5:0]           pq_k, pq_addr;
+    logic signed [W-1:0]  pq_zre, pq_zim;
+    logic signed [HS_BITS-1:0] pq_hre, pq_him;
     logic                 p2_v, p2_slot;
     logic [5:0]           p2_k, p2_addr;
     logic signed [ZH-2:0] p2_rr, p2_ii, p2_ir, p2_ri;
@@ -285,16 +292,21 @@ module rx_symbol
     endfunction
 
     always_ff @(posedge clk) begin
-        p2_rr <= (ZH-1)'(z_re) * (ZH-1)'(hs_rdata_re);
-        p2_ii <= (ZH-1)'(z_im) * (ZH-1)'(hs_rdata_im);
-        p2_ir <= (ZH-1)'(z_im) * (ZH-1)'(hs_rdata_re);
-        p2_ri <= (ZH-1)'(z_re) * (ZH-1)'(hs_rdata_im);
+        pq_zre <= z_re;
+        pq_zim <= z_im;
+        pq_hre <= hs_rdata_re;
+        pq_him <= hs_rdata_im;
+        p2_rr <= (ZH-1)'(pq_zre) * (ZH-1)'(pq_hre);
+        p2_ii <= (ZH-1)'(pq_zim) * (ZH-1)'(pq_him);
+        p2_ir <= (ZH-1)'(pq_zim) * (ZH-1)'(pq_hre);
+        p2_ri <= (ZH-1)'(pq_zre) * (ZH-1)'(pq_him);
         p3_re <= ZH'(p2_rr) + ZH'(p2_ii);
         p3_im <= ZH'(p2_ir) - ZH'(p2_ri);
         p4_re <= narrow_u(p3_re, shift_r);
         p4_im <= narrow_u(p3_im, shift_r);
         p1_k <= p_cnt;        p1_addr <= p_addr;  p1_slot <= psel;
-        p2_k <= p1_k;         p2_addr <= p1_addr; p2_slot <= p1_slot;
+        pq_k <= p1_k;         pq_addr <= p1_addr; pq_slot <= p1_slot;
+        p2_k <= pq_k;         p2_addr <= pq_addr; p2_slot <= pq_slot;
         p3_k <= p2_k;         p3_addr <= p2_addr; p3_slot <= p2_slot;
         p4_k <= p3_k;         p4_addr <= p3_addr; p4_slot <= p3_slot;
         p4_last <= p3_k == 6'd51;
@@ -464,6 +476,7 @@ module rx_symbol
             p_wait    <= 1'b0;
             rs        <= R_IDLE;
             p1_v      <= 1'b0;
+            pq_v      <= 1'b0;
             p2_v      <= 1'b0;
             p3_v      <= 1'b0;
             p4_v      <= 1'b0;
@@ -522,7 +535,8 @@ module rx_symbol
                 end
             end
             p1_v <= p_issue;
-            p2_v <= p1_v;
+            pq_v <= p1_v;
+            p2_v <= pq_v;
             p3_v <= p2_v;
             p4_v <= p3_v;
             pil_valid <= p4_v && p4_k == 6'd3;
