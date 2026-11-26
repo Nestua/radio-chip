@@ -398,3 +398,67 @@ these are proposals, and none has been decided:
   would be an architecture decision. The flip-flop build closes
   160 MHz today. The macros can be taken up again with the ASIC stage's floorplan, so the
   0.7 mm² is deferred rather than given up.
+
+## 2026-11-26 · probe · `rx_data` with the SRAM macros placed by hand
+
+The founder chose on 2026-11-26 to try placing the macros by hand first, with no RTL change.
+This run uses the same flow, image, platform, corner, clock (6.25 ns), settings and RTL as the
+entry above (`hw/rtl` on main at ddac8ed is the same as at 486311b). The only change is
+`MACRO_PLACEMENT_TCL = tools/syn/ihp_sg13g2/rx_data_macros.tcl` in the run's `config.mk`. The
+run was by hand on the build server. Its reports, the final database, the placement script
+and the failing endpoints are kept in `/data/radio-chip/asic-mp40-keep`.
+
+**Why this placement.** The automatic placement of the entry above (read back from its
+`6_final.odb`) put all nine macros in three rows along the bottom edge, about 80 µm apart.
+All of a macro's pins lie on one long edge (526 or 703 µm), so `rx_symbol`'s two slots sat
+directly in front of `Hs`'s pins. Also, `Hs`'s high half was mirrored (R180) beside its low
+half, so the add's carry from bit 21 to bit 22 crossed about 600 µm. On the worst path two
+`o21ai_1` cells each drove about 70 fF, 0.52 ns each (0.75 to 0.8 ns with the buffer that
+follows). The script places the macros in one row on the
+bottom edge (pins up) and one on the top edge (pins down), so no macro faces another:
+- bottom: `Hs` low half, then `Hs` high half, in bit order, then the gains `G`, then
+  `rx_deint`'s bank 0;
+- top: `rx_symbol`'s two slots, then `rx_deint`'s bank 1.
+
+The positions are computed from the core box. A first attempt put the slots on the right
+edge, rotated; the flow's `place_macro` stopped with MPL-0034 ("outside of the core") at a
+position that fits only with the unrotated size (that log was not kept). A second run at
+`CORE_UTILIZATION = 50` was set up but dropped, because the two rows do not fit that core
+without rotation.
+
+| `rx_data`, stores as SRAM macros (9 macros) | Design area, routed | Worst slack at 6.25 ns | TNS | Failing endpoints | Power (flow's estimate) |
+|---|---|---|---|---|---|
+| automatic placement (entry above) | 3.05 mm² | −1.19 ns | −25.2 ns | 68 | 441 mW |
+| **placed by hand** | **2.99 mm²** (macros 0.41) | **−0.92 ns** (about 140 MHz) | **−10.3 ns** | 39 | 380 mW |
+| stores as flip-flops (2026-11-25) | 3.74 mm² | +0.16 ns | 0 | 0 | 437 mW |
+
+Flip-flops: 14 794, as in the entry above.
+
+**What it says**
+- **The placement bought 0.27 ns on the worst path and more on the logic paths, but not
+  160 MHz.** The 39 failing endpoints are now all in `rx_channel` (33) and `rx_symbol` (6).
+  `rx_track` no longer appears.
+- **`rx_channel`'s first pass is still the worst** (`s2_re` −0.92 ns, `Hs`'s `A_DIN`
+  −0.80 ns), but most of the path is now the flow's own repair, not the add. The launch
+  clock reaches `Hs`'s `B_CLK` at 1.31 ns, and the macro answers at 4.37 ns (3.07 ns read).
+  That leaves 3.12 ns to the required time (7.49 ns). Of the 4.04 ns after the read, about
+  2.4 ns are a chain of 37 `buf_1` cells in series named `rebuffer*`, all within about
+  25 × 65 µm next to `s2_re[8]`. The add and the multiplexer themselves take about 1.65 ns,
+  so without the chain this path would pass by about 1.4 ns. The chain is not for hold: the
+  endpoint's hold slack is +0.55 ns, and the repair after global routing reports no hold
+  violations. That repair (`repair_timing` in `5_1_grt`) inserted 1 864 buffers. The other
+  failing endpoints checked carry such buffers too: 39 and 40 on the worst paths to
+  `s2_re[8]` and `Hs`'s `A_DIN[4]`, 14 to `s2_re[17]`, 48 to `mpl[20]` (cells on the path). Why the repair builds them,
+  and what the path is once they are gone, has not been found yet. The previous run's worst
+  path had no such chain.
+- **The logic paths moved both ways:** `rx_channel`'s `mpl`/`mph` to −0.74 ns (was −0.80),
+  `rx_symbol`'s `r6_mag` to −0.14 ns (was −0.58), but `d` to −0.25 ns (was −0.11). This is one placement on one seed. With flip-flops all of them passed.
+- **Power:** the estimate is 380 mW (internal 259, switching 120). As in the entry above,
+  it is not comparable between runs without real activity.
+- One corner, default settings, no sign-off, as before. There are 15 nets over the flow's
+  fanout limit and 4 capacitance violations after repair.
+
+**Open.** First, why the flow's repair builds the buffer chains, and a run without them
+(the repair's settings, no RTL change). If the paths then still fail, the founder chooses:
+register `Hs`'s read before the first pass's add (whether `chan_valid` moves is to be
+checked against the gate), or keep the stores as flip-flops until the ASIC stage.
