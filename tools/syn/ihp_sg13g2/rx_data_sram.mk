@@ -6,6 +6,9 @@
 #     ihp-sg13g2/libs.ref/sg13g2_sram/{lef,gds,lib} to W/macros;
 #   tools/syn/orfs_block.sh <repo> W rx_data 6.25 x.sv   (the config is kept as it is: the
 #     source list argument is then unused; the script writes only constraint.sdc)
+# The run with the macros placed by hand (2026-11-26) adds one line, with
+# tools/syn/ihp_sg13g2/rx_data_macros.tcl copied to W/rx_data/macros.tcl:
+#   export MACRO_PLACEMENT_TCL = /work/rx_data/macros.tcl
 export DESIGN_NAME = rx_data
 export DESIGN_NICKNAME = rx_data
 export PLATFORM = ihp-sg13g2
