@@ -213,3 +213,20 @@ A product issued in step k is captured in step k + 3. To fit that, the issue ord
 - po captured a step early: 2794 mismatches;
 - mph shifted by 7;
 - sa captured a step late.
+
+## 2026-11-27 · G3 · the first pass's adds in modules of their own (no change of function)
+
+Through the open flow with the stores as SRAM macros, `Hs`'s read-add-write was the worst
+path, because the flow's mapper turned the 18-bit add into a ripple-carry chain
+(`silicon_probe.md`, 2026-11-27). The two adds (`hs1_re`, `hs1_im`) are now instances of
+`hw/rtl/lib/add_alone.sv` (`y = a + b`, kept as a module through synthesis). Nothing else
+changed: no latency, no width.
+
+| Gate | Command | Result |
+|---|---|---|
+| G3 | `make -C hw rx_channel` | 338 packets × 3 passes, 8293 quotients, PASS |
+| G3 | `make -C hw rx_data` | 58 runs, 590 038 cycles, 189 793 beats, 0 mismatches |
+| lint | `make -C hw lint` | clean |
+
+**Mutant:** `y = a − b` in `add_alone.sv` fails `make -C hw rx_channel`; restored by copy,
+the gate passes again.
