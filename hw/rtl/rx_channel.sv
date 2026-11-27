@@ -217,11 +217,16 @@ module rx_channel
             default: begin ma = '0;         mb = '0;         end
         endcase
     end
+    // Each byte's product is a module the synthesis tool maps by itself (lib/mul_alone.sv):
+    // inside the flattened design the open flow left them 8.1 ns deep, alone 3.0 ns.
+    wire [44:0] mph_w, mpl_w;
+    mul_alone #(.AW(37), .BW(8)) u_mul_h (.a(mqa), .b(mqb[15:8]), .y(mph_w));
+    mul_alone #(.AW(37), .BW(8)) u_mul_l (.a(mqa), .b(mqb[7:0]),  .y(mpl_w));
     always_ff @(posedge clk) begin
         mqa <= ma;
         mqb <= mb;
-        mph <= 45'(mqa) * 45'(mqb[15:8]);
-        mpl <= 45'(mqa) * 45'(mqb[7:0]);
+        mph <= mph_w;
+        mpl <= mpl_w;
         mp  <= {mph, 8'b0} + 53'(mpl);
     end
 
