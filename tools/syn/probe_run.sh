@@ -118,6 +118,9 @@ cmd_wait() {
 cmd_paths() {
     [ $# -ge 1 ] || die "paths <name> [stage, default 6_final]"
     local n=$1 stage=${2:-6_final} d dd top res out
+    case $stage in
+        place) stage=3_place ;; cts) stage=4_cts ;; grt) stage=5_1_grt ;; final) stage=6_final ;;
+    esac
     d=$(run_dir "$n"); dd=$(design_dir "$n"); top=$(basename "$dd")
     res=$(base "$n" results); out="$d/paths_$stage"
     [ -f "$res/$stage.odb" ] || die "no $res/$stage.odb"
@@ -141,7 +144,7 @@ cmd_paths() {
         "$orfs; openroad -no_init -exit /work/$(basename "$out.tcl")" > "$out.out" 2>&1 \
         || die "static timing failed, see $out.out"
     echo "== $n, $stage: failing endpoints by group (count, worst slack, sum)"
-    grep VIOLATED "$out.out" | awk '{print $1, $(NF-1)}' \
+    awk '/VIOLATED/ { print (NF >= 5 ? $1 : prev), $(NF-1) } { prev = $1 }' "$out.out" \
         | sed -E 's/\[[0-9]+\](\$[A-Za-z0-9_]+)?(\/[A-Za-z_]+)?(\[[0-9]+\])? / /; s/\[[0-9]+\]//g' \
         | awk '{n[$1]++; s[$1]+=$2; if(!($1 in w)||$2<w[$1])w[$1]=$2}
                END{for(k in n)printf "%4d %7.2f %8.2f  %s\n", n[k], w[k], s[k], k}' | sort -k2n
