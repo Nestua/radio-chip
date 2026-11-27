@@ -217,7 +217,7 @@ A product issued in step k is captured in step k + 3. To fit that, the issue ord
 ## 2026-11-27 · G3 · the first pass's adds in modules of their own (no change of function)
 
 Through the open flow with the stores as SRAM macros, `Hs`'s read-add-write was the worst
-path, because the flow's mapper turned the 22-bit add into a ripple-carry chain
+path, because the flow's mapper turned the 18-bit add into a ripple-carry chain
 (`silicon_probe.md`, 2026-11-27). The two adds (`hs1_re`, `hs1_im`) are now instances of
 `hw/rtl/lib/add_alone.sv` (`y = a + b`, kept as a module through synthesis). Nothing else
 changed: no latency, no width.

@@ -9,6 +9,8 @@
 # The run with the macros placed by hand (2026-11-26) adds one line, with
 # tools/syn/ihp_sg13g2/rx_data_macros.tcl copied to W/rx_data/macros.tcl:
 #   export MACRO_PLACEMENT_TCL = /work/rx_data/macros.tcl
+# Runs B to D of 2026-11-27 add a second (the timing repair may not insert buffers):
+#   export SETUP_MOVE_SEQUENCE = unbuffer,sizeup,swap,clone,split
 export DESIGN_NAME = rx_data
 export DESIGN_NICKNAME = rx_data
 export PLATFORM = ihp-sg13g2

@@ -465,11 +465,16 @@ checked against the gate), or keep the stores as flip-flops until the ASIC stage
 
 ## 2026-11-27 · probe · `rx_data` with macros: the repair's chains, and `Hs`'s add mapped by itself
 
-Five runs after the entry above, all with the same flow, image, platform, corner, clock
-(6.25 ns), macros and hand placement. Runs A, B and C change only the flow's settings (RTL
-on main at 91c8601). Run D adds one change of RTL with no change of function. All were by
-hand on the build server; each run's `config.mk`, reports, logs, final database and failing
-endpoints are kept in `/data/radio-chip/asic-rep{A,B,C,D}-keep` (A has no endpoint list).
+Four runs after the entry above and one synthesis-only experiment, all with the same flow,
+image, platform, corner, clock (6.25 ns), macros and hand placement. Runs A, B and C change
+only the flow's settings (RTL on main at 91c8601). Run D adds one change of RTL with no
+change of function: `hw/rtl` as in this entry's PR (branch commit f4a5865; the server's copy
+was synchronised from that tree by checksum; later commits of the PR change comments only).
+All were by hand on the build server; each run's `config.mk`, reports, logs, final database
+and failing endpoints are kept in `/data/radio-chip/asic-rep{A,B,C,D}-keep` (A has no
+endpoint list). The static-timing scripts and their outputs for the synthesis comparison are
+in `/data/radio-chip/mp` (`s1.tcl`, `s1-base.out`, `s1-add.out`); the experiment's own
+synthesis run was not kept, D's `1_synth.odb` is the same design.
 
 | Run | Change against the hand-placed run | Worst slack at 6.25 ns | TNS | Failing endpoints | Design area, routed |
 |---|---|---|---|---|---|
@@ -487,12 +492,12 @@ Flip-flops: 14 794 in every run.
   skipped (A) everything is worse, and the worst path (`Hs` → `s2_re[8]`) still carries
   `rebuffer*` cells from the earlier repair steps. With buffer insertion forbidden (B) the
   worst path has 3 buffers in place of 37 and is still `Hs`'s: read at 4.34 ns, arrival at
-  `Hs`'s `A_DIN[13]` at 8.69 ns against 7.85 required. The entry above said this path would
+  `Hs`'s `A_DIN[13]` at 8.69 ns against 7.85 required (−0.83 ns before rounding). The entry above said this path would
   pass by about 1.4 ns without the chain. That was wrong: it took the add's delay from a
   path whose add had been restructured by the repair.
 - **The add is a ripple-carry chain, and it leaves synthesis that way.** In B and C the
-  4.35 ns after the read are about 3.3 ns of carry (two bits per `a21oi`, `a21oi`, `a21o`,
-  `o21ai`, `inv`, 22 bits) and about 1.0 ns for the sum bit, the write multiplexer and the
+  4.35 ns after the read are about 3.3 ns of carry (the group `a21oi`, `a21oi`, `a21o`,
+  `o21ai`, `inv` repeated along the 18 bits) and about 1.0 ns for the sum bit, the write multiplexer and the
   way to the macro's pin. Static timing on C's `1_synth.odb` (before placement, no wires)
   shows the same chain: 5.0 ns after the read, slack −1.89 ns to `s2_im`. Yosys does read
   the flow's Kogge-Stone carry map (`lcu_kogge_stone.v` in the log); the chain is what ABC
@@ -509,7 +514,7 @@ Flip-flops: 14 794 in every run.
   in the flattened design the add has "slack" up to the depth of the products. Synthesised
   area grows by 1.2 % (3 813 044 against 3 767 845 µm²), more than the two adds themselves
   (2 268 µm² each); where the rest comes from has not been looked at.
-- **Routed (D): 30 of the 35 failing endpoints are gone.** No endpoint behind `Hs`'s read is
+- **Routed (D): 5 failing endpoints against 35.** No endpoint behind `Hs`'s read is
   among the twelve worst paths (all others at 0.00 ns or better). The five that fail are all
   `rx_channel`'s `mpl`, the 37 × 8 product of the multiplier's second stage, flip-flop to
   flip-flop: about 40 cells, 6.5 ns, −0.37 ns at `mpl[43]`. Close behind and passing:
@@ -526,7 +531,7 @@ changed RTL: `make -C hw rx_channel` (338 packets × 3 passes, 8293 quotients, P
 `make -C hw rx_data` (58 runs, 590 038 cycles, 0 mismatches), `make -C hw lint` clean. The
 mutant `y = a − b` fails `rx_channel`. `tools/syn/ihp_sg13g2/rx_data_sram.mk` lists the new
 file; D's `config.mk` is that file with the two lines `MACRO_PLACEMENT_TCL` and
-`SETUP_MOVE_SEQUENCE` above.
+`SETUP_MOVE_SEQUENCE` above (both now named in that file's header).
 
 **Open.** A run E is in flight: D with the flow's default repair moves (buffers allowed
 again), to see whether the repair closes `mpl` now that `Hs`'s path no longer asks for the
