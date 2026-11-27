@@ -11,6 +11,7 @@
 #   export MACRO_PLACEMENT_TCL = /work/rx_data/macros.tcl
 # Runs B to D of 2026-11-27 add a second (the timing repair may not insert buffers):
 #   export SETUP_MOVE_SEQUENCE = unbuffer,sizeup,swap,clone,split
+# Runs E to I of 2026-11-27 are without that second line again (the flow's default repair).
 export DESIGN_NAME = rx_data
 export DESIGN_NICKNAME = rx_data
 export PLATFORM = ihp-sg13g2

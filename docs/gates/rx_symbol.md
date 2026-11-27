@@ -215,3 +215,23 @@ product written, so it moves with it. Values are unchanged.
 | `pq_v` from the issue (data a cycle late) | 1 |
 | `pq_k` from the issue counter | 4108 |
 | Z's I and Q swapped into `pq` | 72 382 |
+
+## 2026-11-27 · G3 · the six |m|·q products in modules of their own (no change of function)
+
+Through the open flow with the stores as SRAM macros, once `rx_channel`'s products were
+mapped by themselves, the one endpoint short of 160 MHz was this block's `r5_m` →
+`r6_mag` (−0.12 ns; `silicon_probe.md`, 2026-11-27, the second entry). Stage r6's six
+products are now instances of `hw/rtl/lib/absmul_alone.sv` (`y = |m| · q`, kept as a module
+through synthesis); the negation's bound (|m| ≤ 2^(U−1), G0) is unchanged and stated at the
+instances. Nothing else changed: no latency, no width. At f34749a:
+
+| Gate | Command | Result |
+|---|---|---|
+| G3 | `make -C hw rx_symbol` | 127 packets × 2 passes, 821 symbols, 40 462 soft subcarriers, 0 mismatches |
+| G3 | `make -C hw rx_data` | 58 runs, 590 038 cycles, 189 793 beats, 0 mismatches |
+| lint | `make -C hw lint` | clean |
+
+**Mutants**, each restored by copy; each fails `make -C hw rx_symbol`:
+- `absmul_alone`: `~m` for `−m` (the magnitude one short for a negative value);
+- `absmul_alone`: `q >> 1` for `q`;
+- `rx_symbol`: the six instances fed `r5_m` in reverse order.

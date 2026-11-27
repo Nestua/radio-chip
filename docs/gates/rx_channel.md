@@ -230,3 +230,26 @@ changed: no latency, no width.
 
 **Mutant:** `y = a − b` in `add_alone.sv` fails `make -C hw rx_channel`; restored by copy,
 the gate passes again.
+
+## 2026-11-27 · G3 · the multiplier's byte products in modules of their own (no change of function)
+
+After the adds above, the open flow's last failing endpoints in this block were `mpl`, the
+37 × 8 product of the multiplier's second stage: 8.1 ns deep after synthesis inside the
+flattened design, 3.0 ns with the product in a module of its own (`silicon_probe.md`,
+2026-11-27, the second entry). The two products (`mph`, `mpl`) are now instances of
+`hw/rtl/lib/mul_alone.sv` (`y = a · b`, unsigned, exact, kept as a module through
+synthesis). Nothing else changed: no latency, no width. At f34749a:
+
+| Gate | Command | Result |
+|---|---|---|
+| G3 | `make -C hw rx_channel` | 338 packets × 3 passes, 8293 quotients, 0 mismatches, PASS |
+| G3 | `make -C hw rx_data` | 58 runs, 590 038 cycles, 189 793 beats, 0 mismatches |
+| lint | `make -C hw lint` | clean |
+
+**Mutants**, each restored by copy:
+
+| Mutant | `make -C hw rx_channel` |
+|---|---|
+| `mul_alone`: `b ^ 1` for `b` | FAIL |
+| `rx_channel`: the two instances' bytes of `mqb` swapped | FAIL |
+| `mul_alone`: `a` cast to one bit fewer than the product | PASS, equivalent: `a` is 37 bits and the product is still taken in 45 |
