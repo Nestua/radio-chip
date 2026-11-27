@@ -127,8 +127,11 @@ module rx_channel
     wire signed [HS_BITS-1:0] st_re = st_rdata[2*HS_BITS-1:HS_BITS];
     wire signed [HS_BITS-1:0] st_im = st_rdata[HS_BITS-1:0];
     // Hs(k) in the first pass (the word + L·T2, no overflow: G0), the word in the second.
-    wire signed [HS_BITS-1:0] hs1_re = st_re + s1_add_re;
-    wire signed [HS_BITS-1:0] hs1_im = st_im + s1_add_im;
+    // The adds sit behind the store's read (a macro's read is about half the clock at 160 MHz
+    // on 130 nm), so each is a module the synthesis tool maps by itself (lib/add_alone.sv).
+    wire signed [HS_BITS-1:0] hs1_re, hs1_im;
+    add_alone #(.W(HS_BITS)) u_add_re (.a(st_re), .b(s1_add_re), .y(hs1_re));
+    add_alone #(.W(HS_BITS)) u_add_im (.a(st_im), .b(s1_add_im), .y(hs1_im));
 
     wire                  st_we    = t1_wr || (s1_v && s1_p1);
     wire [5:0]            st_waddr = t1_wr ? bin_idx : s1_k;

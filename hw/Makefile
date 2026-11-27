@@ -59,7 +59,7 @@ SRC_scrambler := rtl/scrambler.sv
 SRC_conv_encoder := rtl/conv_encoder.sv
 SRC_viterbi   := rtl/viterbi.sv
 SRC_fft64     := $(GEN_FFT) rtl/fft64.sv
-SRC_rx_channel := $(GEN_CHAN) rtl/lib/ram_1w1r.sv rtl/div_serial.sv rtl/rx_channel.sv tb/channel_chain.sv
+SRC_rx_channel := $(GEN_CHAN) rtl/lib/ram_1w1r.sv rtl/div_serial.sv rtl/lib/add_alone.sv rtl/rx_channel.sv tb/channel_chain.sv
 SRC_rx_symbol := $(GEN_RTL) $(GEN_CHAN) $(GEN_SYM) rtl/round_sat.sv rtl/lib/ram_1w1r.sv rtl/cordic_iter.sv \
                  rtl/rx_symbol.sv tb/symbol_chain.sv
 SRC_rx_track  := $(GEN_RTL) $(GEN_CHAN) $(GEN_SYM) $(GEN_TRK) rtl/cordic_iter.sv rtl/cordic_share.sv \
@@ -68,7 +68,7 @@ SRC_rx_deint  := $(GEN_SYM) rtl/lib/ram_1w1r.sv rtl/rx_deint.sv
 SRC_rx_signal := rtl/viterbi.sv rtl/conv_encoder.sv rtl/rx_signal.sv tb/signal_chain.sv
 SRC_rx_octets := rtl/rx_octets.sv
 SRC_rx_data   := $(GEN_RTL) $(GEN_FFT) $(GEN_CHAN) $(GEN_SYM) $(GEN_TRK) rtl/round_sat.sv rtl/lib/ram_1w1r.sv \
-                 rtl/fft64.sv rtl/div_serial.sv rtl/div_share.sv rtl/rx_channel.sv rtl/cordic_iter.sv \
+                 rtl/fft64.sv rtl/div_serial.sv rtl/div_share.sv rtl/lib/add_alone.sv rtl/rx_channel.sv rtl/cordic_iter.sv \
                  rtl/cordic_share.sv rtl/rx_symbol.sv rtl/rx_track.sv rtl/rx_deint.sv rtl/viterbi.sv \
                  rtl/conv_encoder.sv rtl/rx_signal.sv rtl/rx_octets.sv rtl/rx_data.sv
 SRC_round_sat := rtl/round_sat.sv tb/round_sat_bank.sv

@@ -462,3 +462,75 @@ Flip-flops: 14 794, as in the entry above.
 (the repair's settings, no RTL change). If the paths then still fail, the founder chooses:
 register `Hs`'s read before the first pass's add (whether `chan_valid` moves is to be
 checked against the gate), or keep the stores as flip-flops until the ASIC stage.
+
+## 2026-11-27 · probe · `rx_data` with macros: the repair's chains, and `Hs`'s add mapped by itself
+
+Five runs after the entry above, all with the same flow, image, platform, corner, clock
+(6.25 ns), macros and hand placement. Runs A, B and C change only the flow's settings (RTL
+on main at 91c8601). Run D adds one change of RTL with no change of function. All were by
+hand on the build server; each run's `config.mk`, reports, logs, final database and failing
+endpoints are kept in `/data/radio-chip/asic-rep{A,B,C,D}-keep` (A has no endpoint list).
+
+| Run | Change against the hand-placed run | Worst slack at 6.25 ns | TNS | Failing endpoints | Design area, routed |
+|---|---|---|---|---|---|
+| hand-placed (entry above) | — | −0.92 ns | −10.3 ns | 39 | 2.99 mm² |
+| A | `SKIP_INCREMENTAL_REPAIR = 1` (no timing repair after global routing) | −1.55 ns | −13.6 ns | 71 | 2.97 mm² |
+| B | `SETUP_MOVE_SEQUENCE = unbuffer,sizeup,swap,clone,split` (repair may not insert buffers) | −0.83 ns | −8.4 ns | 35 | 2.98 mm² |
+| C | B and `ABC_CLOCK_PERIOD_IN_PS = 3000` | −0.83 ns | −8.4 ns | 35 | 2.98 mm² |
+| **D** | B and `Hs`'s two adds each in a module of its own (`hw/rtl/lib/add_alone.sv`) | **−0.37 ns** (about 151 MHz) | **−1.2 ns** | **5** | 3.00 mm² |
+| stores as flip-flops (2026-11-25) | | +0.16 ns | 0 | 0 | 3.74 mm² |
+
+Flip-flops: 14 794 in every run.
+
+**What the runs say**
+- **The buffer chains were not the main cause (A, B).** With the repair after global routing
+  skipped (A) everything is worse, and the worst path (`Hs` → `s2_re[8]`) still carries
+  `rebuffer*` cells from the earlier repair steps. With buffer insertion forbidden (B) the
+  worst path has 3 buffers in place of 37 and is still `Hs`'s: read at 4.34 ns, arrival at
+  `Hs`'s `A_DIN[13]` at 8.69 ns against 7.85 required. The entry above said this path would
+  pass by about 1.4 ns without the chain. That was wrong: it took the add's delay from a
+  path whose add had been restructured by the repair.
+- **The add is a ripple-carry chain, and it leaves synthesis that way.** In B and C the
+  4.35 ns after the read are about 3.3 ns of carry (two bits per `a21oi`, `a21oi`, `a21o`,
+  `o21ai`, `inv`, 22 bits) and about 1.0 ns for the sum bit, the write multiplexer and the
+  way to the macro's pin. Static timing on C's `1_synth.odb` (before placement, no wires)
+  shows the same chain: 5.0 ns after the read, slack −1.89 ns to `s2_im`. Yosys does read
+  the flow's Kogge-Stone carry map (`lcu_kogge_stone.v` in the log); the chain is what ABC
+  makes of it afterwards.
+- **ABC's clock target does nothing in this flow (C).** The log shows `-D 3000` on the ABC
+  command against `-D 6250` in B, and the result is B's to the last digit of the synthesised
+  area (3 767 844.78 µm²), slack and TNS. No command in the flow's `abc_speed.script` uses
+  the target. So C did not test the explanation it was run for.
+- **Alone in a module, the add is mapped fast (the synthesis experiment, then D).** With each
+  add in a module of its own, kept through synthesis, the same static timing after synthesis
+  shows 13 cells and 1.19 ns after the read, slack +1.89 ns. The explanation that fits both
+  results, not shown beyond them: ABC maps a module to the depth of its longest path and
+  recovers area on every shorter one, and a macro's output is to it an input at time 0, so
+  in the flattened design the add has "slack" up to the depth of the products. Synthesised
+  area grows by 1.2 % (3 813 044 against 3 767 845 µm²), more than the two adds themselves
+  (2 268 µm² each); where the rest comes from has not been looked at.
+- **Routed (D): 30 of the 35 failing endpoints are gone.** No endpoint behind `Hs`'s read is
+  among the twelve worst paths (all others at 0.00 ns or better). The five that fail are all
+  `rx_channel`'s `mpl`, the 37 × 8 product of the multiplier's second stage, flip-flop to
+  flip-flop: about 40 cells, 6.5 ns, −0.37 ns at `mpl[43]`. Close behind and passing:
+  `rx_symbol`'s `r6_mag` (+0.04 ns), `rx_track`'s `y0` (+0.14 ns).
+- **Power:** the flow's estimate is 374 mW (A), 376 mW (B, C) and 245 mW (D; switching 45 mW
+  against 119). Why D's is lower is not known; as before, it is not comparable between runs
+  without real activity.
+- One corner, default settings, no sign-off, as before. After D: 21 nets over the fanout
+  limit, 3 capacitance violations.
+
+**The change of RTL (D).** `hw/rtl/lib/add_alone.sv` is `y = a + b` with yosys's
+`keep_hierarchy` attribute; `rx_channel` uses it for the first pass's two adds. Gates on the
+changed RTL: `make -C hw rx_channel` (338 packets × 3 passes, 8293 quotients, PASS),
+`make -C hw rx_data` (58 runs, 590 038 cycles, 0 mismatches), `make -C hw lint` clean. The
+mutant `y = a − b` fails `rx_channel`. `tools/syn/ihp_sg13g2/rx_data_sram.mk` lists the new
+file; D's `config.mk` is that file with the two lines `MACRO_PLACEMENT_TCL` and
+`SETUP_MOVE_SEQUENCE` above.
+
+**Open.** A run E is in flight: D with the flow's default repair moves (buffers allowed
+again), to see whether the repair closes `mpl` now that `Hs`'s path no longer asks for the
+chains. If `mpl` still fails, the choices are the founder's: split the multiplier's second
+stage further (a change of RTL, latency to be checked against the gate), or accept about
+151 MHz with macros in this flow until the ASIC stage. The rule "an add or a product behind
+a macro's read goes in a module of its own" may apply to other stores' reads; not surveyed.
