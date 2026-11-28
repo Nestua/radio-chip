@@ -542,6 +542,9 @@ a macro's read goes in a module of its own" may apply to other stores' reads; no
 
 ## 2026-11-27 · probe · `rx_data` with macros closes 160 MHz: the products mapped by themselves
 
+See 2026-11-28 below: one of four placement seeds fails this run's constraints (−1.00 ns,
+the port path `end_stamp` → `rx_age`).
+
 "Closes" here is what it was in the entries above: the typical corner (1.2 V, 25 °C), one
 seed, the flow's default settings, no sign-off.
 
@@ -682,7 +685,7 @@ the synthesised area's changes, are unexplained.
 
 ## 2026-11-28 · probe · `rx_data` with macros over four placement seeds
 
-The run that closes 160 MHz (run I of the entry above) again with the flow's
+Run I of the entry above again with the flow's
 `GPL_RANDOM_SEED` at 1, 2, 3 and 4 and nothing else changed: the same RTL (the server's
 `src-pr98`, which is main at f0ad070 but for comments), config, macros and hand placement,
 typical corner, no sign-off. Started together with `tools/syn/probe_run.sh` at 8 threads
@@ -700,24 +703,35 @@ flow's own count, against about 90 for one alone.
 **What the runs say**
 - **Seed 1 is the default:** S1 is run I to the last digit printed (slack, worst paths,
   design area 3 056 077 µm², power estimate).
-- **Between flip-flops every seed passes,** by +0.25 to +0.35 ns; the worst group changes
-  with the seed (the soft values, |m|·q, the decoder's compare-select).
+- **No endpoint at a flip-flop fails in any seed** (the endpoint lists); the worst
+  register-to-register path in each run's list of worst paths is +0.25 to +0.35 ns, and its
+  group changes with the seed (the soft values, |m|·q, the decoder's compare-select).
 - **Seed 3 fails on one path that is not between flip-flops:** the input port `end_stamp` to
-  the output port `rx_age[5]`, through combinational logic only (the age is the count less
-  the stamp). The flow's constraint file gives every input 20 % of the period as external
-  delay and every output 20 %, so this path has 3.75 ns, not 6.25. Its logic is 3.4 ns in
-  S1 (+0.33 ns, also that run's worst path); in S3 the path is 4.7 ns with 50 cells of the
-  repair's buffering on it, and −1.00 ns already shows after global routing (−1.36). The
-  two ports' pins are where the flow put them; nothing constrains them to be near.
-- So the earlier entry's "+0.33 ns" was this port-to-port path under an assumed budget, not
-  a path of the data path itself. In the receiver `end_stamp` comes from `rx_handoff`'s
-  register in the same clock domain and `rx_age` goes to the MAC; the 20 % budgets are the
-  flow's defaults, not a requirement of ours.
+  the output port `rx_age[5]`, through combinational logic only
+  (`rx_age = adc_count − end_stamp`, `rx_data.sv`). The probe's constraint file (written by
+  `tools/syn/orfs_block.sh`) gives every input and every output 20 % of the period as
+  external delay, a placeholder chosen for the probe, not a requirement of the receiver; so
+  this path has 3.75 ns, not 6.25. The path is 3.37 ns in S1 (+0.33 ns, also that run's
+  worst path) and 4.68 ns in S3, where 50 lines of the path report name cells the flow
+  inserted (rebuffer, split, clone, wire); how many cells that is and which step put them
+  there was not counted. Only bit 5 of the sixteen fails. Why it is 1.3 ns slower than in S1
+  has not been looked at: the pins' positions in S1 and S3 were not compared (the config
+  constrains none). The estimate after global routing was already S3's worst by far
+  (−1.36 ns); that it is the same path was not checked.
+- So the earlier entry's "+0.33 ns" was this port-to-port path, whose budget is the probe's
+  assumption. By the two modules' headers `adc_count` and `end_stamp` are both registers of
+  `rx_handoff` on the same clock and `rx_age` is meant for the MAC; no top level joins them
+  yet and the MAC does not exist, so the real budget on the output side is unknown.
 - Design area 3.04 to 3.06 mm², power estimate 239 mW in all four, 19 to 21 nets over the
   fanout limit, 2 to 6 capacitance violations.
 
-**Open (the founder's).** What `rx_age`'s path should be held to: (a) leave it, and
-constrain the two ports to what their neighbours really give (a register on one side); (b)
-register `rx_age` in `rx_data` (a clock of latency on the age, to be restated in the
-schedule model and the gate); (c) nothing until the block above `rx_data` goes through the
-flow with it. Seeds were tried at one density and one corner only.
+**Open (the founder's).** What `rx_age`'s path should be held to:
+(a) keep the RTL and take the placeholder out of the probe: the real budget on the three
+input buses (`adc_count`, `end_stamp` behind `rx_handoff`'s registers), and pin positions
+for them; the output side stays a guess until there is a MAC;
+(b) register `rx_age` in `rx_data`. `rx_age_valid` is combinational from `rx_end` and the
+age changes every sample, so this either moves the age off `rx_end`'s cycle, against the G0
+choice of 2026-11-25, or computes it a cycle early: a change of the golden model's
+`rx_end_age`, not only of a latency;
+(c) nothing until the block above `rx_data` goes through the flow with it.
+Seeds were tried at one density and one corner only.
