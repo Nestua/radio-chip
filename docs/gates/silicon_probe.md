@@ -552,7 +552,8 @@ run on scratch trees on the build server (`/data/radio-chip/src-mul`, `src-sym`:
 logic as this entry's PR, with the new modules written inside `rx_channel.sv` and
 `rx_symbol.sv` and the product's widths fixed, not parameters). **I is the RTL of this
 entry's PR (branch commit 8f9cbb8; the server's copy was made from that tree and is called
-`src-pr98`, a name given before the PR had a number: #98 is another PR)**, with the source list of `tools/syn/ihp_sg13g2/rx_data_sram.mk`.
+`src-pr98`, a name given before the PR had a number: #98 is another PR; later commits of
+the PR change comments only)**, with the source list of `tools/syn/ihp_sg13g2/rx_data_sram.mk`.
 Each run's `config.mk`, reports, logs, final database and endpoint list are kept in
 `/data/radio-chip/asic-rep{E,F,G}-keep` and `asic-{I,G55}-keep`; H2's and G65's directories
 (`asic-H2`, `asic-G65`) are left as they stopped. G55, G65, H2 and I were started with
