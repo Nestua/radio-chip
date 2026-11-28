@@ -338,9 +338,9 @@ module rx_symbol
     logic [5:0]           r6_j;
     logic [MG-1:0]        r6_mag [6];
     logic [5:0]           r6_neg;
-    // |m|·q, each a module the synthesis tool maps by itself (lib/absmul_alone.sv): the six
-    // were the open flow's last endpoints short of 160 MHz inside the flattened design.
-    // |m| ≤ 2^(U−1): the negation does not overflow (G0).
+    // |m|·q, each a module the synthesis tool maps by itself (lib/absmul_alone.sv): one
+    // endpoint of these was the open flow's last short of 160 MHz inside the flattened design.
+    // |m| ≤ 2^(U−1) (G0), so MG bits hold the product.
     wire [MG-1:0]         r6_mag_w [6];
     for (genvar gi = 0; gi < 6; gi++) begin : g_absmul
         absmul_alone #(.MW(MW), .QW(SQ_BITS), .YW(MG)) u_am (

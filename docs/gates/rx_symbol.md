@@ -222,7 +222,7 @@ Through the open flow with the stores as SRAM macros, once `rx_channel`'s produc
 mapped by themselves, the one endpoint short of 160 MHz was this block's `r5_m` →
 `r6_mag` (−0.12 ns; `silicon_probe.md`, 2026-11-27, the second entry). Stage r6's six
 products are now instances of `hw/rtl/lib/absmul_alone.sv` (`y = |m| · q`, kept as a module
-through synthesis); the negation's bound (|m| ≤ 2^(U−1), G0) is unchanged and stated at the
+through synthesis); the bound on |m| (≤ 2^(U−1), G0) is unchanged and stated at the
 instances. Nothing else changed: no latency, no width. At branch commit 8f9cbb8:
 
 | Gate | Command | Result |
