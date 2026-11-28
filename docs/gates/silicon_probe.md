@@ -542,6 +542,9 @@ a macro's read goes in a module of its own" may apply to other stores' reads; no
 
 ## 2026-11-27 · probe · `rx_data` with macros closes 160 MHz: the products mapped by themselves
 
+See 2026-11-28 below: one of four placement seeds fails this run's constraints (−1.00 ns,
+the port path `end_stamp` → `rx_age`).
+
 "Closes" here is what it was in the entries above: the typical corner (1.2 V, 25 °C), one
 seed, the flow's default settings, no sign-off.
 
@@ -679,3 +682,56 @@ reverse order in `rx_symbol` fail it. 5 of 6, one equivalent.
 applied to the next groups (the decoder's compare-select, `rx_symbol`'s rounding) is not
 decided. The power estimate's drop at D and its changes since (245, 280, 239 mW), and
 the synthesised area's changes, are unexplained.
+
+## 2026-11-28 · probe · `rx_data` with macros over four placement seeds
+
+Run I of the entry above again with the flow's
+`GPL_RANDOM_SEED` at 1, 2, 3 and 4 and nothing else changed: the same RTL (the server's
+`src-pr98`, which is main at f0ad070 but for comments), config, macros and hand placement,
+typical corner, no sign-off. Started together with `tools/syn/probe_run.sh` at 8 threads
+each (`start S<n> I /data/radio-chip/src-pr98 GPL_RANDOM_SEED=<n>`); kept in
+`/data/radio-chip/asic-S{1,2,3,4}-keep`. Four at once took 173 to 201 minutes each by the
+flow's own count, against about 90 for one alone.
+
+| Seed | After placement | clock tree | global routing | Final worst slack | Failing endpoints | Worst register-to-register path |
+|---|---|---|---|---|---|---|
+| 1 | −0.22 | +0.01 | −0.16 | +0.33 ns | 0 | +0.34 ns, `u_sym.cur_down` → `soft_v` |
+| 2 | −0.29 | 0.00 | −0.07 | +0.35 ns | 0 | +0.35 ns, `u_sym.r5_m` → `r6_mag` |
+| 3 | −0.42 | −0.21 | −1.36 | **−1.00 ns** | 1 | +0.30 ns, `u_vit.bm_pp` → `path` |
+| 4 | −0.46 | +0.01 | −0.09 | +0.25 ns | 0 | +0.25 ns, `u_vit.bm_pp` → `path` |
+
+**What the runs say**
+- **Seed 1 is the default:** S1 is run I to the last digit printed (slack, worst paths,
+  design area 3 056 077 µm², power estimate).
+- **No endpoint at a flip-flop fails in any seed** (the endpoint lists); the worst
+  register-to-register path in each run's list of worst paths is +0.25 to +0.35 ns, and its
+  group changes with the seed (the soft values, |m|·q, the decoder's compare-select).
+- **Seed 3 fails on one path that is not between flip-flops:** the input port `end_stamp` to
+  the output port `rx_age[5]`, through combinational logic only
+  (`rx_age = adc_count − end_stamp`, `rx_data.sv`). The probe's constraint file (written by
+  `tools/syn/orfs_block.sh`) gives every input and every output 20 % of the period as
+  external delay, a placeholder chosen for the probe, not a requirement of the receiver; so
+  this path has 3.75 ns, not 6.25. The path is 3.37 ns in S1 (+0.33 ns, also that run's
+  worst path) and 4.68 ns in S3, where 50 lines of the path report name cells the flow
+  inserted (rebuffer, split, clone, wire); how many cells that is and which step put them
+  there was not counted. Only bit 5 of the sixteen fails. Why it is 1.3 ns slower than in S1
+  has not been looked at: the pins' positions in S1 and S3 were not compared (the config
+  constrains none). The estimate after global routing was already S3's worst by far
+  (−1.36 ns); that it is the same path was not checked.
+- So the earlier entry's "+0.33 ns" was this port-to-port path, whose budget is the probe's
+  assumption. By the two modules' headers `adc_count` and `end_stamp` are both registers of
+  `rx_handoff` on the same clock and `rx_age` is meant for the MAC; no top level joins them
+  yet and the MAC does not exist, so the real budget on the output side is unknown.
+- Design area 3.04 to 3.06 mm², power estimate 239 mW in all four, 19 to 21 nets over the
+  fanout limit, 2 to 6 capacitance violations.
+
+**Open (the founder's).** What `rx_age`'s path should be held to:
+(a) keep the RTL and take the placeholder out of the probe: the real budget on the three
+input buses (`adc_count`, `end_stamp` behind `rx_handoff`'s registers), and pin positions
+for them; the output side stays a guess until there is a MAC;
+(b) register `rx_age` in `rx_data`. `rx_age_valid` is combinational from `rx_end` and the
+age changes every sample, so this either moves the age off `rx_end`'s cycle, against the G0
+choice of 2026-11-25, or computes it a cycle early: a change of the golden model's
+`rx_end_age`, not only of a latency;
+(c) nothing until the block above `rx_data` goes through the flow with it.
+Seeds were tried at one density and one corner only.
