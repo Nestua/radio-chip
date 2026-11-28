@@ -679,3 +679,45 @@ reverse order in `rx_symbol` fail it. 5 of 6, one equivalent.
 applied to the next groups (the decoder's compare-select, `rx_symbol`'s rounding) is not
 decided. The power estimate's drop at D and its changes since (245, 280, 239 mW), and
 the synthesised area's changes, are unexplained.
+
+## 2026-11-28 · probe · `rx_data` with macros over four placement seeds
+
+The run that closes 160 MHz (run I of the entry above) again with the flow's
+`GPL_RANDOM_SEED` at 1, 2, 3 and 4 and nothing else changed: the same RTL (the server's
+`src-pr98`, which is main at f0ad070 but for comments), config, macros and hand placement,
+typical corner, no sign-off. Started together with `tools/syn/probe_run.sh` at 8 threads
+each (`start S<n> I /data/radio-chip/src-pr98 GPL_RANDOM_SEED=<n>`); kept in
+`/data/radio-chip/asic-S{1,2,3,4}-keep`. Four at once took 173 to 201 minutes each by the
+flow's own count, against about 90 for one alone.
+
+| Seed | After placement | clock tree | global routing | Final worst slack | Failing endpoints | Worst register-to-register path |
+|---|---|---|---|---|---|---|
+| 1 | −0.22 | +0.01 | −0.16 | +0.33 ns | 0 | +0.34 ns, `u_sym.cur_down` → `soft_v` |
+| 2 | −0.29 | 0.00 | −0.07 | +0.35 ns | 0 | +0.35 ns, `u_sym.r5_m` → `r6_mag` |
+| 3 | −0.42 | −0.21 | −1.36 | **−1.00 ns** | 1 | +0.30 ns, `u_vit.bm_pp` → `path` |
+| 4 | −0.46 | +0.01 | −0.09 | +0.25 ns | 0 | +0.25 ns, `u_vit.bm_pp` → `path` |
+
+**What the runs say**
+- **Seed 1 is the default:** S1 is run I to the last digit printed (slack, worst paths,
+  design area 3 056 077 µm², power estimate).
+- **Between flip-flops every seed passes,** by +0.25 to +0.35 ns; the worst group changes
+  with the seed (the soft values, |m|·q, the decoder's compare-select).
+- **Seed 3 fails on one path that is not between flip-flops:** the input port `end_stamp` to
+  the output port `rx_age[5]`, through combinational logic only (the age is the count less
+  the stamp). The flow's constraint file gives every input 20 % of the period as external
+  delay and every output 20 %, so this path has 3.75 ns, not 6.25. Its logic is 3.4 ns in
+  S1 (+0.33 ns, also that run's worst path); in S3 the path is 4.7 ns with 50 cells of the
+  repair's buffering on it, and −1.00 ns already shows after global routing (−1.36). The
+  two ports' pins are where the flow put them; nothing constrains them to be near.
+- So the earlier entry's "+0.33 ns" was this port-to-port path under an assumed budget, not
+  a path of the data path itself. In the receiver `end_stamp` comes from `rx_handoff`'s
+  register in the same clock domain and `rx_age` goes to the MAC; the 20 % budgets are the
+  flow's defaults, not a requirement of ours.
+- Design area 3.04 to 3.06 mm², power estimate 239 mW in all four, 19 to 21 nets over the
+  fanout limit, 2 to 6 capacitance violations.
+
+**Open (the founder's).** What `rx_age`'s path should be held to: (a) leave it, and
+constrain the two ports to what their neighbours really give (a register on one side); (b)
+register `rx_age` in `rx_data` (a clock of latency on the age, to be restated in the
+schedule model and the gate); (c) nothing until the block above `rx_data` goes through the
+flow with it. Seeds were tried at one density and one corner only.
