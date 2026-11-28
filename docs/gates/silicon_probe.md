@@ -811,3 +811,74 @@ density, four seeds; the subtraction left synthesis as a borrow chain (3.4 ns fo
 and was not put in a module of its own as the adds of 2026-11-27 were, since it fits.
 **Open:** the same question returns with the block above `rx_data` (`rx_handoff` beside
 it, then a MAC), where the real wire and the real output budget exist.
+
+## 2026-11-28 · probe · the data path's six blocks, each alone
+
+`BACKLOG.md` asked for `fft64`, `rx_channel`, `rx_symbol`, `rx_track`, `rx_deint` and
+`rx_signal` through the open flow by themselves. No change of RTL, model or vectors: the
+source is main at e87bec3 (`git archive HEAD hw/rtl`, on the server `src-e87bec3`).
+
+**What was run.** Each block as its own top level, the same image (1671deadac53), platform,
+corner (typical), clock (6.25 ns) and settings as `rx_data` (40 % utilisation at the
+floorplan, density 0.60, the stores as the PDK's SRAM macros through
+`tools/syn/ihp_sg13g2/ram_1w1r.sv`, the macros placed by the flow, not by hand). Set up and
+started by `tools/syn/ihp_sg13g2/blocks.sh /data/radio-chip/src-e87bec3` (new; runs
+`b_<block>` of `probe_run.sh`), six at once with 5 threads each; 268 to 3170 s a run by the
+flow's count, about 55 minutes in all. Kept in `/data/radio-chip/asic-b_<block>-keep`.
+`rx_deint` did not start at 40 %: its 703 µm macro with the placer's 40 µm halo does not
+fit a 703 µm core, so its die was given (860 × 720 µm, in the script). Every port has the
+placeholder of 20 % of the period as external delay a side, so only the paths between
+flip-flops (and macros) say something about the block; the slack by kind of path is from
+static timing on each final database and its parasitics (server,
+`/data/radio-chip/tools/blk_paths.sh`).
+
+| Block | Design area, routed | of it macros | Flip-flops | Worst slack, flip-flop to flip-flop | its path | Input to flip-flop | Flip-flop to output | Power (flow's estimate) |
+|---|---|---|---|---|---|---|---|---|
+| `fft64` | 0.472 mm² | none | 2783 | **+0.45 ns** | stage 3's twiddle product (`bi` → `pim`) | +3.66 | +2.56 | 42 mW |
+| `rx_channel` | 0.383 mm² | 0.118 (3) | 1204 | **+0.78 ns** | the square `s2_im` → `s3_pi` | +1.81 | +0.89 (`Hs`'s read to `hs_rdata_re`) | 22 mW |
+| `rx_symbol` | 0.700 mm² | 0.105 (2) | 1569 | **+0.48 ns** | a \|m\|·q product (`r5_m` → `r6_mag`) | +2.41 | +2.35 | 63 mW |
+| `rx_track` | 0.242 mm² | none | 1294 | **+0.46 ns** | into the multiplier's operand (`pm` → `mb`) | +2.32 | +3.00 | 39 mW |
+| `rx_deint` | 0.206 mm² | 0.184 (4) | 87 | **+2.12 ns** | bank 1's read → `v_b` | +3.36 | +3.74 | 6 mW |
+| `rx_signal` | 0.042 mm² | none | 225 | **+1.99 ns** | the symbol count (`z` → `sig_symbols`) | +3.24 | +4.43 | 4 mW |
+
+No block has a path from an input to an output without a flip-flop, and none has a failing
+setup endpoint. The estimates before routing were, as for `rx_data`, about 0.5 ns below
+the final figure where they were near zero (`fft64` −0.09 and `rx_track` −0.03 after global
+routing).
+
+**What the runs say**
+- **Each of the six closes 160 MHz alone**, the closest by 0.45 ns (`fft64`, `rx_track`,
+  `rx_symbol`), where `rx_data` as a whole closes by 0.24 to 0.32 ns on the decoder's
+  compare-select (the entry above). The worst path of each block is one of the products
+  the earlier entries worked on, or a macro's read.
+- **Area by block, which `rx_data`'s flattened netlist does not give:** `rx_symbol` is the
+  largest (0.70 mm², 0.46 of it combinational cells: the six products and the rotation),
+  then `fft64` (0.47 mm²: 0.29 combinational, 0.14 its 2783 flip-flops, the delay lines
+  among them), `rx_channel` 0.38, `rx_track` 0.24, `rx_deint` 0.21 (nine tenths its four
+  macros), `rx_signal` 0.04. The six sum to 2.05 mm²; with the decoder's 0.96 mm² of
+  2026-11-23 (an older tree, alone) 3.01 mm², against `rx_data`'s 3.05 mm², which also
+  holds the CORDIC, the divider, the arbiters and `rx_octets`. The sums agree to within
+  what blocks placed alone at 40 % can show.
+- **One hold violation, in `rx_channel`:** −0.016 ns at `Hs`'s write address
+  (`s1_k[0]` through one multiplexer to the macro's `A_ADDR[0]`; the macro asks 0.45 ns of
+  hold, the flow repairs hold to a margin of zero before detailed routing and found none
+  then). The same run with `HOLD_SLACK_MARGIN = 0.1` (`b_rx_channel_h`, three hold buffers
+  inserted after the clock tree) has no hold or setup violation, +0.84 ns, the same area.
+  `rx_data`'s four runs P1 to P4 report no hold violation; they ran with the zero margin
+  too, so that is by placement, not by margin.
+- **`rx_channel`'s `Hs` read has +0.89 ns to the block's pins** with 1.25 ns assumed
+  outside: the macro's read (3.2 ns) leaves little for whatever the reader does in the
+  same cycle. Inside `rx_data` the reader is `rx_symbol`'s register (2026-11-25), which is
+  why it closes there; the figure is the reason that register exists, seen again.
+- Other violations, none of timing: fanout 4 (`fft64`), 2 (`rx_symbol`); slew 2
+  (`rx_channel`), 3 (`rx_symbol`), 19 (`rx_deint`); capacitance 1, 3 and 2 in the same
+  three. `rx_track` and `rx_signal` have none.
+- The power figures are the flow's default-activity estimates and rank only (the decoder
+  alone was 241 mW by the same estimate, `rx_data` whole 239 mW).
+
+**Not shown.** One seed, one corner, no sign-off; the port figures are against a
+placeholder, not a neighbour; the macros are where the flow put them, not where
+`rx_data_macros.tcl` puts them, and `rx_deint`'s die is a choice. `cordic_iter`,
+`div_serial`, the two arbiters and `rx_octets` were not run alone (not asked; about 0.02 mm² of named cells,
+mostly flip-flops, between them in `rx_data` P1). **Open:** a hold margin above zero for the runs
+with macros (it cost nothing here); the founder's call with the next run of `rx_data`.
