@@ -735,3 +735,79 @@ choice of 2026-11-25, or computes it a cycle early: a change of the golden model
 `rx_end_age`, not only of a latency;
 (c) nothing until the block above `rx_data` goes through the flow with it.
 Seeds were tried at one density and one corner only.
+
+## 2026-11-28 · probe · `rx_age`'s pins in one group, its inputs at their own delay
+
+The founder chose (a) of the entry above (2026-11-28): the RTL stays, the probe's set-up
+changes. No change of RTL, model or vectors; the source is the same tree as for the seeds
+(`src-pr98`; `git diff f0ad070 HEAD -- hw/rtl` is empty).
+
+**What seed 3's failure was.** Read from the kept databases (pin boxes of `6_final.odb`):
+in S1 the 48 pins of `adc_count`, `end_stamp` and `rx_age` are all on the left edge, in
+bit order within 560 µm; in S3 the pin placer split each bus, eleven bits on the left edge
+and five on the top edge (x ≈ 930 to 960 µm, y = 3100), bit 5 among the five. The path to
+`rx_age[5]` there holds 49 `rebuffer` cells in series, 0.06 to 0.12 ns each, about 3.5 ns
+of its 4.68: the borrow from the low bits crossing to the top edge. So the failure was
+where the probe let the pins fall, not the subtraction.
+
+**What changed in the probe** (commit 93a244e, `tools/syn/`):
+- `ihp_sg13g2/rx_data_io.tcl` (the flow's `IO_CONSTRAINTS`): the three buses as one ordered
+  group on the left edge, a bit of each side by side. Every other pin is left to the placer.
+- `ihp_sg13g2/rx_data_io.sdc`: 0.5 ns of external delay on `adc_count` and `end_stamp` in
+  place of the placeholder's 1.25. Both are registers of `rx_handoff` with no logic behind
+  them; the flip-flops on S1's worst paths have 0.17 to 0.43 ns from clock to output (39
+  of them, median 0.25), and the rest of the 0.5 is an allowance for the wire between the
+  blocks, chosen, not measured: `rx_handoff` and `rx_data` have not been placed together.
+  **Two buses, not the three the entry above says:** every other input of `rx_data` from
+  `rx_handoff` has logic behind it (`rx_handoff.sv`: `out_valid`, `out_re`, …) and stays on
+  the placeholder, as do all outputs, `rx_age` included: there is no MAC.
+- `orfs_block.sh` appends a block's `io.sdc` to the constraints it writes.
+
+**The budget by itself, on the old databases** (static timing on S1 to S4's final
+databases and parasitics with the 0.5 ns set on the two buses, nothing rerun; server,
+`/data/radio-chip/mp/tri.tcl`):
+
+| Seed | `rx_age` worst | Run's worst slack |
+|---|---|---|
+| 1 | +1.08 ns | +0.34 ns |
+| 2 | +1.20 ns | +0.35 ns |
+| 3 | **−0.25 ns** (`rx_age[5]`) | −0.25 ns |
+| 4 | +1.19 ns | +0.25 ns |
+
+The budget alone does not close seed 3; the pins are needed.
+
+**Four seeds again with both** (runs P1 to P4: the S runs' set-up plus
+`IO_CONSTRAINTS` and the appended delay, `probe_run.sh start P<n> ioT
+/data/radio-chip/src-pr98 GPL_RANDOM_SEED=<n>` from a template `ioT` made of S1's set-up;
+four at once, 8 threads each, 10 953 to 11 844 s each by the flow's count; typical corner, no
+sign-off; kept in `/data/radio-chip/asic-P{1,2,3,4}-keep`):
+
+| Seed | After placement | clock tree | global routing | Final worst slack | Failing endpoints | Worst path | `rx_age` worst |
+|---|---|---|---|---|---|---|---|
+| 1 | −0.57 | +0.02 | −0.08 | +0.32 ns | 0 | `u_vit.bm_pp` → `path` | +1.12 ns |
+| 2 | −0.34 | 0.00 | −0.23 | +0.24 ns | 0 | `u_vit.bm_pm` → `path` | +1.14 ns |
+| 3 | −0.45 | 0.00 | −0.12 | +0.28 ns | 0 | `u_vit.bm_pm` → `path` | +0.96 ns |
+| 4 | −0.27 | +0.01 | −0.11 | +0.31 ns | 0 | `u_vit.bm_pm` → `metric` | +1.14 ns |
+
+**What the runs say**
+- **All four seeds close 160 MHz with no failing endpoint**, +0.24 to +0.32 ns, and the
+  worst path of each is now between flip-flops (the decoder's compare-select in all four).
+- **The pins went where asked:** 48 pins on the left edge in one run of 39.5 µm in each
+  run (`3_2_place_iop.tcl`; in P3 y = 1762.7 to 1802.2 µm).
+- **`rx_age` has +0.96 to +1.14 ns** against 0.5 ns in and the placeholder's 1.25 ns out;
+  its path is 3.36 to 3.54 ns from port to port, the worst bit is bit 15 (the whole borrow
+  chain) and no cell of the path is one the flow's repair inserted (the path reports,
+  `asic-P3-keep/age_P<n>.out`). Of the 1.25 ns assumed for the MAC about 1 ns more is
+  free; that is the figure a MAC's use of `rx_age` has to fit, at this corner.
+- **The other placeholder ports** are no closer than +0.65 ns (`rx_end` and `rx_end_info`
+  in P4; `in_ready`'s flip-flop from the inputs +1.15 ns or more).
+- The pin group moved the rest of the placement: the per-seed slacks are not S1 to S4's
+  (seed 2 was +0.35, is +0.24), all inside the spread the seeds showed before.
+- Design area 3.05 to 3.06 mm², power estimate 239 mW, 15 to 27 nets over the fanout
+  limit, 2 to 7 capacitance violations, one slew violation (P2).
+
+**Not shown.** The 0.5 ns is an allowance, the output side a guess; one corner, one
+density, four seeds; the subtraction left synthesis as a borrow chain (3.4 ns for 16 bits)
+and was not put in a module of its own as the adds of 2026-11-27 were, since it fits.
+**Open:** the same question returns with the block above `rx_data` (`rx_handoff` beside
+it, then a MAC), where the real wire and the real output budget exist.

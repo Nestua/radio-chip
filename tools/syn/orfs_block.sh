@@ -13,6 +13,9 @@
 # A block too small for the platform's power grid needs DIE_AREA/CORE_AREA in its config.mk
 # (the scrambler: DIE_AREA = 0 0 160 160, CORE_AREA = 30 30 130 130) instead of
 # CORE_UTILIZATION.
+# Every input and output gets 20 % of the period as external delay: a placeholder, not a
+# requirement of any block. A file <workdir>/<top>/io.sdc, if there is one, is appended to
+# the constraints and so replaces it on the ports it names (rx_data: ihp_sg13g2/rx_data_io.sdc).
 set -euo pipefail
 repo=$(realpath "$1"); work=$(realpath "$2"); top=$3; period=$4; shift 4
 mkdir -p "$work/$top"
@@ -40,6 +43,8 @@ set non_clock_inputs [lsearch -inline -all -not -exact [all_inputs] [get_ports c
 set_input_delay  [expr \$clk_period * 0.2] -clock clk \$non_clock_inputs
 set_output_delay [expr \$clk_period * 0.2] -clock clk [all_outputs]
 EOC
+# A block's own external delays replace the placeholder on the ports they name.
+if [ -f "$work/$top/io.sdc" ]; then cat "$work/$top/io.sdc" >> "$work/$top/constraint.sdc"; fi
 docker run --rm -v "$repo":/repo:ro -v "$work":/work openroad/orfs:latest bash -lc \
   "source /OpenROAD-flow-scripts/env.sh >/dev/null 2>&1; cd /OpenROAD-flow-scripts/flow; \
    make DESIGN_CONFIG=/work/$top/config.mk WORK_HOME=/work/$top/run" > "$work/$top/flow.log" 2>&1

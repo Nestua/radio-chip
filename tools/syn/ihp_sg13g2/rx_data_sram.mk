@@ -12,6 +12,10 @@
 # Runs B to D of 2026-11-27 add a second (the timing repair may not insert buffers):
 #   export SETUP_MOVE_SEQUENCE = unbuffer,sizeup,swap,clone,split
 # Runs E to I of 2026-11-27 are without that second line again (the flow's default repair).
+# The runs of 2026-11-28 with rx_age's pins and budget add, with rx_data_io.tcl copied to
+# W/rx_data/io.tcl and rx_data_io.sdc to W/rx_data/io.sdc (orfs_block.sh appends the latter
+# to constraint.sdc; a run started from a template with probe_run.sh needs it appended by hand):
+#   export IO_CONSTRAINTS = /work/rx_data/io.tcl
 export DESIGN_NAME = rx_data
 export DESIGN_NICKNAME = rx_data
 export PLATFORM = ihp-sg13g2
