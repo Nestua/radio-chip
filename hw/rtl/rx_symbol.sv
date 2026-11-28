@@ -338,6 +338,15 @@ module rx_symbol
     logic [5:0]           r6_j;
     logic [MG-1:0]        r6_mag [6];
     logic [5:0]           r6_neg;
+    // |m|·q, each a module the synthesis tool maps by itself (lib/absmul_alone.sv): one
+    // endpoint of these was the open flow's last short of 160 MHz inside the flattened design.
+    // |m| ≤ 2^(U−1) (G0), so MG bits hold the product.
+    wire [MG-1:0]         r6_mag_w [6];
+    for (genvar gi = 0; gi < 6; gi++) begin : g_absmul
+        absmul_alone #(.MW(MW), .QW(SQ_BITS), .YW(MG)) u_am (
+            .m(r5_m[gi]), .q(cur_q), .y(r6_mag_w[gi])
+        );
+    end
 
     // The issue's phase: −c·θ for a pilot, −(φ + c·θ) for a data subcarrier, + half a step.
     wire signed [5:0] r_c   = r_pil ? pilot_c(r_cnt[1:0]) : data_c(r_cnt);
@@ -439,9 +448,7 @@ module rx_symbol
         r5_j <= r4_j;
         // r6
         for (int i = 0; i < 6; i++) begin
-            logic signed [MW-1:0] mm;
-            mm = r5_m[i][MW-1] ? -r5_m[i] : r5_m[i];     // |m| ≤ 2^(U−1): no overflow (G0)
-            r6_mag[i] <= MG'(unsigned'(mm)) * MG'(cur_q);
+            r6_mag[i] <= r6_mag_w[i];
             r6_neg[i] <= r5_m[i][MW-1];
         end
         r6_j <= r5_j;
