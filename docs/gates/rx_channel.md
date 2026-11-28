@@ -238,7 +238,7 @@ After the adds above, the open flow's last failing endpoints in this block were 
 flattened design, 3.0 ns with the product in a module of its own (`silicon_probe.md`,
 2026-11-27, the second entry). The two products (`mph`, `mpl`) are now instances of
 `hw/rtl/lib/mul_alone.sv` (`y = a · b`, unsigned, exact, kept as a module through
-synthesis). Nothing else changed: no latency, no width. At f34749a:
+synthesis). Nothing else changed: no latency, no width. At branch commit 8f9cbb8:
 
 | Gate | Command | Result |
 |---|---|---|

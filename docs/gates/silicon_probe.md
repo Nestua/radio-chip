@@ -539,3 +539,129 @@ chains. If `mpl` still fails, the choices are the founder's: split the multiplie
 stage further (a change of RTL, latency to be checked against the gate), or accept about
 151 MHz with macros in this flow until the ASIC stage. The rule "an add or a product behind
 a macro's read goes in a module of its own" may apply to other stores' reads; not surveyed.
+
+## 2026-11-27 · probe · `rx_data` with macros closes 160 MHz: the products mapped by themselves
+
+Runs E to I after the entry above, same flow, image, platform, corner, clock (6.25 ns),
+macros and hand placement; from E on with the flow's default repair moves (the line
+`SETUP_MOVE_SEQUENCE` of runs B to D removed). E is the RTL of main at f72fbb8. F and G were
+run on scratch trees on the build server (`/data/radio-chip/src-mul`, `src-sym`: the same
+logic as this entry's PR, with the new modules written inside `rx_channel.sv` and
+`rx_symbol.sv` and the product's widths fixed, not parameters). **I is the RTL of this
+entry's PR (branch commit 8f9cbb8; the server's copy `src-pr98` was made from that tree)**, with the source list of `tools/syn/ihp_sg13g2/rx_data_sram.mk`.
+Each run's `config.mk`, reports, logs, final database and endpoint list are kept in
+`/data/radio-chip/asic-rep{E,F,G}-keep` and `asic-{I,G55}-keep`; H2's and G65's directories
+(`asic-H2`, `asic-G65`) are left as they stopped. G55, G65, H2 and I were started with
+`tools/syn/probe_run.sh` at 8 threads each, the others by hand.
+
+| Run | Change | Worst slack at 6.25 ns | TNS | Failing endpoints | Design area, routed |
+|---|---|---|---|---|---|
+| D (entry above) | adds alone, repair without buffer moves | −0.37 ns | −1.2 ns | 5 | 3.00 mm² |
+| E | D with the default repair | −0.34 ns | −1.1 ns | 4 | 3.01 mm² |
+| F | E and `rx_channel`'s two 37 × 8 products each in a module | −0.12 ns | −0.12 ns | 1 | 3.01 mm² |
+| G | F and `rx_symbol`'s six \|m\|·q products each in a module | **+0.33 ns** | 0 | 0 | 3.06 mm² |
+| **I** | G's logic as committed (8f9cbb8) | **+0.33 ns** | 0 | 0 | 3.06 mm² |
+| G55 | G with `PLACE_DENSITY = 0.55` | +0.31 ns | 0 | 0 | 3.05 mm² |
+| stores as flip-flops (2026-11-25) | | +0.16 ns | 0 | 0 | 3.74 mm² |
+
+Flip-flops: 14 794 in every run.
+
+**What the runs say**
+- **The default repair does not close `mpl` (E).** With buffers allowed again the four
+  failing endpoints are all `rx_channel`'s `mpl`, as in D.
+- **The product has the add's disease (F).** Static timing after synthesis, before placement
+  (`/data/radio-chip/mp/s2.tcl`, `s2-base.out`, `s2-mul.out`): `mqb` → `mpl` is 8.13 ns deep
+  in the flattened design (slack −2.00 ns) and 2.98 ns with each 37 × 8 product in a module
+  of its own (slack +3.14 ns). Routed, no `rx_channel` endpoint fails; the one that does is
+  `rx_symbol`'s `r5_m` → `r6_mag[3][7]`, the |m|·q product, −0.12 ns.
+- **With the six |m|·q products in modules as well, nothing fails (G, I).** G's worst paths:
+  `end_stamp` → `rx_age` +0.33 ns, `u_sym.cur_down` → `soft_v` +0.34, the Viterbi decoder's
+  `metric` → `ma` +0.35 and `bm_pm` → `path` +0.38, `r5_m` → `r6_mag` +0.39. So the margin is
+  no longer one path's: five groups sit within 0.1 ns of each other. I, on
+  the committed RTL and at 8 threads, is G to the last digit printed: the same slack, worst
+  paths, design area (3 056 077 µm²), synthesised area and power estimate.
+- **Synthesised area** (µm², yosys): 3 767 845 with nothing wrapped, 3 813 044 with the adds
+  (E), 3 823 782 with `rx_channel`'s products (F), 3 760 057 with all of them (G). Why the
+  last step makes it smaller has not been looked at.
+- **Placement density (G55, G65).** At 0.65 the estimates before routing were worse at every
+  stage (−0.78, −0.14, −0.46 ns after placement, clock tree and global routing, against G's
+  −0.22, +0.01, −0.16) and the run was stopped there. At 0.55 they were G's (−0.35, 0.00,
+  −0.15) and the run ends at +0.31 ns with other paths on top: `rx_track`'s `err` → `mb`
+  (+0.31) and `err` → `y0`, the decoder's `bm_pp` → `path`, the CORDIC's `state` → `x`.
+  The repair works until nothing fails and no further, so about +0.3 ns over many groups
+  may be where it stops rather than what the design has; not looked at.
+- **Power:** the flow's estimate is 245 mW (E), 280 mW (F), 239 mW (G); not comparable
+  between runs without real activity, as before.
+- One corner, default settings, no sign-off, as before. After G: 20 nets over the fanout
+  limit, 2 capacitance violations, no slew, setup or hold violation.
+
+**The common cause, as far as it was looked for.** The flow maps with ABC through
+`abc_speed.script` (`&st; &dch; &nf`, then five rounds of `&st; &syn2; &if -g -K 6;
+&synch2; &nf`, then `buffer; upsize; dnsize`). No command in it takes the clock target (run
+C above), so `&nf` maps for the best depth it can find for the module's longest path and
+recovers area on every shorter path. A small test (`/data/radio-chip/abct`: `src/t.sv`,
+`run.sh`, the script variants in `scripts/`, one synthesis each, static timing before
+placement) shows it without any macro:
+
+| Module | ABC script | The 18-bit add, flip-flop to flip-flop |
+|---|---|---|
+| the add alone | the flow's | 9 cells |
+| the add beside a 37 × 8 product | the flow's | 25 cells, 2.52 ns (the product: 29 cells, 3.15 ns) |
+| the same | only the first `&nf`, no rounds | 18 cells, 1.85 ns |
+| the same | the rounds without `&syn2` and `&synch2` | 18 cells, 1.91 ns |
+| the same | `&nf -F 1` | 24 cells, 2.41 ns |
+| the same | the flow's, with `SWAP_ARITH_OPERATORS = 1` | 11 cells, 1.24 ns |
+
+So an operator is mapped as slow as the deepest path of the module it is flattened into
+allows, whether or not that path shares anything with it; the restructuring rounds and the
+area recovery each add to it. Behind a macro's read the cost shows, because the read's
+3.07 ns are outside what ABC sees. (`&nf -F 0` ends ABC with status 86 in this image.)
+
+**The flow's own answer does not work here (H, H2).** `SWAP_ARITH_OPERATORS = 1` with
+`OPENROAD_HIERARCHICAL = 1` keeps every operator as a module in several architectures and
+lets the repair swap them (the flow's documentation calls it in development). No change of
+RTL (main at 91c8601). H stopped at macro placement: the synthesised area fell to
+2.94 mm² (from 3.77), the core sized by utilisation shrank, and the hand placement's
+coordinates fell outside it (`MPL-0034`). H2, with the die and core of the earlier runs
+fixed (`DIE_AREA = 0 0 3122.54 3122.54`, `CORE_AREA = 17.5 17.5 3105.04 3105.04`), was
+stopped after the clock tree: −7.97 ns after placement, −4.92 ns after the clock tree, 2000
+or more failing endpoints (the list is cut there), the worst `fft64`'s `pre` → `fr` at 11.2 ns of logic, then the decoder's
+`path` (1448 or more endpoints) — paths that pass by themselves in every other run. The repair's
+log has `ODB-0453` (a module cannot be swapped: 68 ports against 54). Not pursued; the
+smaller synthesised area is unverified.
+
+**Reading a run early.** The worst slack the flow reports after placement, the clock tree
+and global routing, against the final one (ns):
+
+| Run | placement | clock tree | global routing | final |
+|---|---|---|---|---|
+| A | −1.91 | −1.19 | −1.98 | −1.55 |
+| B | −1.91 | −1.61 | −1.76 | −0.83 |
+| D | −1.06 | −0.84 | −1.05 | −0.37 |
+| E | −1.06 | −0.72 | −0.97 | −0.34 |
+| F | −0.36 | −0.13 | −0.63 | −0.12 |
+| G | −0.22 | +0.01 | −0.16 | +0.33 |
+
+The estimate after global routing is 0.4 to 0.9 ns below the final slack, and the three keep
+the runs' order except for A (no repair after global routing). They rank variants; they decide nothing. A run took 88
+minutes at the server's default thread count (F: synthesis 6, floorplan and placement 18,
+clock tree 3, global routing 15, detailed routing 35, the final report 11).
+
+**The change of RTL.** `hw/rtl/lib/mul_alone.sv` (`y = a · b`, unsigned, exact) and
+`hw/rtl/lib/absmul_alone.sv` (`y = |m| · q`), both with yosys's `keep_hierarchy`, as
+`add_alone` is; `rx_channel` uses the first for the two byte products of its multiplier's
+second stage, `rx_symbol` the second for the six of its stage r6. No change of function or
+latency. Gates at branch commit 8f9cbb8: `make -C hw rx_channel` (338 packets × 3 passes, 0 mismatches,
+PASS), `make -C hw rx_symbol` (127 packets × 2 passes, 0 mismatches), `make -C hw rx_data`
+(58 runs, 590 038 cycles, 0 mismatches), `make -C hw lint` clean. Mutants: in `mul_alone`,
+`b ^ 1` fails `rx_channel`, and `a` cast one bit narrower is equivalent (a is 37 bits, the
+product is still taken in 45); the two instances' bytes swapped in `rx_channel` fail it; in
+`absmul_alone`, `~m` for `−m` and `q >> 1` each fail `rx_symbol`; the six instances in
+reverse order in `rx_symbol` fail it. 5 of 6, one equivalent.
+
+**Open.** The margin is +0.33 ns at one corner with one seed, five groups of paths within
+0.1 ns of each other; a denser placement (0.65) was 0.3 ns worse before routing. Whether the rule
+("an operator that must be fast goes in a module of its own in this flow") should be
+applied to the next groups (the decoder's compare-select, `rx_symbol`'s rounding) is not
+decided. The power estimate's drop since D and the synthesised area's changes are
+unexplained.
